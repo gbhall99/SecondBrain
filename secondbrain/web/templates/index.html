@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    h1 { margin-bottom: .25rem; }
+    .sub { color: #888; margin-top: 0; }
+    .status { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1rem 0; }
+    .pill { padding: .35rem .7rem; border-radius: 999px; background: #8882;
+            font-size: .85rem; }
+    .rec-on { background: #d33; color: #fff; }
+    .rec-off { background: #999; color: #fff; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; }
+    input[type=text] { flex: 1; padding: .6rem; font-size: 1rem;
+                       border: 1px solid #8884; border-radius: 8px; }
+    button { padding: .6rem 1rem; font-size: 1rem; border-radius: 8px;
+             border: 1px solid #8884; cursor: pointer; background: #8882; }
+    .hit { border-bottom: 1px solid #8883; padding: .6rem 0; }
+    .hit .meta { color: #888; font-size: .8rem; }
+    mark, .hit b { background: #fd05; }
+    .controls { margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>SecondBrain</h1>
+  <p class="sub">Your local, private transcript log.</p>
+
+  <div class="status" id="status">
+    <span class="pill {{ 'rec-on' if status.recording else 'rec-off' }}">
+      {{ '● Recording' if status.recording else '⏸ Paused' }}
+    </span>
+    <span class="pill">{{ status.segments_today }} segments today</span>
+    <span class="pill">{{ status.segments_total }} total</span>
+    <span class="pill">{{ status.disk_free_gb }} GB free</span>
+    <span class="pill">retention: {{ status.retention_hours }}h</span>
+  </div>
+
+  <div class="controls">
+    <button onclick="toggle()" id="toggleBtn">
+      {{ 'Pause recording' if status.recording else 'Resume recording' }}
+    </button>
+  </div>
+
+  <form onsubmit="doSearch(event)">
+    <input type="text" id="q" placeholder="Search what was said…" autofocus />
+    <button type="submit">Search</button>
+  </form>
+
+  <div id="results"></div>
+
+  <script>
+    async function toggle() {
+      const recording = document.querySelector('.rec-on');
+      const ep = recording ? '/api/pause' : '/api/resume';
+      await fetch(ep, { method: 'POST' });
+      location.reload();
+    }
+    async function doSearch(e) {
+      e.preventDefault();
+      const q = document.getElementById('q').value.trim();
+      if (!q) return;
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const data = await r.json();
+      const box = document.getElementById('results');
+      if (!data.results.length) { box.innerHTML = '<p>No matches.</p>'; return; }
+      box.innerHTML = data.results.map(h => `
+        <div class="hit">
+          <div>${h.snippet || escapeHtml(h.text)}</div>
+          <div class="meta">${h.start_at || ''} · file #${h.audio_file_id} · ${h.start_offset_s.toFixed(1)}s</div>
+        </div>`).join('');
+    }
+    function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+  </script>
+</body>
+</html>

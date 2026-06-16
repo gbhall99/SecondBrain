@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "secondbrain"
+version = "0.1.0"
+description = "An always-on, fully-local personal second brain. Phase 1: ambient capture + on-device transcription + searchable transcript log."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "gbhall99" }]
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "typer>=0.12",
+    "alembic>=1.13",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+# Heavy / platform-specific deps live behind extras so the core logic stays
+# installable and testable on Linux/CI without CoreAudio, MLX, or PortAudio.
+[project.optional-dependencies]
+audio = [
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+]
+ml = [
+    "silero-vad>=5.1",
+    "mlx-whisper>=0.4; platform_system == 'Darwin'",
+    "parakeet-mlx>=0.2; platform_system == 'Darwin'",
+    "sqlite-vec>=0.1.6",
+]
+mac = [
+    "rumps>=0.4.0; platform_system == 'Darwin'",
+]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+sb = "secondbrain.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["secondbrain"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]  # typer/fastapi use function calls in defaults by design
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
