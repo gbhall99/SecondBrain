@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the SecondBrain capture+transcribe daemon.
+
+  1. Edit the paths below (REPLACE __REPO__ and __PYTHON__).
+  2. Copy to ~/Library/LaunchAgents/com.secondbrain.daemon.plist
+  3. launchctl load ~/Library/LaunchAgents/com.secondbrain.daemon.plist
+     (macOS will prompt for Microphone permission the first time.)
+
+  A second, similar agent can run `sb serve` for the web UI, and a third can run
+  `python -m secondbrain.menubar.app` for the menu bar control.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.secondbrain.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>-m</string>
+        <string>secondbrain.daemon</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

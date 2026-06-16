@@ -1,0 +1,56 @@
+# SecondBrain configuration (Phase 1: capture + transcript).
+# Copy to config.local.toml to override locally (gitignored), or edit in place.
+# Environment variables override these with the prefix SB_ and "__" for nesting,
+# e.g. SB_CAPTURE__INPUT_DEVICE="MacBook Microphone".
+
+[paths]
+# Base directory for all runtime data (gitignored). Relative paths resolve from
+# the repo root.
+data_dir = "data"
+
+[capture]
+# Audio input device name as shown by `sb devices`. Empty = system default.
+input_device = ""
+sample_rate = 16000            # 16 kHz mono is plenty for speech + small files
+channels = 1
+chunk_seconds = 60             # length of each rolling FLAC chunk
+# Stop capture if free disk space falls below this many GB (disk guardrail).
+min_free_disk_gb = 5.0
+
+[consent]
+# Master switch. When false, the daemon records nothing.
+recording_enabled = true
+# When true, capture is paused (menu bar / CLI toggle this).
+paused = false
+# Retention for RAW AUDIO after it has been transcribed. Transcripts are kept
+# regardless. Set raw_audio_retention_hours = 0 to delete immediately after
+# transcription, or a negative value to keep raw audio indefinitely.
+raw_audio_retention_hours = 168    # 7 days
+# Per-speaker opt-out (enforced once diarization lands in Phase 2). Names here
+# will have their segments excluded/redacted.
+speaker_opt_out = []
+
+[vad]
+# Drop audio with no detected speech so we never transcribe silence.
+enabled = true
+# Speech probability threshold (silero-vad). Higher = stricter.
+threshold = 0.5
+min_speech_ms = 250
+min_silence_ms = 700
+
+[transcription]
+# Backend: "parakeet" | "whisper" | "mock". "mock" is for CI/dev on non-Mac.
+backend = "parakeet"
+whisper_model = "mlx-community/whisper-large-v3-turbo"
+parakeet_model = "mlx-community/parakeet-tdt-0.6b-v2"
+language = ""                  # empty = auto-detect
+
+[search]
+# Optional semantic search via sqlite-vec + local embeddings. Falls back to
+# full-text-only if the extension or embedding model is unavailable.
+semantic_enabled = true
+embedding_model = "bge-small"
+
+[api]
+host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
+port = 8765
