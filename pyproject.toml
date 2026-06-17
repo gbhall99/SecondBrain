@@ -34,6 +34,8 @@ ml = [
     "mlx-whisper>=0.4; platform_system == 'Darwin'",
     "parakeet-mlx>=0.2; platform_system == 'Darwin'",
     "sqlite-vec>=0.1.6",
+    "pyannote.audio>=3.1",
+    "torch>=2.2",
 ]
 mac = [
     "rumps>=0.4.0; platform_system == 'Darwin'",
@@ -57,6 +59,9 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["B008"]  # typer/fastapi use function calls in defaults by design
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]  # long assert/setup lines are fine in tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

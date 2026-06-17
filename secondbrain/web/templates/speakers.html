@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Speakers</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    h1 { margin-bottom: .25rem; }
+    .card { border: 1px solid #8884; border-radius: 10px; padding: .8rem 1rem;
+            margin: .6rem 0; }
+    .meta { color: #888; font-size: .85rem; }
+    input[type=text] { padding: .45rem; border: 1px solid #8884; border-radius: 8px; }
+    button { padding: .45rem .8rem; border-radius: 8px; border: 1px solid #8884;
+             cursor: pointer; background: #8882; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    .clips { margin: .4rem 0; }
+    .owner { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Speakers</h1>
+  <p class="meta"><a href="/">← back to transcripts</a></p>
+
+  <h2>Who is this? ({{ unknowns|length }})</h2>
+  {% if not unknowns %}<p class="meta">No unknown voices to label. 🎉</p>{% endif %}
+  {% for s in unknowns %}
+    <div class="card" id="spk-{{ s.id }}">
+      <div class="row">
+        <strong>{{ s.display_label }}</strong>
+        <span class="meta">{{ s.segment_count }} segments · last {{ s.last_seen_at or "—" }}</span>
+      </div>
+      <div class="clips" data-id="{{ s.id }}">
+        <button onclick="loadClips({{ s.id }})">▶ load sample clips</button>
+      </div>
+      <div class="row">
+        <input type="text" id="name-{{ s.id }}" placeholder="Name this person…" />
+        <button onclick="nameSpeaker({{ s.id }})">Save name</button>
+        <button onclick="markOwner({{ s.id }})">This is me</button>
+      </div>
+    </div>
+  {% endfor %}
+
+  <h2>Known voices</h2>
+  {% for s in known %}
+    <div class="card">
+      <span class="{{ 'owner' if s.is_owner else '' }}">{{ s.name or s.display_label }}</span>
+      <span class="meta">· {{ s.kind }}{% if s.opted_out %} · opted-out{% endif %}
+        · {{ s.segment_count }} segments</span>
+    </div>
+  {% endfor %}
+
+  <script>
+    async function loadClips(id) {
+      const box = document.querySelector(`.clips[data-id="${id}"]`);
+      const r = await fetch(`/api/speakers/${id}/samples`);
+      const data = await r.json();
+      if (!data.samples.length) { box.innerHTML = '<span class="meta">no clips available</span>'; return; }
+      box.innerHTML = data.samples.map(s =>
+        `<audio controls preload="none" src="/api/speakers/${id}/clip/${s.id}"></audio>`).join(' ');
+    }
+    async function nameSpeaker(id) {
+      const name = document.getElementById('name-' + id).value.trim();
+      if (!name) return;
+      await fetch(`/api/speakers/${id}/name`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      document.getElementById('spk-' + id).remove();
+    }
+    async function markOwner(id) {
+      await fetch(`/api/speakers/${id}/owner`, {method: 'POST'});
+      document.getElementById('spk-' + id).remove();
+    }
+  </script>
+</body>
+</html>

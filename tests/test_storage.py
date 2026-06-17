@@ -38,6 +38,29 @@ def test_fts_trigger_handles_delete(conn):
     assert rows == []
 
 
+def test_phase2_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"conversations", "speaker_observations"} <= tables
+    speaker_cols = {r["name"] for r in conn.execute("PRAGMA table_info(speakers)").fetchall()}
+    assert {"kind", "centroid", "merged_into", "segment_count"} <= speaker_cols
+    seg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(transcript_segments)").fetchall()}
+    assert "speaker_confidence" in seg_cols
+    af_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audio_files)").fetchall()}
+    assert "conversation_id" in af_cols
+
+
+def test_apply_base_schema_is_idempotent(conn):
+    # second application must not raise on the non-idempotent ADD COLUMNs
+    from secondbrain.storage.schema import apply_base_schema
+
+    apply_base_schema(conn)
+    ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
+    assert ver == "0002_speakers"
+
+
 def test_pause_state_roundtrip(conn):
     assert state.is_paused(conn, default=False) is False
     state.set_paused(conn, True)

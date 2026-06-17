@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0001_initial"
+SCHEMA_VERSION = "0002_speakers"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -136,17 +136,95 @@ STATEMENTS: list[str] = [
 ]
 
 
+# --- Phase 2: diarization + speakers (migration 0002_speakers) ----------------
+# New tables/indices (idempotent CREATEs). Speaker embeddings are stored as
+# struct-packed float32 BLOBs (centroid on `speakers`, per-observation on
+# `speaker_observations`) and compared with cosine in Python — at single-user
+# scale this needs no sqlite-vec/ANN index and keeps the logic CI-testable.
+STATEMENTS_0002_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS conversations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at  TEXT,
+        ended_at    TEXT,
+        status      TEXT NOT NULL DEFAULT 'open',
+                    -- open | closed | diarizing | diarized | failed
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)",
+    """
+    CREATE TABLE IF NOT EXISTS speaker_observations (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        speaker_id      INTEGER REFERENCES speakers(id),
+        conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        audio_file_id   INTEGER REFERENCES audio_files(id) ON DELETE CASCADE,
+        start_offset_s  REAL,
+        end_offset_s    REAL,
+        start_at        TEXT,
+        confidence      REAL,
+        embedding       BLOB,            -- struct-packed float32 speaker embedding
+        created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_speaker_obs_speaker ON speaker_observations(speaker_id)",
+    "CREATE INDEX IF NOT EXISTS idx_segments_speaker ON transcript_segments(speaker_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audio_conversation ON audio_files(conversation_id)",
+]
+
+# Columns added to existing tables: (table, column_name, column_def). SQLite's
+# ADD COLUMN is not idempotent, so apply_base_schema guards via _safe_add_column;
+# the Alembic migration runs the raw ALTERs (clean DB at revision 0001).
+COLUMNS_0002: list[tuple[str, str, str]] = [
+    ("speakers", "kind", "TEXT NOT NULL DEFAULT 'unknown'"),  # owner|known|unknown
+    ("speakers", "display_label", "TEXT"),
+    ("speakers", "exemplar_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("speakers", "last_seen_at", "TEXT"),
+    ("speakers", "segment_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("speakers", "merged_into", "INTEGER"),
+    ("speakers", "centroid", "BLOB"),  # struct-packed float32 profile centroid
+    ("audio_files", "conversation_id", "INTEGER"),
+    ("transcript_segments", "speaker_confidence", "REAL"),
+]
+
+ALTERS_0002: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0002
+]
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
+
+
+def _safe_add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def apply_phase2_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0002 additions idempotently (ADD COLUMNs then dependent creates)."""
+    for table, column, ddl in COLUMNS_0002:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0002_CREATE:  # some indices reference the new columns
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
     Used directly by tests and ``init_db``. Production deployments may instead run
-    ``alembic upgrade head`` (the initial migration runs the same STATEMENTS).
+    ``alembic upgrade head`` (the migrations run the same STATEMENTS).
     Both paths stamp ``alembic_version`` so they interoperate.
     """
     for stmt in STATEMENTS:
         conn.execute(stmt)
+    apply_phase2_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:
         conn.execute("INSERT INTO alembic_version(version_num) VALUES (?)", (SCHEMA_VERSION,))
+    else:
+        conn.execute("UPDATE alembic_version SET version_num=?", (SCHEMA_VERSION,))
     conn.commit()

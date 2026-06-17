@@ -5,9 +5,10 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phase 1 (this release): capture + transcript.** Speaker identification, a
-> personal knowledge graph, proactive assistance, and goals are planned in later
-> phases — see [the roadmap](docs/ROADMAP.md).
+> **Phases 1–2 shipped: capture + transcript, plus speaker diarization & voice
+> profiles.** It now attributes who said what and learns recurring voices over
+> time. The personal knowledge graph, proactive assistance, and goals are planned
+> next — see [the roadmap](docs/ROADMAP.md).
 
 ## What it does today
 
@@ -23,9 +24,14 @@ room mic ─► capture daemon ─► rolling FLAC chunks ─► VAD (drop silen
   store) dead air.
 - **Searchable transcript log** — full-text (FTS5) + optional local semantic
   search (sqlite-vec + a local embedding model).
+- **Speaker diarization & voice profiles** (Phase 2) — conversations are diarized
+  as a whole (pyannote 3.1), each line attributed to a global speaker with a
+  confidence, your own voice enrolled explicitly, and recurring unknown voices
+  clustered over time so you can name them once and relabel all history.
 - **Privacy controls built in:** always-visible recording indicator + one-tap
   pause (menu bar), raw-audio auto-deletion after a retention window
-  (transcripts kept), and disk-space guardrails.
+  (transcripts kept; deferred until a conversation is diarized), disk-space
+  guardrails, and per-speaker opt-out (redacts that person's words).
 
 ## ⚠️ Recording consent — read this first
 
@@ -69,9 +75,31 @@ sb status                                   # recording state, queue, disk
 sb search "what did we decide about pricing"
 sb show 2026-06-16                          # everything from a day
 sb pause   /   sb resume                    # toggle recording live
-sb drain                                    # transcribe pending chunks now (off-peak)
+sb drain                                    # process pending jobs now (off-peak)
 sb sweep                                    # delete expired raw audio now
 ```
+
+### Speakers (Phase 2)
+
+```bash
+sb speaker setup                  # one-time: download/authorize pyannote models
+sb speaker enroll-owner           # guided recording of your own voice
+sb speaker unknowns               # voices awaiting a name
+sb speaker name 7 "Alice"         # name a voice (relabels all their history)
+sb speaker merge 9 7              # 9 is actually 7 → merge + relabel
+sb speaker cluster                # merge recurring unknown voices now
+sb speaker opt-out 4              # redact a person's past + future words
+```
+
+Or use the web **Speakers** page (`/speakers`) to play sample clips and label
+voices with the "Who is this?" queue.
+
+**One-time pyannote setup (gated models, local thereafter):** create a read token
+at <https://huggingface.co/settings/tokens>, accept the conditions on
+`pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`, then put the
+token in `config.local.toml` (`[diarization].hf_token`) or the `HF_TOKEN` env var,
+set `[diarization].enabled = true`, and run `sb speaker setup`. After download,
+diarization runs fully offline.
 
 ## How it's organised
 
@@ -79,7 +107,8 @@ sb sweep                                    # delete expired raw audio now
 |---|---|
 | Config | `secondbrain/config.py`, `config.toml` |
 | Capture | `secondbrain/capture/` |
-| Pipeline (queue, VAD, transcription, worker) | `secondbrain/pipeline/` |
+| Pipeline (queue, VAD, transcription, diarization, conversations, worker) | `secondbrain/pipeline/` |
+| Speakers (registry, matching, clustering, enrollment, attribution) | `secondbrain/speaker/` |
 | Storage (schema, models, retention, state) | `secondbrain/storage/` |
 | Search (full-text, semantic, fusion) | `secondbrain/search/` |
 | Web UI / API | `secondbrain/query/`, `secondbrain/web/` |

@@ -16,6 +16,18 @@ def test_env_override(monkeypatch):
     assert s.transcription.backend == "mock"
 
 
+def test_diarization_config_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert s.diarization.enabled is False           # off by default
+    assert s.diarization.embedding_dim == 256
+    assert s.conversation.max_gap_minutes == 5.0
+    monkeypatch.setenv("SB_DIARIZATION__ENABLED", "true")
+    monkeypatch.setenv("SB_DIARIZATION__MATCH_THRESHOLD", "0.8")
+    s2 = Settings()
+    assert s2.diarization.enabled is True
+    assert s2.diarization.match_threshold == 0.8
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()

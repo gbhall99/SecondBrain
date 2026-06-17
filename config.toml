@@ -54,3 +54,29 @@ embedding_model = "bge-small"
 [api]
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
+
+[conversation]
+# Ambient audio is continuous; we group consecutive chunks into "conversations"
+# before diarizing them as a whole. A silence/idle gap larger than this closes
+# the open conversation.
+max_gap_minutes = 5.0
+min_conversation_seconds = 5.0
+
+[diarization]
+# Speaker diarization + voice-profile learning (Phase 2). Fully local.
+# Disabled by default; enable on the Mac mini once set up (see `sb speaker setup`).
+enabled = false
+backend = "pyannote"           # pyannote | mock
+model = "pyannote/speaker-diarization-3.1"
+# pyannote 3.1 models are GATED on HuggingFace. One-time setup: accept the model
+# conditions while logged in, create a read token, and put it here in
+# config.local.toml (gitignored) or set HF_TOKEN / HUGGINGFACE_TOKEN. Leave blank
+# in this committed file.
+hf_token = ""
+embedding_dim = 256
+match_threshold = 0.70
+owner_match_threshold = 0.65
+centroid_update_threshold = 0.75
+cluster_distance_threshold = 0.30
+low_confidence_threshold = 0.5
+min_cluster_speech_s = 1.0

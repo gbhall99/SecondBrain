@@ -44,6 +44,8 @@
     <button onclick="toggle()" id="toggleBtn">
       {{ 'Pause recording' if status.recording else 'Resume recording' }}
     </button>
+    <a href="/speakers"><button>Speakers{% if status.unknown_clusters_pending %}
+      ({{ status.unknown_clusters_pending }} to label){% endif %}</button></a>
   </div>
 
   <form onsubmit="doSearch(event)">
@@ -68,11 +70,16 @@
       const data = await r.json();
       const box = document.getElementById('results');
       if (!data.results.length) { box.innerHTML = '<p>No matches.</p>'; return; }
-      box.innerHTML = data.results.map(h => `
+      box.innerHTML = data.results.map(h => {
+        const spk = h.speaker
+          ? `<b>${escapeHtml(h.speaker)}${h.speaker_low_confidence ? ' (?)' : ''}:</b> `
+          : '';
+        return `
         <div class="hit">
-          <div>${h.snippet || escapeHtml(h.text)}</div>
+          <div>${spk}${h.snippet || escapeHtml(h.text)}</div>
           <div class="meta">${h.start_at || ''} · file #${h.audio_file_id} · ${h.start_offset_s.toFixed(1)}s</div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     }
     function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
   </script>

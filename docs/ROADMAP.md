@@ -15,13 +15,17 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** a private, searchable record of everything said in your day.
 
-## Phase 2 — Diarization & speaker identity
-- `pyannote.audio` 3.1 diarization; align transcript words ↔ speaker turns
-  (populate `transcript_segments.speaker_id`).
-- Owner voice enrollment; speaker-embedding store (sqlite-vec).
-- Auto-match recurring voices; nightly clustering of unknown speakers; a UI
-  labeling queue ("who is this?") with retroactive relabeling.
-- Enforce the per-speaker opt-out from `[consent].speaker_opt_out`.
+## ✅ Phase 2 — Diarization & speaker identity (shipped)
+- `pyannote.audio` 3.1 **conversation-level** diarization; align speaker turns
+  onto transcript segments by max overlap (populate `transcript_segments.speaker_id`
+  + `speaker_confidence`).
+- Owner enrollment (guided recording **and** label-from-history); speaker
+  embeddings stored as BLOBs, matched with cosine to a global registry.
+- Auto-match recurring voices above a threshold; nightly clustering of unknown
+  speakers; a web "Who is this?" labeling queue with sample-clip playback and
+  retroactive relabeling; `sb speaker` CLI.
+- Enforce per-speaker opt-out (redaction) from `[consent].speaker_opt_out`.
+- Raw-audio retention deferred until a conversation is diarized.
 
 **Outcome:** transcripts attributed to named people; voices learned over time.
 

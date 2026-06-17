@@ -59,6 +59,31 @@ class SearchConfig(BaseModel):
     embedding_model: str = "bge-small"
 
 
+class ConversationConfig(BaseModel):
+    # Chunks within this gap of each other belong to the same conversation; a
+    # larger idle gap closes the open conversation (→ enqueue diarization).
+    max_gap_minutes: float = 5.0
+    min_conversation_seconds: float = 5.0
+
+
+class DiarizationConfig(BaseModel):
+    # Disabled by default so Phase 1 behaviour (and CI) is unchanged until opted
+    # in. The Mac mini config.toml enables it.
+    enabled: bool = False
+    backend: str = "pyannote"  # pyannote | mock
+    model: str = "pyannote/speaker-diarization-3.1"
+    # One-time HuggingFace token for the gated models. Prefer config.local.toml
+    # or the HF_TOKEN / HUGGINGFACE_TOKEN env var over committing it here.
+    hf_token: str = ""
+    embedding_dim: int = 256
+    match_threshold: float = 0.70          # cosine sim to auto-label a known voice
+    owner_match_threshold: float = 0.65    # owner checked first, slightly looser
+    centroid_update_threshold: float = 0.75  # only fold confident obs into centroid
+    cluster_distance_threshold: float = 0.30  # nightly agglomerative (cosine dist)
+    low_confidence_threshold: float = 0.5  # below this a label is flagged
+    min_cluster_speech_s: float = 1.0      # ignore clusters too short to embed
+
+
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
@@ -82,6 +107,8 @@ class Settings(BaseSettings):
     vad: VadConfig = Field(default_factory=VadConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    conversation: ConversationConfig = Field(default_factory=ConversationConfig)
+    diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
 
     # --- derived paths -------------------------------------------------------

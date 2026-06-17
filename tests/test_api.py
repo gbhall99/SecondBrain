@@ -47,3 +47,24 @@ def test_index_page_renders(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "SecondBrain" in r.text
+
+
+def test_speakers_endpoints(client, conn):
+    from secondbrain.speaker import registry
+
+    sid = registry.create_unknown_speaker(conn)
+    # list + unknown
+    assert client.get("/api/speakers").status_code == 200
+    unknown = client.get("/api/speakers/unknown").json()["unknown"]
+    assert any(s["id"] == sid for s in unknown)
+    # name it
+    r = client.post(f"/api/speakers/{sid}/name", json={"name": "Dana"})
+    assert r.status_code == 200 and r.json()["ok"]
+    names = [s["name"] for s in client.get("/api/speakers").json()["speakers"]]
+    assert "Dana" in names
+
+
+def test_speakers_page_renders(client):
+    r = client.get("/speakers")
+    assert r.status_code == 200
+    assert "Who is this?" in r.text

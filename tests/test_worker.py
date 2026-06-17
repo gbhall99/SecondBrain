@@ -49,6 +49,23 @@ def test_silence_is_not_transcribed(conn, settings, tmp_path):
     assert models.get_audio_file(conn, af_id)["status"] == "transcribed"
 
 
+def test_diarization_enabled_defers_retention_and_groups_conversation(conn, settings):
+    settings.diarization.enabled = True
+    af_id = _add_audio(conn)
+    worker.enqueue_transcription(conn, af_id)
+    worker.drain(
+        conn,
+        transcriber=MockTranscriber([TranscribedSegment(0.0, 1.0, "hello", 0.9)]),
+        vad=MockVad(),
+        settings=settings,
+        max_jobs=1,  # only the transcribe job; not the queued diarize job
+    )
+    row = models.get_audio_file(conn, af_id)
+    assert row["status"] == "transcribed"
+    assert row["retention_delete_after"] is None      # deferred until diarized
+    assert row["conversation_id"] is not None          # grouped into a conversation
+
+
 def test_failed_transcription_marks_audio_failed(conn, settings):
     af_id = _add_audio(conn)
     worker.enqueue_transcription(conn, af_id)

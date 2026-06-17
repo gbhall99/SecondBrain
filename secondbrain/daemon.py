@@ -18,9 +18,11 @@ import time
 
 from secondbrain.capture.recorder import Recorder
 from secondbrain.config import Settings, get_settings
+from secondbrain.pipeline import queue as q
 from secondbrain.pipeline import worker
-from secondbrain.storage import retention
+from secondbrain.storage import retention, state
 from secondbrain.storage.db import init_db
+from secondbrain.storage.models import utcnow_iso
 
 log = logging.getLogger("secondbrain.daemon")
 
@@ -71,9 +73,31 @@ class Daemon:
                         log.info("retention: deleted %d expired raw-audio files", n)
                 except Exception:  # noqa: BLE001
                     log.exception("retention sweep failed")
+                if self.settings.diarization.enabled:
+                    self._diarization_maintenance(conn)
                 self._stop.wait(RETENTION_INTERVAL_S)
         finally:
             conn.close()
+
+    def _diarization_maintenance(self, conn) -> None:
+        """Close idle conversations for diarization; enqueue clustering daily."""
+        from secondbrain.pipeline import conversation, worker
+        from secondbrain.speaker import cluster
+
+        try:
+            closed = conversation.close_stale_conversations(conn, self.settings)
+            if closed:
+                log.info("closed %d idle conversation(s) for diarization", closed)
+        except Exception:  # noqa: BLE001
+            log.exception("conversation close failed")
+        try:
+            today = utcnow_iso()[:10]
+            last = (state.get_state(conn, cluster.LAST_RUN_KEY) or "")[:10]
+            if last != today:
+                q.enqueue(conn, worker.JOB_CLUSTER, {}, dedupe_key=None)
+                state.set_state(conn, cluster.LAST_RUN_KEY, utcnow_iso())
+        except Exception:  # noqa: BLE001
+            log.exception("clustering enqueue failed")
 
     # --- lifecycle -----------------------------------------------------------
 
