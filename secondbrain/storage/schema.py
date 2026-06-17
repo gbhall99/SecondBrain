@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0002_speakers"
+SCHEMA_VERSION = "0003_knowledge"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -193,6 +193,84 @@ ALTERS_0002: list[str] = [
 ]
 
 
+# --- Phase 3: knowledge graph (migration 0003_knowledge) ----------------------
+STATEMENTS_0003_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_extractions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+        model           TEXT,
+        backend         TEXT,
+        chunk_index     INTEGER,
+        segment_id_low  INTEGER,
+        segment_id_high INTEGER,
+        raw_json        TEXT,
+        created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kg_nodes (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        type                 TEXT NOT NULL,   -- person|project|organization|topic|place
+        name                 TEXT NOT NULL,
+        normalized_name      TEXT,
+        display_label        TEXT,
+        speaker_id           INTEGER REFERENCES speakers(id),  -- Person ↔ voice link
+        embedding            BLOB,            -- struct-packed float32
+        confidence           REAL,
+        source_extraction_id INTEGER REFERENCES knowledge_extractions(id),
+        merged_into          INTEGER,
+        first_seen           TEXT,
+        last_seen            TEXT,
+        created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_nodes_type_name ON kg_nodes(type, normalized_name)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_nodes_speaker ON kg_nodes(speaker_id)",
+    """
+    CREATE TABLE IF NOT EXISTS kg_aliases (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id          INTEGER NOT NULL REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        alias            TEXT NOT NULL,
+        normalized_alias TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_aliases_norm ON kg_aliases(normalized_alias)",
+    """
+    CREATE TABLE IF NOT EXISTS kg_edges (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        src_node_id          INTEGER NOT NULL REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        dst_node_id          INTEGER REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        predicate            TEXT,
+        kind                 TEXT NOT NULL,   -- fact|action_item|decision|idea|mention
+        object_text          TEXT,            -- literal object (date, free text)
+        due_date             TEXT,
+        confidence           REAL,
+        source_extraction_id INTEGER REFERENCES knowledge_extractions(id),
+        conversation_id      INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        source_segment_ids   TEXT,            -- JSON array of segment ids (citations)
+        superseded_by        INTEGER REFERENCES kg_edges(id),
+        valid                INTEGER NOT NULL DEFAULT 1,
+        first_seen           TEXT,
+        last_seen            TEXT,
+        created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_src ON kg_edges(src_node_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(dst_node_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_kind_valid ON kg_edges(kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_conversation ON kg_edges(conversation_id)",
+]
+
+COLUMNS_0003: list[tuple[str, str, str]] = [
+    ("conversations", "knowledge_status", "TEXT NOT NULL DEFAULT 'pending'"),
+]
+
+ALTERS_0003: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0003
+]
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
@@ -211,6 +289,14 @@ def apply_phase2_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase3_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0003 additions idempotently (ADD COLUMNs then creates)."""
+    for table, column, ddl in COLUMNS_0003:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0003_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -221,6 +307,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     for stmt in STATEMENTS:
         conn.execute(stmt)
     apply_phase2_schema(conn)
+    apply_phase3_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

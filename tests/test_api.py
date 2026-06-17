@@ -68,3 +68,26 @@ def test_speakers_page_renders(client):
     r = client.get("/speakers")
     assert r.status_code == 200
     assert "Who is this?" in r.text
+
+
+def test_ask_endpoint(client):
+    r = client.post("/api/ask", json={"question": "anything"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "answer" in body and "citations" in body
+
+
+def test_graph_endpoints(client, conn):
+    from secondbrain.knowledge import graph
+
+    nid = graph.create_node(conn, type="project", name="Atlas", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    found = client.get("/api/graph/search", params={"q": "atlas"}).json()["nodes"]
+    assert any(n["id"] == nid for n in found)
+    detail = client.get(f"/api/graph/node/{nid}").json()
+    assert detail["node"]["name"] == "Atlas"
+
+
+def test_chat_and_graph_pages_render(client):
+    assert "Ask your second brain" in client.get("/chat").text
+    assert "Knowledge graph" in client.get("/graph").text

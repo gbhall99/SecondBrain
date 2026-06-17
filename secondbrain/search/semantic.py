@@ -54,6 +54,15 @@ def _get_embedder(settings: Settings) -> Embedder | None:
     return _embedder
 
 
+def get_embedder(settings: Settings | None = None) -> Embedder | None:
+    """Public accessor for the local text embedder (None if unavailable).
+
+    Used by knowledge entity-resolution as well as semantic search. Independent of
+    sqlite-vec (which is only needed for the transcript vector index).
+    """
+    return _get_embedder(settings or get_settings())
+
+
 def is_available(conn: sqlite3.Connection, settings: Settings | None = None) -> bool:
     settings = settings or get_settings()
     return try_load_sqlite_vec(conn) and _get_embedder(settings) is not None

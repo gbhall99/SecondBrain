@@ -151,3 +151,54 @@ def set_owner(conn: sqlite3.Connection, speaker_id: int) -> None:
     sid = registry.resolve_speaker_id(conn, speaker_id)
     conn.execute("UPDATE speakers SET is_owner=0 WHERE is_owner=1 AND id<>?", (sid,))
     conn.execute("UPDATE speakers SET is_owner=1, kind='owner' WHERE id=?", (sid,))
+
+
+# --- knowledge graph + Q&A (Phase 3) -----------------------------------------
+
+
+def ask(conn: sqlite3.Connection, question: str, settings: Settings | None = None) -> dict:
+    from secondbrain.knowledge import chat
+
+    return chat.answer(conn, question, settings=settings or get_settings())
+
+
+def graph_search(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
+    from secondbrain.knowledge.graph import normalize_name
+
+    like = f"%{normalize_name(query)}%"
+    rows = conn.execute(
+        """
+        SELECT id, type, name, display_label,
+               (SELECT COUNT(*) FROM kg_edges e
+                WHERE e.valid=1 AND (e.src_node_id=kg_nodes.id OR e.dst_node_id=kg_nodes.id))
+               AS edge_count
+        FROM kg_nodes
+        WHERE merged_into IS NULL AND normalized_name LIKE ?
+        ORDER BY edge_count DESC LIMIT ?
+        """,
+        (like, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def graph_node(conn: sqlite3.Connection, node_id: int) -> dict | None:
+    from secondbrain.knowledge.graph import resolve_node_id
+
+    nid = resolve_node_id(conn, node_id)
+    node = conn.execute("SELECT * FROM kg_nodes WHERE id=?", (nid,)).fetchone()
+    if node is None:
+        return None
+    edges = conn.execute(
+        """
+        SELECT e.id, e.predicate, e.kind, e.object_text, e.due_date, e.confidence,
+               e.conversation_id, e.source_segment_ids,
+               s.name AS src_name, d.name AS dst_name, d.id AS dst_id
+        FROM kg_edges e
+        JOIN kg_nodes s ON s.id = e.src_node_id
+        LEFT JOIN kg_nodes d ON d.id = e.dst_node_id
+        WHERE e.valid=1 AND (e.src_node_id=? OR e.dst_node_id=?)
+        ORDER BY e.confidence DESC
+        """,
+        (nid, nid),
+    ).fetchall()
+    return {"node": dict(node), "edges": [dict(e) for e in edges]}

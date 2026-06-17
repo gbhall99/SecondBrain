@@ -28,6 +28,17 @@ def test_diarization_config_defaults_and_env(monkeypatch):
     assert s2.diarization.match_threshold == 0.8
 
 
+def test_llm_and_extraction_config_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert s.llm.backend == "mock"          # CI default
+    assert s.extraction.enabled is False     # off by default
+    monkeypatch.setenv("SB_LLM__BACKEND", "ollama")
+    monkeypatch.setenv("SB_EXTRACTION__ENABLED", "true")
+    s2 = Settings()
+    assert s2.llm.backend == "ollama"
+    assert s2.extraction.enabled is True
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()

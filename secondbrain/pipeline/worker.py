@@ -12,6 +12,8 @@ import sqlite3
 from datetime import timedelta
 
 from secondbrain.config import Settings, get_settings
+from secondbrain.knowledge.extract import JOB_EXTRACT, run_extraction
+from secondbrain.llm.client import LLM, get_llm
 from secondbrain.pipeline import conversation
 from secondbrain.pipeline import queue as q
 from secondbrain.pipeline.diarize import Diarizer, get_diarizer
@@ -130,6 +132,7 @@ def run_once(
     transcriber: Transcriber | None = None,
     vad: Vad | None = None,
     diarizer: Diarizer | None = None,
+    llm: LLM | None = None,
     settings: Settings | None = None,
 ) -> bool:
     """Claim and process a single job of any type. Returns True if one ran."""
@@ -153,6 +156,13 @@ def run_once(
                 diarizer=diarizer or get_diarizer(settings),
                 settings=settings,
             )
+        elif job.type == JOB_EXTRACT:
+            run_extraction(
+                conn,
+                int(job.payload["conversation_id"]),
+                llm=llm or get_llm(settings),
+                settings=settings,
+            )
         elif job.type == JOB_CLUSTER:
             from secondbrain.speaker import cluster
 
@@ -168,6 +178,11 @@ def run_once(
                 "UPDATE conversations SET status='failed' WHERE id=?",
                 (int(job.payload.get("conversation_id", 0)),),
             )
+        elif job.type == JOB_EXTRACT:
+            conn.execute(
+                "UPDATE conversations SET knowledge_status='failed' WHERE id=?",
+                (int(job.payload.get("conversation_id", 0)),),
+            )
         q.fail(conn, job, repr(exc))
     return True
 
@@ -178,6 +193,7 @@ def drain(
     transcriber: Transcriber | None = None,
     vad: Vad | None = None,
     diarizer: Diarizer | None = None,
+    llm: LLM | None = None,
     settings: Settings | None = None,
     max_jobs: int | None = None,
 ) -> int:
@@ -188,7 +204,7 @@ def drain(
     processed = 0
     while max_jobs is None or processed < max_jobs:
         if not run_once(
-            conn, transcriber=transcriber, vad=vad, diarizer=diarizer, settings=settings
+            conn, transcriber=transcriber, vad=vad, diarizer=diarizer, llm=llm, settings=settings
         ):
             break
         processed += 1

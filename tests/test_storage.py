@@ -52,13 +52,23 @@ def test_phase2_schema_present(conn):
     assert "conversation_id" in af_cols
 
 
+def test_phase3_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"kg_nodes", "kg_aliases", "kg_edges", "knowledge_extractions"} <= tables
+    conv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+    assert "knowledge_status" in conv_cols
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0002_speakers"
+    assert ver == "0003_knowledge"
 
 
 def test_pause_state_roundtrip(conn):

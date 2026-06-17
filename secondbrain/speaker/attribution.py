@@ -198,3 +198,9 @@ def _finalize(
             (delete_after, ch["id"]),
         )
     conn.execute("UPDATE conversations SET status='diarized' WHERE id=?", (conversation_id,))
+
+    # Hand off to knowledge extraction (Phase 3), if enabled.
+    if settings.extraction.enabled:
+        from secondbrain.knowledge.extract import enqueue_extraction
+
+        enqueue_extraction(conn, conversation_id)

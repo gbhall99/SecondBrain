@@ -55,6 +55,26 @@ embedding_model = "bge-small"
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
 
+[llm]
+# Local LLM for knowledge extraction + Q&A (Phase 3). Fully offline via Ollama.
+# Set backend = "ollama" and run `ollama serve` + pull the model on the Mac.
+backend = "mock"               # mock | ollama
+model = "llama3.1:8b-instruct"
+host = "http://127.0.0.1:11434"
+temperature = 0.0
+request_timeout_s = 120.0
+
+[extraction]
+# Knowledge graph + chat. Disabled by default; enable on the Mac once Ollama is up.
+enabled = false
+max_context_chars = 24000
+overlap_segments = 1
+entity_match_threshold = 0.82
+entity_review_threshold = 0.70
+chat_max_hops = 1
+chat_max_facts = 40
+chat_max_context_chars = 32000
+
 [conversation]
 # Ambient audio is continuous; we group consecutive chunks into "conversations"
 # before diarizing them as a whole. A silence/idle gap larger than this closes

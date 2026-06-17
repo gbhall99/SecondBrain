@@ -5,10 +5,11 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phases 1–2 shipped: capture + transcript, plus speaker diarization & voice
-> profiles.** It now attributes who said what and learns recurring voices over
-> time. The personal knowledge graph, proactive assistance, and goals are planned
-> next — see [the roadmap](docs/ROADMAP.md).
+> **Phases 1–3 shipped: capture + transcript, speaker diarization & voice
+> profiles, and a local-LLM knowledge graph with grounded Q&A.** It records,
+> attributes who said what, learns recurring voices, builds a knowledge graph of
+> people/projects/decisions/commitments, and answers questions with citations.
+> Proactive assistance and goals are planned next — see [the roadmap](docs/ROADMAP.md).
 
 ## What it does today
 
@@ -28,6 +29,12 @@ room mic ─► capture daemon ─► rolling FLAC chunks ─► VAD (drop silen
   as a whole (pyannote 3.1), each line attributed to a global speaker with a
   confidence, your own voice enrolled explicitly, and recurring unknown voices
   clustered over time so you can name them once and relabel all history.
+- **Knowledge graph + grounded Q&A** (Phase 3) — a local LLM (Ollama) reads each
+  diarized conversation and extracts people, projects, facts, decisions, and
+  action items into a SQLite knowledge graph (with provenance + fact versioning);
+  `sb ask` / the web chat answer questions grounded in your data **with
+  citations** (and clearly-labeled general knowledge when helpful). Nothing leaves
+  the machine.
 - **Privacy controls built in:** always-visible recording indicator + one-tap
   pause (menu bar), raw-audio auto-deletion after a retention window
   (transcripts kept; deferred until a conversation is diarized), disk-space
@@ -94,6 +101,21 @@ sb speaker opt-out 4              # redact a person's past + future words
 Or use the web **Speakers** page (`/speakers`) to play sample clips and label
 voices with the "Who is this?" queue.
 
+### Knowledge graph & Q&A (Phase 3)
+
+```bash
+sb ask "what did Dana commit to this week?"   # grounded answer + sources
+```
+
+Web: **Ask** (`/chat`) for grounded Q&A with citation chips, and **Graph**
+(`/graph`) to browse people/projects/decisions and their sources.
+
+**One-time local-LLM setup (fully offline):** install [Ollama](https://ollama.com),
+`ollama serve`, and `ollama pull llama3.1:8b-instruct` (or your preferred instruct
+model). Then set `[llm].backend = "ollama"` (and `[llm].model`) and
+`[extraction].enabled = true` in `config.local.toml`. Extraction runs as a queued
+job after each conversation is diarized; drain it off-peak with `sb drain`.
+
 **One-time pyannote setup (gated models, local thereafter):** create a read token
 at <https://huggingface.co/settings/tokens>, accept the conditions on
 `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`, then put the
@@ -109,6 +131,8 @@ diarization runs fully offline.
 | Capture | `secondbrain/capture/` |
 | Pipeline (queue, VAD, transcription, diarization, conversations, worker) | `secondbrain/pipeline/` |
 | Speakers (registry, matching, clustering, enrollment, attribution) | `secondbrain/speaker/` |
+| Local LLM (Ollama / mock client) | `secondbrain/llm/` |
+| Knowledge (extraction, entity resolution, graph store, chat) | `secondbrain/knowledge/` |
 | Storage (schema, models, retention, state) | `secondbrain/storage/` |
 | Search (full-text, semantic, fusion) | `secondbrain/search/` |
 | Web UI / API | `secondbrain/query/`, `secondbrain/web/` |

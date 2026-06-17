@@ -107,6 +107,20 @@ def search(
 
 
 @app.command()
+def ask(question: str = typer.Argument(..., help="Question to answer from your data.")) -> None:
+    """Ask your second brain a question (grounded in your captured knowledge)."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        result = service.ask(conn, question, settings)
+    typer.echo(result["answer"].strip() + "\n")
+    if result["citations"]:
+        typer.echo("Sources:")
+        for c in result["citations"]:
+            when = (c.get("start_at") or "")[:19]
+            typer.echo(f"  [{c['segment_id']}] {when} — {c['speaker']}: {c['text'][:100]}")
+
+
+@app.command()
 def show(day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).")) -> None:
     """Print all transcript segments for a day."""
     settings = get_settings()

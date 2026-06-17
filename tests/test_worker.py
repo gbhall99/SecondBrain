@@ -66,6 +66,50 @@ def test_diarization_enabled_defers_retention_and_groups_conversation(conn, sett
     assert row["conversation_id"] is not None          # grouped into a conversation
 
 
+def test_extraction_disabled_enqueues_no_job(conn, settings):
+    # diarization on, extraction off → diarize runs, but no extract job is queued
+    from secondbrain.pipeline.diarize import MockDiarizer
+
+    settings.diarization.enabled = True
+    settings.extraction.enabled = False
+    af_id = _add_audio(conn)
+    worker.enqueue_transcription(conn, af_id)
+    worker.drain(
+        conn,
+        transcriber=MockTranscriber([TranscribedSegment(0.0, 1.0, "hello", 0.9)]),
+        vad=MockVad(),
+        diarizer=MockDiarizer(dim=settings.diarization.embedding_dim),
+        settings=settings,
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE type='extract_knowledge'"
+    ).fetchone()["n"] == 0
+
+
+def test_worker_dispatches_extract_job(conn, settings):
+    # The worker should claim and run an enqueued extract_knowledge job.
+    from secondbrain.knowledge.extract import enqueue_extraction
+    from secondbrain.llm.client import MockLLM
+    from secondbrain.storage.models import AudioFile
+
+    settings.extraction.enabled = True
+    conv = conn.execute(
+        "INSERT INTO conversations (started_at, status, knowledge_status) "
+        "VALUES ('2026-06-16T09:00:00.000Z','diarized','pending')"
+    ).lastrowid
+    af = models.insert_audio_file(
+        conn, AudioFile(path="/tmp/c.flac", started_at="2026-06-16T09:00:00.000Z",
+                        sample_rate=16000, status="transcribed"))
+    conn.execute("UPDATE audio_files SET conversation_id=? WHERE id=?", (conv, af))
+    tid = models.insert_transcript(conn, af, "mock", "mock", "en")
+    models.insert_segments(conn, [models.Segment(tid, af, 0.0, 1.0, "about Atlas",
+                                                  start_at="2026-06-16T09:00:00.000Z")])
+    enqueue_extraction(conn, conv)
+    worker.drain(conn, llm=MockLLM(), settings=settings)
+    row = conn.execute("SELECT knowledge_status FROM conversations WHERE id=?", (conv,)).fetchone()
+    assert row["knowledge_status"] == "extracted"
+
+
 def test_failed_transcription_marks_audio_failed(conn, settings):
     af_id = _add_audio(conn)
     worker.enqueue_transcription(conn, af_id)

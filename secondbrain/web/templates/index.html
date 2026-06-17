@@ -46,6 +46,8 @@
     </button>
     <a href="/speakers"><button>Speakers{% if status.unknown_clusters_pending %}
       ({{ status.unknown_clusters_pending }} to label){% endif %}</button></a>
+    <a href="/chat"><button>Ask</button></a>
+    <a href="/graph"><button>Graph</button></a>
   </div>
 
   <form onsubmit="doSearch(event)">

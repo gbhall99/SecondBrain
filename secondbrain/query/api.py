@@ -128,6 +128,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             service.set_owner(conn, speaker_id)
         return {"ok": True}
 
+    # --- knowledge graph + Q&A (Phase 3) -------------------------------------
+
+    @app.get("/chat", response_class=HTMLResponse)
+    def chat_page(request: Request):
+        return templates.TemplateResponse(request, "chat.html", {})
+
+    @app.post("/api/ask")
+    def api_ask(question: str = Body(..., embed=True)):
+        with db() as conn:
+            return service.ask(conn, question, settings)
+
+    @app.get("/graph", response_class=HTMLResponse)
+    def graph_page(request: Request):
+        return templates.TemplateResponse(request, "graph.html", {})
+
+    @app.get("/api/graph/search")
+    def api_graph_search(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=100)):
+        with db() as conn:
+            return {"nodes": service.graph_search(conn, q, limit)}
+
+    @app.get("/api/graph/node/{node_id}")
+    def api_graph_node(node_id: int):
+        with db() as conn:
+            node = service.graph_node(conn, node_id)
+        if node is None:
+            raise HTTPException(404, "node not found")
+        return node
+
     return app
 
 

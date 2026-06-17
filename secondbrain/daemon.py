@@ -98,6 +98,19 @@ class Daemon:
                 state.set_state(conn, cluster.LAST_RUN_KEY, utcnow_iso())
         except Exception:  # noqa: BLE001
             log.exception("clustering enqueue failed")
+        # Catch-up: enqueue extraction for diarized conversations not yet processed.
+        if self.settings.extraction.enabled:
+            try:
+                from secondbrain.knowledge.extract import enqueue_extraction
+
+                rows = conn.execute(
+                    "SELECT id FROM conversations WHERE status='diarized' "
+                    "AND knowledge_status='pending'"
+                ).fetchall()
+                for r in rows:
+                    enqueue_extraction(conn, r["id"])
+            except Exception:  # noqa: BLE001
+                log.exception("extraction catch-up failed")
 
     # --- lifecycle -----------------------------------------------------------
 

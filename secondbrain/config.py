@@ -89,6 +89,29 @@ class ApiConfig(BaseModel):
     port: int = 8765
 
 
+class LLMConfig(BaseModel):
+    # Local LLM for knowledge extraction + Q&A. "mock" is the CI/dev default;
+    # "ollama" talks to a local Ollama server (fully offline).
+    backend: str = "mock"  # mock | ollama
+    model: str = "llama3.1:8b-instruct"
+    host: str = "http://127.0.0.1:11434"
+    temperature: float = 0.0
+    request_timeout_s: float = 120.0
+
+
+class ExtractionConfig(BaseModel):
+    # Knowledge graph extraction + chat. Disabled by default so Phase 1/2 (and
+    # CI) behaviour is unchanged until opted in on the Mac.
+    enabled: bool = False
+    max_context_chars: int = 24000        # ~6k tokens; char heuristic, no tokenizer
+    overlap_segments: int = 1
+    entity_match_threshold: float = 0.82  # cosine: auto-link to existing node
+    entity_review_threshold: float = 0.70  # in [review, match): LLM disambiguation
+    chat_max_hops: int = 1
+    chat_max_facts: int = 40
+    chat_max_context_chars: int = 32000
+
+
 class Settings(BaseSettings):
     """Top-level application settings."""
 
@@ -109,6 +132,8 @@ class Settings(BaseSettings):
     search: SearchConfig = Field(default_factory=SearchConfig)
     conversation: ConversationConfig = Field(default_factory=ConversationConfig)
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
 
     # --- derived paths -------------------------------------------------------

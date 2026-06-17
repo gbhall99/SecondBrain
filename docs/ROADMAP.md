@@ -29,13 +29,20 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** transcripts attributed to named people; voices learned over time.
 
-## Phase 3 — Knowledge extraction & graph (local LLM)
-- Conversation segmentation (group the continuous stream into discrete convos).
-- Local LLM (Ollama / MLX, e.g. Qwen) structured extraction: people, facts about
-  people, projects, ideas, decisions, action items.
-- Entity resolution + graph upsert with **provenance + confidence** into SQLite,
-  plus an embedded graph projection (e.g. LadybugDB) for multi-hop queries.
-- Graph-RAG chat: `sb ask "what did Dana say about Atlas?"` with citations.
+## ✅ Phase 3 — Knowledge extraction & graph (local LLM) (shipped)
+- Per-conversation extraction (after diarization) via a local LLM (**Ollama**,
+  schema-constrained JSON), behind an interface with a deterministic mock for CI.
+- Structured extraction: people, projects, orgs, topics, facts about people,
+  action items/commitments, decisions, ideas — each with `source_segment_ids`
+  provenance + confidence; low-confidence speaker attributions are downgraded to
+  'mention' (never asserted as hard facts).
+- Entity resolution (normalized-name + embedding cosine + LLM disambiguation,
+  reusing the speaker-registry helpers); Person nodes linked to `speakers`.
+- **Pure-SQLite** graph (`kg_nodes`/`kg_aliases`/`kg_edges`) with provenance and
+  **fact versioning** (superseded, not overwritten); merge mirrors speaker merge.
+- Graph-RAG chat: `sb ask` + web `/chat` answer **grounded with citations**, and
+  may add clearly-labeled general knowledge ("grounded + general"); web `/graph`
+  browser. Opted-out/redacted speech never enters the graph.
 
 **Outcome:** the actual "second brain" — ask grounded questions; browse your world.
 
