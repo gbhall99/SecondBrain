@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0003_knowledge"
+SCHEMA_VERSION = "0004_proactive"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -271,6 +271,90 @@ ALTERS_0003: list[str] = [
 ]
 
 
+# --- Phase 4: proactivity + goals (migration 0004_proactive) ------------------
+STATEMENTS_0004_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS goals (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        title            TEXT NOT NULL,
+        description      TEXT,
+        target_date      TEXT,
+        priority         INTEGER NOT NULL DEFAULT 2,   -- 1 high, 2 med, 3 low
+        status           TEXT NOT NULL DEFAULT 'active',  -- active|paused|done|dropped
+        embedding        BLOB,
+        last_progress_at TEXT,
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at       TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status)",
+    """
+    CREATE TABLE IF NOT EXISTS goal_links (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id    INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,           -- 'node' | 'edge'
+        ref_id     INTEGER NOT NULL,
+        relation   TEXT NOT NULL,           -- related|advances|contradicts
+        score      REAL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(goal_id, kind, ref_id, relation)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_goal_links_goal ON goal_links(goal_id)",
+    """
+    CREATE TABLE IF NOT EXISTS suggestions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        digest_date   TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        detail        TEXT,
+        payload       TEXT NOT NULL DEFAULT '{}',
+        citations     TEXT NOT NULL DEFAULT '[]',
+        importance    REAL NOT NULL DEFAULT 0,
+        confidence    REAL NOT NULL DEFAULT 0,
+        status        TEXT NOT NULL DEFAULT 'open',  -- open|dismissed|snoozed|done
+        snoozed_until TEXT,
+        goal_id       INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+        dedupe_hash   TEXT,
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_suggestions_date_status ON suggestions(digest_date, status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_suggestions_dedupe "
+    "ON suggestions(dedupe_hash, digest_date)",
+    """
+    CREATE TABLE IF NOT EXISTS suggestion_feedback (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        suggestion_id INTEGER REFERENCES suggestions(id) ON DELETE SET NULL,
+        dedupe_hash   TEXT,
+        kind          TEXT,
+        vote          TEXT,                  -- up|down
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_feedback_dedupe ON suggestion_feedback(dedupe_hash)",
+    """
+    CREATE TABLE IF NOT EXISTS digests (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        digest_date    TEXT NOT NULL,
+        kind           TEXT NOT NULL DEFAULT 'daily',  -- daily|weekly
+        summary_md     TEXT NOT NULL,
+        suggestion_ids TEXT NOT NULL DEFAULT '[]',
+        model          TEXT,
+        backend        TEXT,
+        created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(digest_date, kind)
+    )
+    """,
+]
+
+COLUMNS_0004: list[tuple[str, str, str]] = []  # all-new tables; kept for parity
+
+ALTERS_0004: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0004
+]
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
@@ -297,6 +381,14 @@ def apply_phase3_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase4_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0004 additions idempotently (all-new tables)."""
+    for table, column, ddl in COLUMNS_0004:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0004_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -308,6 +400,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
     apply_phase2_schema(conn)
     apply_phase3_schema(conn)
+    apply_phase4_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

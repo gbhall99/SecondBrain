@@ -92,6 +92,11 @@ def status(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
         "diarization_enabled": settings.diarization.enabled,
         "speakers_known": speakers_known,
         "unknown_clusters_pending": unknown_pending,
+        "proactive_enabled": settings.proactive.enabled,
+        "digest_count_today": conn.execute(
+            "SELECT COUNT(*) AS n FROM suggestions WHERE digest_date=? AND status='open'",
+            (today,),
+        ).fetchone()["n"],
     }
 
 
@@ -179,6 +184,86 @@ def graph_search(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[
         (like, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- goals + proactive (Phase 4) ---------------------------------------------
+
+
+def create_goal(conn, *, title, description=None, target_date=None, priority=2,
+                settings: Settings | None = None) -> int:
+    from secondbrain.goals import link, store
+
+    settings = settings or get_settings()
+    gid = store.create_goal(conn, title=title, description=description,
+                            target_date=target_date, priority=priority, settings=settings)
+    link.relink_goal(conn, gid, settings)
+    return gid
+
+
+def update_goal(conn, goal_id: int, settings: Settings | None = None, **fields) -> None:
+    from secondbrain.goals import link, store
+
+    settings = settings or get_settings()
+    store.update_goal(conn, goal_id, settings=settings, **fields)
+    link.relink_goal(conn, goal_id, settings)
+
+
+def list_goals(conn, status: str | None = None) -> list[dict]:
+    from secondbrain.goals import store
+
+    return store.list_goals(conn, status)
+
+
+def get_goal(conn, goal_id: int) -> dict | None:
+    from secondbrain.goals import store
+
+    return store.get_goal(conn, goal_id)
+
+
+def set_goal_status(conn, goal_id: int, status: str) -> None:
+    from secondbrain.goals import store
+
+    store.set_status(conn, goal_id, status)
+
+
+def delete_goal(conn, goal_id: int) -> None:
+    from secondbrain.goals import store
+
+    store.delete_goal(conn, goal_id)
+
+
+def generate_digest(conn, settings: Settings | None = None, kind: str = "daily",
+                    force: bool = False, date: str | None = None) -> dict | None:
+    from secondbrain.proactive import engine, store
+
+    settings = settings or get_settings()
+    d = date or _today()
+    existing = store.get_digest(conn, d, kind)
+    if existing and not force:
+        return existing
+    return engine.run_digest(conn, settings=settings, kind=kind, date=d)
+
+
+def get_digest(conn, date: str | None = None, kind: str = "daily") -> dict | None:
+    from secondbrain.proactive import store
+
+    return store.get_digest(conn, date or _today(), kind)
+
+
+def list_suggestions(conn, date: str | None = None, status: str = "open") -> list[dict]:
+    from secondbrain.proactive import store
+
+    return store.list_suggestions(conn, date, status)
+
+
+def suggestion_action(conn, suggestion_id: int, action: str) -> None:
+    from secondbrain.proactive import store
+
+    store.suggestion_action(conn, suggestion_id, action)
+
+
+def _today() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def graph_node(conn: sqlite3.Connection, node_id: int) -> dict | None:

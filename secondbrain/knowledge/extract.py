@@ -10,6 +10,7 @@ from low-confidence speaker attributions are downgraded to 'mention'.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.knowledge import graph, resolve
@@ -242,4 +243,29 @@ def run_extraction(
     conn.execute(
         "UPDATE conversations SET knowledge_status='extracted' WHERE id=?", (conversation_id,)
     )
+    if settings.proactive.enabled and settings.proactive.event_triggers:
+        _maybe_nudge(conn, conversation_id, settings)
     return edges_written
+
+
+def _maybe_nudge(conn: sqlite3.Connection, conversation_id: int, settings: Settings) -> None:
+    """Enqueue a brief refresh if this conversation created an urgent commitment."""
+    from datetime import datetime, timedelta
+
+    from secondbrain.pipeline import queue as q
+    from secondbrain.proactive.engine import JOB_PROACTIVE
+
+    now = datetime.now(UTC)
+    horizon = (now + timedelta(hours=settings.proactive.urgent_due_hours)).strftime("%Y-%m-%d")
+    today = now.strftime("%Y-%m-%d")
+    urgent = conn.execute(
+        """
+        SELECT 1 FROM kg_edges
+        WHERE kind='action_item' AND valid=1 AND conversation_id=?
+          AND due_date IS NOT NULL AND substr(due_date,1,10) BETWEEN ? AND ?
+        LIMIT 1
+        """,
+        (conversation_id, today, horizon),
+    ).fetchone()
+    if urgent:
+        q.enqueue(conn, JOB_PROACTIVE, {"kind": "daily"}, dedupe_key="kind")

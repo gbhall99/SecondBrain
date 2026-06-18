@@ -15,6 +15,7 @@ import logging
 import signal
 import threading
 import time
+from datetime import UTC, datetime
 
 from secondbrain.capture.recorder import Recorder
 from secondbrain.config import Settings, get_settings
@@ -75,9 +76,26 @@ class Daemon:
                     log.exception("retention sweep failed")
                 if self.settings.diarization.enabled:
                     self._diarization_maintenance(conn)
+                if self.settings.proactive.enabled:
+                    self._proactive_maintenance(conn)
                 self._stop.wait(RETENTION_INTERVAL_S)
         finally:
             conn.close()
+
+    def _proactive_maintenance(self, conn) -> None:
+        """Enqueue the daily morning brief and the weekly review when due."""
+        from secondbrain.proactive import engine
+
+        now = datetime.now(UTC)
+        try:
+            if engine.due_daily(conn, self.settings, now):
+                q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": "daily"}, dedupe_key="kind")
+                state.set_state(conn, engine.DAILY_RUN_KEY, utcnow_iso())
+            if engine.due_weekly(conn, self.settings, now):
+                q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": "weekly"}, dedupe_key="kind")
+                state.set_state(conn, engine.WEEKLY_RUN_KEY, now.strftime("%Y-W%W"))
+        except Exception:  # noqa: BLE001
+            log.exception("proactive enqueue failed")
 
     def _diarization_maintenance(self, conn) -> None:
         """Close idle conversations for diarization; enqueue clustering daily."""

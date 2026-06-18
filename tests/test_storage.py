@@ -62,13 +62,21 @@ def test_phase3_schema_present(conn):
     assert "knowledge_status" in conv_cols
 
 
+def test_phase4_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"goals", "goal_links", "suggestions", "suggestion_feedback", "digests"} <= tables
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0003_knowledge"
+    assert ver == "0004_proactive"
 
 
 def test_pause_state_roundtrip(conn):

@@ -91,3 +91,21 @@ def test_graph_endpoints(client, conn):
 def test_chat_and_graph_pages_render(client):
     assert "Ask your second brain" in client.get("/chat").text
     assert "Knowledge graph" in client.get("/graph").text
+
+
+def test_goals_api_crud(client):
+    gid = client.post("/api/goals", json={"title": "Win Q3", "priority": 1}).json()["id"]
+    titles = [g["title"] for g in client.get("/api/goals").json()["goals"]]
+    assert "Win Q3" in titles
+    assert client.post(f"/api/goals/{gid}/status", json={"status": "done"}).json()["ok"]
+
+
+def test_brief_and_goals_pages_render(client):
+    assert "Morning brief" in client.get("/brief").text
+    assert "Goals" in client.get("/goals").text
+
+
+def test_digest_generate_and_suggestions(client):
+    r = client.post("/api/digest/generate", json={"kind": "daily", "force": True})
+    assert r.status_code == 200
+    assert client.get("/api/suggestions").status_code == 200

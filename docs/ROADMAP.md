@@ -46,16 +46,21 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** the actual "second brain" — ask grounded questions; browse your world.
 
-## Phase 4 — Proactivity & goals
-- Goals as first-class entities; goal-aware assistance.
-- Nightly digest (local LLM): connection/interlink discovery, commitment
-  tracking (yours and others'), goal alignment, gentle team-member coaching.
-- Importance ranking + feedback loop for noise control (one curated brief, not a
-  stream of pings).
+## ✅ Phase 4 — Proactivity & goals (shipped)
+- Goals subsystem (CRUD + auto-linking to the graph by embedding/keyword);
+  goal-aware engine.
+- Deterministic detectors (commitments both directions, connections, goal
+  alignment, staleness) + opt-in **candid** LLM coaching; the LLM only synthesizes
+  the brief prose.
+- Nightly **morning brief** + **weekly review**; sparse real-time nudges for
+  urgent commitments.
+- Noise control: importance ranking, daily/per-kind caps, confidence floor,
+  snooze-a-kind, thumbs up/down with local per-kind weighting, cross-day dedupe.
+- Surfaces: web `/brief` + `/goals`, menu-bar digest count, `sb digest`/`sb goals`.
 
 **Outcome:** a morning brief and proactive nudges that make you more effective.
 
-## Phase 5 — Hardening & remote access
+## Phase 5 — Hardening & remote access (next)
 - Better overlap handling; profile-quality improvements; backup/export.
 - **Tailscale-secured** remote access to the local web UI as the
   privacy-preserving "from anywhere" path. (Native Telegram chat would route data

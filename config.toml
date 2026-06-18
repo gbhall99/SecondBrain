@@ -55,6 +55,28 @@ embedding_model = "bge-small"
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
 
+[proactive]
+# Proactive engine (Phase 4): goals, nightly morning brief + weekly review,
+# commitment tracking, connection discovery, and (opt-in) candid coaching.
+# Disabled by default; enable on the Mac once extraction is running.
+enabled = false
+event_triggers = false         # real-time nudges for urgent (same-day) commitments
+coaching_enabled = false       # candid, transcript-grounded team-member coaching
+digest_hour = 6                # local hour to generate the morning brief
+weekly_review_weekday = 0      # 0=Monday … 6=Sunday
+top_n = 5                      # max suggestions surfaced per day
+per_kind_cap = 2
+recent_days = 1
+lookback_days = 30
+connection_threshold = 0.78
+goal_link_threshold = 0.72
+due_soon_days = 3
+stale_goal_days = 14
+stale_days = 21
+confidence_floor = 0.4
+suppress_days = 30
+urgent_due_hours = 24
+
 [llm]
 # Local LLM for knowledge extraction + Q&A (Phase 3). Fully offline via Ollama.
 # Set backend = "ollama" and run `ollama serve` + pull the model on the Mac.

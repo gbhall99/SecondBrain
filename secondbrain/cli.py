@@ -308,5 +308,80 @@ def speaker_cluster() -> None:
     typer.echo(f"Performed {n} merge(s).")
 
 
+# --- proactivity + goals (Phase 4) -------------------------------------------
+
+
+@app.command()
+def digest(
+    weekly: bool = typer.Option(False, help="Show the weekly review instead of the daily brief."),
+    regenerate: bool = typer.Option(False, help="Force regeneration."),
+) -> None:
+    """Show today's morning brief (or weekly review)."""
+    settings = get_settings()
+    kind = "weekly" if weekly else "daily"
+    with db_session(settings=settings) as conn:
+        d = service.generate_digest(conn, settings, kind=kind, force=regenerate)
+        suggestions = service.list_suggestions(conn)
+    if d:
+        typer.echo(d["summary_md"].strip() + "\n")
+    for s in suggestions:
+        typer.echo(f"  #{s['id']} [{s['kind']}] {s['title']} — {s['detail']}")
+
+
+@app.command("digest-action")
+def digest_action(
+    suggestion_id: int,
+    action: str = typer.Argument(..., help="dismiss | snooze | done | up | down"),
+) -> None:
+    """Act on a suggestion (dismiss/snooze/done/up/down)."""
+    with db_session(settings=get_settings()) as conn:
+        service.suggestion_action(conn, suggestion_id, action)
+    typer.echo(f"Applied '{action}' to suggestion #{suggestion_id}.")
+
+
+goals_app = typer.Typer(no_args_is_help=True, help="Manage goals.")
+app.add_typer(goals_app, name="goals")
+
+
+@goals_app.command("add")
+def goals_add(
+    title: str,
+    description: str = typer.Option(None, "--description", "-d"),
+    target_date: str = typer.Option(None, "--target-date"),
+    priority: int = typer.Option(2, "--priority", "-p", help="1 high, 2 med, 3 low"),
+) -> None:
+    """Add a goal."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        gid = service.create_goal(conn, title=title, description=description,
+                                  target_date=target_date, priority=priority, settings=settings)
+    typer.echo(f"Added goal #{gid}.")
+
+
+@goals_app.command("list")
+def goals_list() -> None:
+    """List goals."""
+    with db_session(settings=get_settings()) as conn:
+        for g in service.list_goals(conn):
+            due = f" by {g['target_date']}" if g["target_date"] else ""
+            typer.echo(f"#{g['id']:<4} [{g['status']}] P{g['priority']} {g['title']}{due}")
+
+
+@goals_app.command("set-status")
+def goals_set_status(goal_id: int, status: str) -> None:
+    """Set goal status (active|paused|done|dropped)."""
+    with db_session(settings=get_settings()) as conn:
+        service.set_goal_status(conn, goal_id, status)
+    typer.echo(f"Goal #{goal_id} → {status}.")
+
+
+@goals_app.command("rm")
+def goals_rm(goal_id: int) -> None:
+    """Delete a goal."""
+    with db_session(settings=get_settings()) as conn:
+        service.delete_goal(conn, goal_id)
+    typer.echo(f"Deleted goal #{goal_id}.")
+
+
 if __name__ == "__main__":
     app()

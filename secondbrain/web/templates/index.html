@@ -48,6 +48,9 @@
       ({{ status.unknown_clusters_pending }} to label){% endif %}</button></a>
     <a href="/chat"><button>Ask</button></a>
     <a href="/graph"><button>Graph</button></a>
+    <a href="/brief"><button>Brief{% if status.digest_count_today %}
+      ({{ status.digest_count_today }}){% endif %}</button></a>
+    <a href="/goals"><button>Goals</button></a>
   </div>
 
   <form onsubmit="doSearch(event)">

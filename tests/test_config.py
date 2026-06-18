@@ -39,6 +39,17 @@ def test_llm_and_extraction_config_defaults_and_env(monkeypatch):
     assert s2.extraction.enabled is True
 
 
+def test_proactive_config_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert s.proactive.enabled is False
+    assert s.proactive.top_n == 5
+    monkeypatch.setenv("SB_PROACTIVE__ENABLED", "true")
+    monkeypatch.setenv("SB_PROACTIVE__DIGEST_HOUR", "8")
+    s2 = Settings()
+    assert s2.proactive.enabled is True
+    assert s2.proactive.digest_hour == 8
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()

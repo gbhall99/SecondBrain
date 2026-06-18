@@ -89,6 +89,28 @@ class ApiConfig(BaseModel):
     port: int = 8765
 
 
+class ProactiveConfig(BaseModel):
+    # Proactive engine: nightly brief + weekly review, goals, nudges. OFF by
+    # default so earlier phases/CI are unchanged until enabled on the Mac.
+    enabled: bool = False
+    event_triggers: bool = False       # real-time nudges for urgent commitments
+    coaching_enabled: bool = False     # candid, transcript-grounded coaching (opt-in)
+    digest_hour: int = 6               # local hour the morning brief is generated
+    weekly_review_weekday: int = 0     # 0=Monday … 6=Sunday
+    top_n: int = 5                     # daily cap on surfaced suggestions
+    per_kind_cap: int = 2
+    recent_days: int = 1
+    lookback_days: int = 30
+    connection_threshold: float = 0.78
+    goal_link_threshold: float = 0.72
+    due_soon_days: int = 3
+    stale_goal_days: int = 14
+    stale_days: int = 21
+    confidence_floor: float = 0.4
+    suppress_days: int = 30
+    urgent_due_hours: int = 24
+
+
 class LLMConfig(BaseModel):
     # Local LLM for knowledge extraction + Q&A. "mock" is the CI/dev default;
     # "ollama" talks to a local Ollama server (fully offline).
@@ -134,6 +156,7 @@ class Settings(BaseSettings):
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
+    proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
 
     # --- derived paths -------------------------------------------------------

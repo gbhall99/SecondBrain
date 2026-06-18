@@ -86,6 +86,17 @@ def test_extraction_disabled_enqueues_no_job(conn, settings):
     ).fetchone()["n"] == 0
 
 
+def test_worker_dispatches_proactive_job(conn, settings):
+    from secondbrain.llm.client import MockLLM
+    from secondbrain.pipeline import queue as q
+    from secondbrain.proactive.engine import JOB_PROACTIVE
+
+    settings.proactive.enabled = True
+    q.enqueue(conn, JOB_PROACTIVE, {"kind": "daily"})
+    worker.drain(conn, llm=MockLLM(responses=["brief"]), settings=settings)
+    assert conn.execute("SELECT COUNT(*) AS n FROM digests").fetchone()["n"] == 1
+
+
 def test_worker_dispatches_extract_job(conn, settings):
     # The worker should claim and run an enqueued extract_knowledge job.
     from secondbrain.knowledge.extract import enqueue_extraction

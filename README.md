@@ -5,11 +5,12 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phases 1–3 shipped: capture + transcript, speaker diarization & voice
-> profiles, and a local-LLM knowledge graph with grounded Q&A.** It records,
-> attributes who said what, learns recurring voices, builds a knowledge graph of
-> people/projects/decisions/commitments, and answers questions with citations.
-> Proactive assistance and goals are planned next — see [the roadmap](docs/ROADMAP.md).
+> **Phases 1–4 shipped: capture + transcript, diarization & voice profiles, a
+> local-LLM knowledge graph with grounded Q&A, and proactive assistance + goals.**
+> It records, attributes who said what, learns recurring voices, builds a
+> knowledge graph, answers questions with citations, and proactively produces a
+> morning brief / weekly review (commitments, goal progress, connections, candid
+> coaching). See [the roadmap](docs/ROADMAP.md) for what's next.
 
 ## What it does today
 
@@ -35,6 +36,12 @@ room mic ─► capture daemon ─► rolling FLAC chunks ─► VAD (drop silen
   `sb ask` / the web chat answer questions grounded in your data **with
   citations** (and clearly-labeled general knowledge when helpful). Nothing leaves
   the machine.
+- **Proactivity + goals** (Phase 4) — set goals, and get a curated **morning
+  brief** + **weekly review**: commitments you owe (before due) and ones owed to
+  you (overdue), goal progress, cross-conversation connections, and opt-in candid
+  coaching — all ranked with noise control (daily cap, snooze, thumbs-up/down,
+  confidence floor) and cited. Web `/brief` + `/goals`, menu-bar count, real-time
+  nudges for urgent commitments, `sb digest` / `sb goals`.
 - **Privacy controls built in:** always-visible recording indicator + one-tap
   pause (menu bar), raw-audio auto-deletion after a retention window
   (transcripts kept; deferred until a conversation is diarized), disk-space
@@ -110,6 +117,22 @@ sb ask "what did Dana commit to this week?"   # grounded answer + sources
 Web: **Ask** (`/chat`) for grounded Q&A with citation chips, and **Graph**
 (`/graph`) to browse people/projects/decisions and their sources.
 
+### Goals & the proactive brief (Phase 4)
+
+```bash
+sb goals add "Ship pricing v2" -d "revamp tiers" -p 1 --target-date 2026-09-30
+sb goals list
+sb digest                          # today's morning brief + ranked items
+sb digest --weekly                 # the weekly review
+sb digest-action 3 done            # done | dismiss | snooze | up | down
+```
+
+Web: **Brief** (`/brief`) shows the morning brief with per-item actions; **Goals**
+(`/goals`) manages goals. The brief is generated nightly at `[proactive].digest_hour`
+(weekly review on `weekly_review_weekday`); enable with `[proactive].enabled = true`
+(and `coaching_enabled` / `event_triggers` as desired). It reuses the same local
+Ollama model as Phase 3.
+
 **One-time local-LLM setup (fully offline):** install [Ollama](https://ollama.com),
 `ollama serve`, and `ollama pull llama3.1:8b-instruct` (or your preferred instruct
 model). Then set `[llm].backend = "ollama"` (and `[llm].model`) and
@@ -133,6 +156,8 @@ diarization runs fully offline.
 | Speakers (registry, matching, clustering, enrollment, attribution) | `secondbrain/speaker/` |
 | Local LLM (Ollama / mock client) | `secondbrain/llm/` |
 | Knowledge (extraction, entity resolution, graph store, chat) | `secondbrain/knowledge/` |
+| Goals (store, auto-linking) | `secondbrain/goals/` |
+| Proactive (detectors, ranking/noise-control, digest engine) | `secondbrain/proactive/` |
 | Storage (schema, models, retention, state) | `secondbrain/storage/` |
 | Search (full-text, semantic, fusion) | `secondbrain/search/` |
 | Web UI / API | `secondbrain/query/`, `secondbrain/web/` |

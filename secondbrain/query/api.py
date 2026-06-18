@@ -156,6 +156,77 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "node not found")
         return node
 
+    # --- proactivity + goals (Phase 4) ---------------------------------------
+
+    @app.get("/brief", response_class=HTMLResponse)
+    def brief_page(request: Request):
+        with db() as conn:
+            daily = service.get_digest(conn, kind="daily")
+            suggestions = service.list_suggestions(conn)
+        return templates.TemplateResponse(
+            request, "brief.html", {"digest": daily, "suggestions": suggestions}
+        )
+
+    @app.get("/api/digest")
+    def api_digest(kind: str = Query("daily"), date: str = Query(None)):
+        with db() as conn:
+            return service.get_digest(conn, date, kind) or {}
+
+    @app.post("/api/digest/generate")
+    def api_digest_generate(
+        kind: str = Body("daily", embed=True), force: bool = Body(True, embed=True)
+    ):
+        with db() as conn:
+            return service.generate_digest(conn, settings, kind=kind, force=force) or {}
+
+    @app.get("/api/suggestions")
+    def api_suggestions(date: str = Query(None), status: str = Query("open")):
+        with db() as conn:
+            return {"suggestions": service.list_suggestions(conn, date, status)}
+
+    @app.post("/api/suggestions/{suggestion_id}/action")
+    def api_suggestion_action(suggestion_id: int, action: str = Body(..., embed=True)):
+        with db() as conn:
+            service.suggestion_action(conn, suggestion_id, action)
+        return {"ok": True}
+
+    @app.get("/goals", response_class=HTMLResponse)
+    def goals_page(request: Request):
+        with db() as conn:
+            goals = service.list_goals(conn)
+        return templates.TemplateResponse(request, "goals.html", {"goals": goals})
+
+    @app.get("/api/goals")
+    def api_goals():
+        with db() as conn:
+            return {"goals": service.list_goals(conn)}
+
+    @app.post("/api/goals")
+    def api_create_goal(
+        title: str = Body(...),
+        description: str = Body(None),
+        target_date: str = Body(None),
+        priority: int = Body(2),
+    ):
+        with db() as conn:
+            gid = service.create_goal(
+                conn, title=title, description=description,
+                target_date=target_date, priority=priority, settings=settings,
+            )
+        return {"id": gid}
+
+    @app.post("/api/goals/{goal_id}/status")
+    def api_goal_status(goal_id: int, status: str = Body(..., embed=True)):
+        with db() as conn:
+            service.set_goal_status(conn, goal_id, status)
+        return {"ok": True}
+
+    @app.delete("/api/goals/{goal_id}")
+    def api_delete_goal(goal_id: int):
+        with db() as conn:
+            service.delete_goal(conn, goal_id)
+        return {"ok": True}
+
     return app
 
 

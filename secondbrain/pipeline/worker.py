@@ -19,6 +19,7 @@ from secondbrain.pipeline import queue as q
 from secondbrain.pipeline.diarize import Diarizer, get_diarizer
 from secondbrain.pipeline.transcribe import Transcriber, get_transcriber
 from secondbrain.pipeline.vad import Vad, get_vad
+from secondbrain.proactive import engine
 from secondbrain.search import semantic
 from secondbrain.speaker import attribution
 from secondbrain.storage import models, retention
@@ -167,6 +168,11 @@ def run_once(
             from secondbrain.speaker import cluster
 
             cluster.run_clustering(conn, settings=settings)
+        elif job.type == engine.JOB_PROACTIVE:
+            engine.run_digest(
+                conn, llm=llm or get_llm(settings),
+                settings=settings, kind=job.payload.get("kind", "daily"),
+            )
         else:
             raise ValueError(f"unknown job type {job.type!r}")
         q.complete(conn, job.id)
