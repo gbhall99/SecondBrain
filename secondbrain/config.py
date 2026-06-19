@@ -89,6 +89,22 @@ class ApiConfig(BaseModel):
     port: int = 8765
 
 
+class SecurityConfig(BaseModel):
+    # Auth + at-rest encryption. All OFF by default so local use & CI are
+    # unchanged. Enable when exposing the UI beyond localhost (e.g. Tailscale).
+    require_auth: bool = False
+    username: str = "owner"
+    session_max_age_days: int = 14
+    # SQLCipher at-rest encryption of the database (needs the `secure` extra +
+    # a passphrase; put the passphrase in config.local.toml or SB_SECURITY__DB_PASSPHRASE).
+    encrypt_db: bool = False
+    db_passphrase: str = ""
+
+
+class LoggingConfig(BaseModel):
+    level: str = "INFO"
+
+
 class ProactiveConfig(BaseModel):
     # Proactive engine: nightly brief + weekly review, goals, nudges. OFF by
     # default so earlier phases/CI are unchanged until enabled on the Mac.
@@ -158,6 +174,8 @@ class Settings(BaseSettings):
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     # --- derived paths -------------------------------------------------------
 

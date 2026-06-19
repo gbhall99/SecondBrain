@@ -50,6 +50,17 @@ def test_proactive_config_defaults_and_env(monkeypatch):
     assert s2.proactive.digest_hour == 8
 
 
+def test_security_config_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert s.security.require_auth is False
+    assert s.security.encrypt_db is False
+    monkeypatch.setenv("SB_SECURITY__REQUIRE_AUTH", "true")
+    monkeypatch.setenv("SB_SECURITY__DB_PASSPHRASE", "hunter2")
+    s2 = Settings()
+    assert s2.security.require_auth is True
+    assert s2.security.db_passphrase == "hunter2"
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()

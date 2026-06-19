@@ -60,12 +60,23 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** a morning brief and proactive nudges that make you more effective.
 
-## Phase 5 — Hardening & remote access (next)
-- Better overlap handling; profile-quality improvements; backup/export.
-- **Tailscale-secured** remote access to the local web UI as the
-  privacy-preserving "from anywhere" path. (Native Telegram chat would route data
-  through Telegram's cloud, breaking the local-only guarantee — explicit opt-in
-  only.)
+## ✅ Phase 5 — Hardening: secure remote access, encryption, health (shipped)
+- **Auth**: username/password with a stdlib HMAC-signed session cookie; loopback
+  exempt; OFF by default. `sb auth set-password`.
+- **Safe binding**: the server refuses a non-loopback bind without auth (fail
+  closed). **Tailscale-secured** remote access is the "from anywhere" path
+  (`tailscale serve` to 127.0.0.1, or tailnet bind + require_auth).
+- **Encryption at rest**: optional SQLCipher (`[secure]` extra + passphrase);
+  otherwise rely on FileVault.
+- **Health/observability**: `GET /health` + `sb doctor` (migrations, disk,
+  backends, encryption, recording) + structured logging.
+
+**Outcome:** safe to run daily and reach securely from anywhere.
+
+## Later — still open
+- Backup/export (Markdown + JSON) and import/restore.
+- Data "forget": purge a person/day/range, VACUUM.
+- Diarization overlap handling + speaker/profile-quality tuning.
 
 ## Cross-cutting principles
 - **Local-first / offline** at every phase.

@@ -9,14 +9,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from secondbrain import health
 from secondbrain.config import Settings, get_settings
 from secondbrain.query import service
+from secondbrain.security import auth
 from secondbrain.storage import state
-from secondbrain.storage.db import db_session
+from secondbrain.storage.db import db_session, init_db
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -29,8 +31,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # Session signing secret (created on first use; lives in app_state).
+    init_db(settings=settings).close()
+    with db_session(settings=settings) as _c:
+        secret = auth.session_secret(_c)
+
     def db():
         return db_session(settings=settings)
+
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        if settings.security.require_auth:
+            host = request.client.host if request.client else None
+            path = request.url.path
+            if not auth.is_loopback(host) and not auth.is_exempt(path):
+                cookie = request.cookies.get(auth.COOKIE_NAME, "")
+                if auth.verify_cookie(cookie, secret) is None:
+                    if path.startswith("/api/"):
+                        return JSONResponse({"detail": "authentication required"}, status_code=401)
+                    return RedirectResponse("/login", status_code=303)
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.get("/health")
+    def health_endpoint():
+        with db() as conn:
+            return health.summary(conn, settings)
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request):
+        return templates.TemplateResponse(request, "login.html", {})
+
+    @app.post("/login")
+    def login(username: str = Body(...), password: str = Body(...)):
+        with db() as conn:
+            ok = auth.authenticate(conn, username, password)
+        if not ok:
+            raise HTTPException(401, "invalid credentials")
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie(
+            auth.COOKIE_NAME,
+            auth.make_cookie(username, secret, settings.security.session_max_age_days),
+            max_age=settings.security.session_max_age_days * 86400,
+            httponly=True,
+            samesite="lax",
+        )
+        return resp
+
+    @app.post("/logout")
+    def logout():
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(auth.COOKIE_NAME)
+        return resp
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):

@@ -40,6 +40,9 @@ ml = [
 mac = [
     "rumps>=0.4.0; platform_system == 'Darwin'",
 ]
+secure = [
+    "sqlcipher3-binary>=0.5",  # SQLCipher driver for at-rest DB encryption
+]
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",

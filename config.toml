@@ -55,6 +55,22 @@ embedding_model = "bge-small"
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
 
+[security]
+# Auth + at-rest encryption (Phase 5). Off by default. To reach the UI over
+# Tailscale, either run `tailscale serve` to 127.0.0.1, or set api.host to the
+# tannet IP AND require_auth=true (the server refuses a non-loopback bind without
+# auth). Set the password with `sb auth set-password`.
+require_auth = false
+username = "owner"
+session_max_age_days = 14
+# SQLCipher database encryption. Needs `pip install -e ".[secure]"` and a
+# passphrase — put it in config.local.toml or the SB_SECURITY__DB_PASSPHRASE env.
+encrypt_db = false
+db_passphrase = ""
+
+[logging]
+level = "INFO"
+
 [proactive]
 # Proactive engine (Phase 4): goals, nightly morning brief + weekly review,
 # commitment tracking, connection discovery, and (opt-in) candid coaching.

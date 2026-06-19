@@ -5,12 +5,12 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phases 1–4 shipped: capture + transcript, diarization & voice profiles, a
-> local-LLM knowledge graph with grounded Q&A, and proactive assistance + goals.**
-> It records, attributes who said what, learns recurring voices, builds a
-> knowledge graph, answers questions with citations, and proactively produces a
-> morning brief / weekly review (commitments, goal progress, connections, candid
-> coaching). See [the roadmap](docs/ROADMAP.md) for what's next.
+> **Phases 1–5 shipped: capture + transcript, diarization & voice profiles, a
+> local-LLM knowledge graph with grounded Q&A, proactive assistance + goals, and
+> hardening (auth, encryption, health).** It records, attributes who said what,
+> learns recurring voices, builds a knowledge graph, answers questions with
+> citations, proactively produces a morning brief / weekly review, and can be
+> reached securely from anywhere over Tailscale. See [the roadmap](docs/ROADMAP.md).
 
 ## What it does today
 
@@ -158,6 +158,7 @@ diarization runs fully offline.
 | Knowledge (extraction, entity resolution, graph store, chat) | `secondbrain/knowledge/` |
 | Goals (store, auto-linking) | `secondbrain/goals/` |
 | Proactive (detectors, ranking/noise-control, digest engine) | `secondbrain/proactive/` |
+| Security (auth) + health + logging | `secondbrain/security/`, `secondbrain/health.py` |
 | Storage (schema, models, retention, state) | `secondbrain/storage/` |
 | Search (full-text, semantic, fusion) | `secondbrain/search/` |
 | Web UI / API | `secondbrain/query/`, `secondbrain/web/` |
@@ -184,10 +185,30 @@ pytest          # unit tests (mock audio + transcriber; no MLX/CoreAudio needed)
 ruff check .
 ```
 
+### Hardening: remote access, encryption, health (Phase 5)
+
+```bash
+sb doctor                          # preflight: config, disk, migrations, backends
+sb auth set-password               # set the web UI username/password
+```
+
+- **Health:** `GET /health` (no auth) reports migration version, disk, counts, and
+  backend reachability; `sb doctor` is the CLI preflight.
+- **Secure remote access:** auth is OFF by default (local-only). To reach the UI
+  from your phone/laptop, either keep `127.0.0.1` and run
+  `tailscale serve https / 127.0.0.1:8765`, or set `[api].host` to your tailnet IP
+  **and** `[security].require_auth = true` (the server *refuses* a non-loopback
+  bind without auth). Loopback requests never need a login.
+- **Encryption at rest:** `pip install -e ".[secure]"`, set
+  `[security].encrypt_db = true` + a passphrase (in `config.local.toml` or
+  `SB_SECURITY__DB_PASSPHRASE`) to open the SQLite DB via SQLCipher. (Otherwise
+  rely on macOS FileVault.)
+
 ## Roadmap
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phased plan (diarization &
-voice profiles → local-LLM knowledge graph → proactive assistance & goals).
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phased plan. Phases 1–5 are
+shipped; remaining ideas: backup/export, data "forget", and diarization/profile
+quality tuning.
 
 ## License
 

@@ -65,13 +65,28 @@ def serve(
     import uvicorn
 
     from secondbrain.query.api import create_app
+    from secondbrain.security import auth
 
     settings = get_settings()
     settings.ensure_dirs()
     init_db(settings=settings).close()
+    bind_host = host or settings.api.host
+    # Fail closed: refuse to expose beyond loopback without auth + a password.
+    if not auth.is_loopback(bind_host) and not settings.security.require_auth:
+        typer.echo(
+            f"Refusing to bind to non-loopback host {bind_host!r} without auth. "
+            "Set [security].require_auth=true and run `sb auth set-password`, or "
+            "keep host=127.0.0.1 and use `tailscale serve`."
+        )
+        raise typer.Exit(1)
+    if settings.security.require_auth:
+        with db_session(settings=settings) as conn:
+            if not auth.has_password(conn):
+                typer.echo("require_auth is set but no password. Run `sb auth set-password`.")
+                raise typer.Exit(1)
     uvicorn.run(
         create_app(settings),
-        host=host or settings.api.host,
+        host=bind_host,
         port=port or settings.api.port,
         log_level="info",
     )
@@ -381,6 +396,61 @@ def goals_rm(goal_id: int) -> None:
     with db_session(settings=get_settings()) as conn:
         service.delete_goal(conn, goal_id)
     typer.echo(f"Deleted goal #{goal_id}.")
+
+
+# --- hardening: health + auth (Phase 5) --------------------------------------
+
+
+@app.command()
+def doctor() -> None:
+    """Run health/preflight checks (config, disk, migrations, backends)."""
+    from secondbrain import health
+
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        checks = health.run_checks(conn, settings)
+    failed = 0
+    for c in checks:
+        mark = "✓" if c.ok else "✗"
+        if not c.ok:
+            failed += 1
+        typer.echo(f"  {mark} {c.name}: {c.detail}")
+    typer.echo(f"\n{'All checks passed.' if not failed else f'{failed} check(s) failed.'}")
+    if failed:
+        raise typer.Exit(1)
+
+
+auth_app = typer.Typer(no_args_is_help=True, help="Authentication for remote access.")
+app.add_typer(auth_app, name="auth")
+
+
+@auth_app.command("set-password")
+def auth_set_password(
+    username: str = typer.Option(None, help="Username (default from config)."),
+    password: str = typer.Option(
+        None, prompt=True, hide_input=True, confirmation_prompt=True,
+        help="Password (prompted if omitted).",
+    ),
+) -> None:
+    """Set the web UI username/password (stored hashed in the database)."""
+    from secondbrain.security import auth
+
+    settings = get_settings()
+    user = username or settings.security.username
+    with db_session(settings=settings) as conn:
+        auth.set_password(conn, user, password)
+    typer.echo(f"Password set for '{user}'. Set [security].require_auth=true to enforce remotely.")
+
+
+@auth_app.command("status")
+def auth_status() -> None:
+    """Show whether auth is configured."""
+    from secondbrain.security import auth
+
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        has = auth.has_password(conn)
+    typer.echo(f"require_auth={settings.security.require_auth} · password_set={has}")
 
 
 if __name__ == "__main__":
