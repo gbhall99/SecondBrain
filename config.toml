@@ -71,6 +71,18 @@ db_passphrase = ""
 [logging]
 level = "INFO"
 
+[tasks]
+# Goal decomposition, tasks, and the daily plan (Phase 6). Off by default.
+enabled = false
+daily_capacity_minutes = 240
+urgent_days = 2
+important_value = 4
+# Opt-in per-task web research. Local graph-RAG research is always available;
+# web research only runs when this is true AND you explicitly request it.
+web_research_enabled = false
+web_search_url = ""            # user-supplied search endpoint (e.g. SearXNG JSON)
+autonomy = "propose"          # propose (you approve) | auto
+
 [proactive]
 # Proactive engine (Phase 4): goals, nightly morning brief + weekly review,
 # commitment tracking, connection discovery, and (opt-in) candid coaching.

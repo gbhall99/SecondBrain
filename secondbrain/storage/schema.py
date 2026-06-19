@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0004_proactive"
+SCHEMA_VERSION = "0005_tasks"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -354,6 +354,70 @@ ALTERS_0004: list[str] = [
     f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0004
 ]
 
+# --- Phase 6: tasks + daily planning (migration 0005_tasks) -------------------
+STATEMENTS_0005_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS tasks (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id          INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+        parent_task_id   INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+        title            TEXT NOT NULL,
+        detail           TEXT,
+        status           TEXT NOT NULL DEFAULT 'backlog',
+                         -- backlog|next|scheduled|in_progress|blocked|done|dropped
+        estimate_minutes INTEGER,
+        due_date         TEXT,
+        scheduled_for    TEXT,                 -- YYYY-MM-DD when planned into a day
+        effort           INTEGER NOT NULL DEFAULT 3,   -- 1..5
+        value            INTEGER NOT NULL DEFAULT 3,   -- 1..5
+        energy           TEXT,                 -- deep|quick|errand|call|…
+        source           TEXT NOT NULL DEFAULT 'manual',  -- manual|ai|conversation
+        source_edge_id   INTEGER REFERENCES kg_edges(id) ON DELETE SET NULL,
+        position         INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at       TEXT,
+        completed_at     TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(scheduled_for)",
+    """
+    CREATE TABLE IF NOT EXISTS task_deps (
+        task_id            INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        depends_on_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        PRIMARY KEY (task_id, depends_on_task_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_research (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        query       TEXT,
+        backend     TEXT,                 -- local|web|mock
+        summary_md  TEXT,
+        sources     TEXT NOT NULL DEFAULT '[]',   -- JSON array of {title,ref}
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_research_task ON task_research(task_id)",
+    """
+    CREATE TABLE IF NOT EXISTS day_plans (
+        date             TEXT PRIMARY KEY,
+        capacity_minutes INTEGER NOT NULL DEFAULT 240,
+        status           TEXT NOT NULL DEFAULT 'proposed',  -- proposed|accepted
+        task_ids         TEXT NOT NULL DEFAULT '[]',        -- JSON, ordered
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+]
+
+COLUMNS_0005: list[tuple[str, str, str]] = []
+
+ALTERS_0005: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0005
+]
+
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -389,6 +453,18 @@ def apply_phase4_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase5_schema(conn: sqlite3.Connection) -> None:
+    """Phase 5 added no tables (auth lives in app_state); kept for symmetry."""
+
+
+def apply_phase6_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0005 additions idempotently (all-new task tables)."""
+    for table, column, ddl in COLUMNS_0005:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0005_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -401,6 +477,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase2_schema(conn)
     apply_phase3_schema(conn)
     apply_phase4_schema(conn)
+    apply_phase6_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

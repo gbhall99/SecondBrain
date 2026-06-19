@@ -93,6 +93,20 @@ def test_chat_and_graph_pages_render(client):
     assert "Knowledge graph" in client.get("/graph").text
 
 
+def test_tasks_api_and_plan(client):
+    tid = client.post("/api/tasks", json={"title": "Write spec", "value": 5,
+                                          "estimate_minutes": 30}).json()["id"]
+    assert any(t["id"] == tid for t in client.get("/api/tasks").json()["tasks"])
+    plan = client.post("/api/plan/today", json={"action": "propose"}).json()
+    assert tid in plan["task_ids"]
+    assert client.post("/api/plan/today", json={"action": "accept"}).json()["status"] == "accepted"
+    assert client.post(f"/api/tasks/{tid}/status", json={"status": "done"}).json()["ok"]
+
+
+def test_tasks_page_renders(client):
+    assert "Tasks" in client.get("/tasks").text
+
+
 def test_goals_api_crud(client):
     gid = client.post("/api/goals", json={"title": "Win Q3", "priority": 1}).json()["id"]
     titles = [g["title"] for g in client.get("/api/goals").json()["goals"]]

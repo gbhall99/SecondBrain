@@ -158,6 +158,78 @@ def set_owner(conn: sqlite3.Connection, speaker_id: int) -> None:
     conn.execute("UPDATE speakers SET is_owner=1, kind='owner' WHERE id=?", (sid,))
 
 
+# --- tasks + daily planning (Phase 6) ----------------------------------------
+
+
+def create_task(conn, **kw) -> int:
+    from secondbrain.tasks import store
+
+    return store.create_task(conn, **kw)
+
+
+def list_tasks(conn, *, goal_id=None, status=None) -> list[dict]:
+    from secondbrain.tasks import store
+
+    return store.list_tasks(conn, goal_id=goal_id, status=status)
+
+
+def task_set_status(conn, task_id: int, status: str) -> None:
+    from secondbrain.tasks import store
+
+    store.set_status(conn, task_id, status)
+
+
+def promote_action_item(conn, edge_id: int, goal_id: int | None = None) -> int | None:
+    from secondbrain.tasks import store
+
+    return store.promote_action_item(conn, edge_id, goal_id)
+
+
+def decompose_goal(conn, goal_id: int, settings: Settings | None = None) -> dict:
+    from secondbrain.tasks import decompose
+
+    return decompose.propose_plan(conn, goal_id, settings=settings or get_settings())
+
+
+def accept_plan(conn, goal_id: int, plan: dict) -> list[int]:
+    from secondbrain.tasks import decompose
+
+    return decompose.accept_plan(conn, goal_id, plan)
+
+
+def propose_day(conn, date=None, capacity_minutes=None, settings: Settings | None = None) -> dict:
+    from secondbrain.tasks import planner
+
+    return planner.propose_day(conn, date, capacity_minutes, settings or get_settings())
+
+
+def accept_day(conn, date=None) -> dict | None:
+    from secondbrain.tasks import planner
+
+    return planner.accept_day(conn, date)
+
+
+def get_day(conn, date=None) -> dict | None:
+    from secondbrain.tasks import planner
+
+    return planner.get_day(conn, date)
+
+
+def task_research(
+    conn, task_id: int, query=None, *, web=False, settings: Settings | None = None
+) -> int:
+    from secondbrain.tasks import research
+
+    return research.run_research(conn, task_id, query, web=web, settings=settings or get_settings())
+
+
+def task_research_notes(conn, task_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM task_research WHERE task_id=? ORDER BY created_at DESC", (task_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # --- knowledge graph + Q&A (Phase 3) -----------------------------------------
 
 

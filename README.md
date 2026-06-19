@@ -5,12 +5,11 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phases 1–5 shipped: capture + transcript, diarization & voice profiles, a
-> local-LLM knowledge graph with grounded Q&A, proactive assistance + goals, and
-> hardening (auth, encryption, health).** It records, attributes who said what,
-> learns recurring voices, builds a knowledge graph, answers questions with
-> citations, proactively produces a morning brief / weekly review, and can be
-> reached securely from anywhere over Tailscale. See [the roadmap](docs/ROADMAP.md).
+> **Phases 1–6 shipped: capture + transcript, diarization & voice profiles, a
+> local-LLM knowledge graph with grounded Q&A, proactive assistance + goals,
+> hardening (auth, encryption, health), and goals-as-an-advanced-to-do-list (AI
+> decomposition, a prioritisation matrix, a daily plan, and task research).** See
+> [the roadmap](docs/ROADMAP.md).
 
 ## What it does today
 
@@ -159,6 +158,7 @@ diarization runs fully offline.
 | Goals (store, auto-linking) | `secondbrain/goals/` |
 | Proactive (detectors, ranking/noise-control, digest engine) | `secondbrain/proactive/` |
 | Security (auth) + health + logging | `secondbrain/security/`, `secondbrain/health.py` |
+| Tasks (decompose, prioritise, plan, research) | `secondbrain/tasks/` |
 | Storage (schema, models, retention, state) | `secondbrain/storage/` |
 | Search (full-text, semantic, fusion) | `secondbrain/search/` |
 | Web UI / API | `secondbrain/query/`, `secondbrain/web/` |
@@ -204,11 +204,29 @@ sb auth set-password               # set the web UI username/password
   `SB_SECURITY__DB_PASSPHRASE`) to open the SQLite DB via SQLCipher. (Otherwise
   rely on macOS FileVault.)
 
+### Goals as an advanced to-do list (Phase 6)
+
+```bash
+sb goals add "Launch newsletter" -p 1
+sb decompose <goal_id> --accept     # AI breaks the goal into a task tree (you approve)
+sb plan --capacity 240              # propose today's prioritised plan (Eisenhower + score)
+sb plan --accept                    # commit it to your day
+sb task list ; sb task done <id>
+sb task research <id>               # local graph-RAG research (--web for opt-in web)
+```
+
+Web: **Tasks** (`/tasks`) shows Today + backlog with one-tap done/research; the
+goal page can decompose a goal into a plan. Action items detected in your
+conversations can be promoted to tasks. Prioritisation is an Eisenhower matrix
+(urgent×important) plus a weighted score; research is **local-first** (your own
+knowledge graph) with **opt-in web research** (`[tasks].web_research_enabled` +
+a search endpoint).
+
 ## Roadmap
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phased plan. Phases 1–5 are
-shipped; remaining ideas: backup/export, data "forget", and diarization/profile
-quality tuning.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phased plan. Phases 1–6 are
+shipped; remaining ideas: backup/export, data "forget", calendar time-blocking,
+and diarization/profile quality tuning.
 
 ## License
 

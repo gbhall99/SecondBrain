@@ -61,6 +61,18 @@ def test_security_config_defaults_and_env(monkeypatch):
     assert s2.security.db_passphrase == "hunter2"
 
 
+def test_tasks_config_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert s.tasks.enabled is False
+    assert s.tasks.web_research_enabled is False
+    assert s.tasks.daily_capacity_minutes == 240
+    monkeypatch.setenv("SB_TASKS__ENABLED", "true")
+    monkeypatch.setenv("SB_TASKS__DAILY_CAPACITY_MINUTES", "120")
+    s2 = Settings()
+    assert s2.tasks.enabled is True
+    assert s2.tasks.daily_capacity_minutes == 120
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()
