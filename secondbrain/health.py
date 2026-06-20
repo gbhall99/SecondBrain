@@ -72,6 +72,24 @@ def _encryption(settings: Settings) -> Check:
                  f"passphrase={'set' if has_pass else 'missing'}")
 
 
+def _backups(settings: Settings) -> Check:
+    """Encourage backups; warn only if existing backups have gone stale (>30d)."""
+    from datetime import UTC, datetime
+
+    from secondbrain.storage import backup
+
+    snaps = backup.list_backups(settings)
+    if not snaps:
+        return Check("backups", True, "none yet — run `sb backup`")
+    newest = snaps[0]
+    try:
+        age_days = (datetime.now(UTC) - datetime.fromisoformat(newest["modified"])).days
+    except ValueError:
+        return Check("backups", True, f"{len(snaps)} snapshot(s)")
+    ok = age_days <= 30
+    return Check("backups", ok, f"{len(snaps)} snapshot(s), newest {age_days}d ago")
+
+
 def _secrets() -> Check:
     """Warn if a secret was placed in the version-controlled config.toml."""
     from secondbrain.config import committed_secrets
@@ -127,6 +145,7 @@ def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> li
         _llm(settings),
         _encryption(settings),
         _secrets(),
+        _backups(settings),
         _recording(conn, settings),
         _daemon(conn),
     ]
