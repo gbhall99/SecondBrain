@@ -155,6 +155,51 @@ def test_prune_backups_no_dir(settings):
     assert service.prune_backups(settings=settings, keep=5) == 0
 
 
+def test_export_json_date_range(conn, settings, tmp_path):
+    conn.execute(
+        "INSERT INTO speakers (id, name, kind, is_owner) VALUES (1, 'Me', 'owner', 1)"
+    )
+    conn.execute(
+        "INSERT INTO audio_files (id, path, started_at, sample_rate, status) "
+        "VALUES (1, '/tmp/a.flac', '2026-06-10T09:00:00.000Z', 16000, 'transcribed')"
+    )
+    conn.execute("INSERT INTO transcripts (id, audio_file_id, backend) VALUES (1, 1, 'mock')")
+    for sid, day, text in [
+        (1, "2026-06-10", "early"),
+        (2, "2026-06-15", "middle"),
+        (3, "2026-06-20", "late"),
+    ]:
+        conn.execute(
+            "INSERT INTO transcript_segments "
+            "(id, transcript_id, audio_file_id, start_offset_s, end_offset_s, start_at, text, "
+            " speaker_id) VALUES (?, 1, 1, 0, 1, ?, ?, 1)",
+            (sid, f"{day}T09:00:00.000Z", text),
+        )
+
+    path = backup.export_json(conn, tmp_path, settings, since="2026-06-12", until="2026-06-18")
+    texts = [s["text"] for s in json.loads(path.read_text())["segments"]]
+    assert texts == ["middle"]
+
+
+def test_export_markdown_since_only(conn, settings, tmp_path):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (1, 'Me', 'owner', 1)")
+    conn.execute(
+        "INSERT INTO audio_files (id, path, started_at, sample_rate, status) "
+        "VALUES (1, '/tmp/a.flac', '2026-06-10T09:00:00.000Z', 16000, 'transcribed')"
+    )
+    conn.execute("INSERT INTO transcripts (id, audio_file_id, backend) VALUES (1, 1, 'mock')")
+    for sid, day, text in [(1, "2026-06-10", "old"), (2, "2026-06-20", "new")]:
+        conn.execute(
+            "INSERT INTO transcript_segments "
+            "(id, transcript_id, audio_file_id, start_offset_s, end_offset_s, start_at, text, "
+            " speaker_id) VALUES (?, 1, 1, 0, 1, ?, ?, 1)",
+            (sid, f"{day}T09:00:00.000Z", text),
+        )
+
+    md = backup.export_markdown(conn, tmp_path, settings, since="2026-06-15").read_text()
+    assert "new" in md and "old" not in md
+
+
 def test_restore_replaces_live_db_and_backs_up_current(conn, settings, tmp_path):
     _seed(conn)
     snap = service.backup_database(settings=settings, dest=tmp_path / "snap.db")

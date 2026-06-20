@@ -151,17 +151,32 @@ def restore_database(
     return db_path
 
 
-def _non_opted_segments(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
+def _non_opted_segments(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict]:
     opted = registry.opted_out_speaker_ids(conn, settings)
+    where, params = [], []
+    if since:
+        where.append("substr(ts.start_at, 1, 10) >= ?")
+        params.append(since)
+    if until:
+        where.append("substr(ts.start_at, 1, 10) <= ?")
+        params.append(until)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(
-        """
+        f"""
         SELECT ts.id, ts.start_at, ts.text, ts.speaker_id, ts.speaker_confidence,
                COALESCE(sp.name, sp.display_label) AS speaker,
                CASE WHEN sp.is_owner THEN 1 ELSE 0 END AS is_owner
         FROM transcript_segments ts
         LEFT JOIN speakers sp ON sp.id = ts.speaker_id
+        {clause}
         ORDER BY ts.start_at, ts.id
-        """
+        """,
+        params,
     ).fetchall()
     out = []
     for r in rows:
@@ -173,13 +188,21 @@ def _non_opted_segments(conn: sqlite3.Connection, settings: Settings) -> list[di
     return out
 
 
-def export_json(conn: sqlite3.Connection, out_dir: Path, settings: Settings | None = None) -> Path:
+def export_json(
+    conn: sqlite3.Connection,
+    out_dir: Path,
+    settings: Settings | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> Path:
     """Dump transcripts/graph/goals/tasks to a single JSON file (no embeddings)."""
     settings = settings or get_settings()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "exported_at": datetime.now(UTC).isoformat(),
+        "since": since,
+        "until": until,
         "speakers": [
             dict(r) for r in conn.execute(
                 "SELECT id, name, display_label, kind, is_owner FROM speakers "
@@ -188,7 +211,7 @@ def export_json(conn: sqlite3.Connection, out_dir: Path, settings: Settings | No
         ],
         "segments": [
             {k: s[k] for k in ("id", "start_at", "speaker", "text", "speaker_confidence")}
-            for s in _non_opted_segments(conn, settings)
+            for s in _non_opted_segments(conn, settings, since, until)
         ],
         "kg_nodes": [
             dict(r) for r in conn.execute(
@@ -214,13 +237,17 @@ def export_json(conn: sqlite3.Connection, out_dir: Path, settings: Settings | No
 
 
 def export_markdown(
-    conn: sqlite3.Connection, out_dir: Path, settings: Settings | None = None
+    conn: sqlite3.Connection,
+    out_dir: Path,
+    settings: Settings | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> Path:
     """Write a human-readable Markdown export (daily transcripts + goals + tasks)."""
     settings = settings or get_settings()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    segs = _non_opted_segments(conn, settings)
+    segs = _non_opted_segments(conn, settings, since, until)
     lines = ["# SecondBrain export", ""]
     current_day = None
     for s in segs:
