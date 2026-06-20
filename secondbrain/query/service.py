@@ -198,6 +198,162 @@ def resolve(conn: sqlite3.Connection, speaker_id: int) -> int:
     return registry.resolve_speaker_id(conn, speaker_id)
 
 
+# --- person dossier (Phase 8A) -----------------------------------------------
+
+
+def _person_connections(conn, sid: int, settings: Settings, limit: int = 8) -> list[dict]:
+    """Other speakers who shared conversations with this person, ranked."""
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    rows = conn.execute(
+        """
+        SELECT other.sid AS sid, COUNT(DISTINCT other.conv) AS shared
+        FROM (
+            SELECT af.conversation_id AS conv FROM transcript_segments ts
+            JOIN audio_files af ON af.id = ts.audio_file_id
+            WHERE ts.speaker_id = ? AND af.conversation_id IS NOT NULL
+        ) mine
+        JOIN (
+            SELECT af.conversation_id AS conv, ts.speaker_id AS sid
+            FROM transcript_segments ts JOIN audio_files af ON af.id = ts.audio_file_id
+            WHERE af.conversation_id IS NOT NULL AND ts.speaker_id IS NOT NULL
+        ) other ON other.conv = mine.conv
+        WHERE other.sid != ?
+        GROUP BY other.sid
+        """,
+        (sid, sid),
+    ).fetchall()
+    agg: dict[int, int] = {}
+    for r in rows:
+        osid = registry.resolve_speaker_id(conn, r["sid"])
+        if osid == sid or osid in opted:
+            continue
+        agg[osid] = agg.get(osid, 0) + r["shared"]
+    out = []
+    for osid, shared in sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+        s = conn.execute(
+            "SELECT name, display_label, is_owner FROM speakers WHERE id=?", (osid,)
+        ).fetchone()
+        if s is None:
+            continue
+        lbl = "Me" if s["is_owner"] else (s["name"] or s["display_label"] or f"Speaker {osid}")
+        out.append({"speaker_id": osid, "label": lbl, "shared_conversations": shared})
+    return out
+
+
+def person_dossier(
+    conn: sqlite3.Connection, speaker_id: int, settings: Settings | None = None, *, quotes: int = 8
+) -> dict | None:
+    """Everything known about a person: identity, interactions, facts, commitments,
+    recent quotes, and connections. Opt-out aware (owner exempt)."""
+    settings = settings or get_settings()
+    sid = registry.resolve_speaker_id(conn, speaker_id)
+    spk = conn.execute(
+        "SELECT id, name, display_label, kind, is_owner, opted_out, exemplar_count, "
+        "segment_count, last_seen_at, centroid FROM speakers WHERE id=?",
+        (sid,),
+    ).fetchone()
+    if spk is None:
+        return None
+    opted = sid in registry.opted_out_speaker_ids(conn, settings)
+    label = "Me" if spk["is_owner"] else (spk["name"] or spk["display_label"] or f"Speaker {sid}")
+    inter = conn.execute(
+        """
+        SELECT COUNT(*) AS segments, MIN(ts.start_at) AS first_seen, MAX(ts.start_at) AS last_seen,
+               COALESCE(SUM(ts.end_offset_s - ts.start_offset_s), 0) AS talk_seconds,
+               COUNT(DISTINCT af.conversation_id) AS conversations
+        FROM transcript_segments ts JOIN audio_files af ON af.id = ts.audio_file_id
+        WHERE ts.speaker_id = ?
+        """,
+        (sid,),
+    ).fetchone()
+    low_conf = conn.execute(
+        "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=? "
+        "AND speaker_confidence IS NOT NULL AND speaker_confidence < ?",
+        (sid, settings.diarization.low_confidence_threshold),
+    ).fetchone()["n"]
+    node = conn.execute(
+        "SELECT id FROM kg_nodes WHERE speaker_id=? AND type='person' AND merged_into IS NULL "
+        "ORDER BY id LIMIT 1",
+        (sid,),
+    ).fetchone()
+    node_id = int(node["id"]) if node else None
+
+    dossier = {
+        "speaker_id": sid,
+        "node_id": node_id,
+        "label": label,
+        "kind": spk["kind"],
+        "is_owner": bool(spk["is_owner"]),
+        "opted_out": opted,
+        "aliases": [
+            r["alias"]
+            for r in conn.execute(
+                "SELECT alias FROM kg_aliases WHERE node_id=?", (node_id,)
+            ).fetchall()
+        ] if node_id is not None else [],
+        "profile": {
+            "exemplar_count": spk["exemplar_count"],
+            "segment_count": spk["segment_count"],
+            "last_seen_at": spk["last_seen_at"],
+            "voice_profile": spk["centroid"] is not None,
+            "low_confidence_segments": low_conf,
+        },
+        "interactions": {
+            "segments": inter["segments"],
+            "conversations": inter["conversations"],
+            "first_seen": inter["first_seen"],
+            "last_seen": inter["last_seen"],
+            "talk_minutes": round((inter["talk_seconds"] or 0) / 60.0, 1),
+        },
+        "connections": _person_connections(conn, sid, settings),
+        "facts": [],
+        "commitments": {"owed_by": [], "owed_to": []},
+        "recent_quotes": [],
+    }
+
+    # Privacy: an opted-out person gets identity/interaction shape but no content.
+    if opted and not spk["is_owner"]:
+        return dossier
+
+    if node_id is not None:
+        dossier["facts"] = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT predicate, object_text, confidence, due_date FROM kg_edges "
+                "WHERE src_node_id=? AND kind='fact' AND valid=1 ORDER BY confidence DESC",
+                (node_id,),
+            ).fetchall()
+        ]
+        dossier["commitments"] = {
+            "owed_by": [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT object_text, due_date, confidence FROM kg_edges "
+                    "WHERE src_node_id=? AND kind='action_item' AND valid=1 ORDER BY due_date",
+                    (node_id,),
+                ).fetchall()
+            ],
+            "owed_to": [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT object_text, due_date, confidence FROM kg_edges "
+                    "WHERE dst_node_id=? AND kind='action_item' AND valid=1 ORDER BY due_date",
+                    (node_id,),
+                ).fetchall()
+            ],
+        }
+
+    dossier["recent_quotes"] = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, start_at, text FROM transcript_segments WHERE speaker_id=? "
+            "AND text != ? ORDER BY start_at DESC, id DESC LIMIT ?",
+            (sid, registry.REDACTED_TEXT, quotes),
+        ).fetchall()
+    ]
+    return dossier
+
+
 def name_speaker(conn: sqlite3.Connection, speaker_id: int, name: str,
                  settings: Settings | None = None) -> int:
     return registry.name_speaker(conn, speaker_id, name, settings)
