@@ -137,6 +137,38 @@ def test_forget_day_prunes_graph_citations(conn, tmp_path):
     assert json.loads(remaining["source_segment_ids"]) == [2]  # forgotten cite pruned
 
 
+def test_forget_day_purges_fully_forgotten_conversation_extractions(conn, tmp_path):
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, status) "
+        "VALUES (1, '2026-06-15T09:00:00.000Z', 'diarized')"
+    )
+    conn.execute(
+        "INSERT INTO audio_files (id, path, started_at, sample_rate, status, conversation_id) "
+        "VALUES (1, ?, '2026-06-15T09:00:00.000Z', 16000, 'transcribed', 1)",
+        (str(tmp_path / "a.flac"),),
+    )
+    conn.execute("INSERT INTO transcripts (id, audio_file_id, backend) VALUES (1, 1, 'mock')")
+    _seg(conn, 1, 1, "2026-06-15", "secret")
+    conn.execute(
+        "INSERT INTO knowledge_extractions (id, conversation_id, backend, raw_json) "
+        "VALUES (1, 1, 'mock', '{\"secret\":\"text\"}')"
+    )
+    # a node first seen from that extraction (back-reference must be nulled, not error)
+    conn.execute(
+        "INSERT INTO kg_nodes (id, type, name, source_extraction_id) "
+        "VALUES (1, 'project', 'Atlas', 1)"
+    )
+
+    res = service.forget_day(conn, "2026-06-15")
+
+    assert res["conversations"] == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM knowledge_extractions").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM conversations").fetchone()["n"] == 0
+    # the node survives but its dangling extraction ref was nulled
+    node = conn.execute("SELECT source_extraction_id FROM kg_nodes WHERE id=1").fetchone()
+    assert node["source_extraction_id"] is None
+
+
 def test_vacuum_runs(conn, tmp_path):
     _audio(conn, 1, "2026-06-16", str(tmp_path / "a.flac"))
     _seg(conn, 1, 1, "2026-06-16", "ephemeral")
