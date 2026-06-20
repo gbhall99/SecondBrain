@@ -73,6 +73,15 @@ def test_tasks_config_defaults_and_env(monkeypatch):
     assert s2.tasks.daily_capacity_minutes == 120
 
 
+def test_diarization_quality_config_defaults(monkeypatch):
+    s = Settings()
+    assert s.diarization.exemplar_k == 3
+    assert s.diarization.reattribute_threshold == 0.80
+    assert s.diarization.overlap_flag is True
+    monkeypatch.setenv("SB_DIARIZATION__EXEMPLAR_K", "5")
+    assert Settings().diarization.exemplar_k == 5
+
+
 def test_loads_repo_config_toml():
     # The committed config.toml should parse and bind locally by default.
     s = load_settings()

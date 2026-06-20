@@ -107,6 +107,12 @@ def test_tasks_page_renders(client):
     assert "Tasks" in client.get("/tasks").text
 
 
+def test_speaker_quality_and_reattribute(client):
+    assert client.get("/api/speakers/quality").status_code == 200
+    assert client.post("/api/speakers/reattribute").json()["relabeled"] == 0
+    assert "Transcript" in client.get("/day").text
+
+
 def test_goals_api_crud(client):
     gid = client.post("/api/goals", json={"title": "Win Q3", "priority": 1}).json()["id"]
     titles = [g["title"] for g in client.get("/api/goals").json()["goals"]]

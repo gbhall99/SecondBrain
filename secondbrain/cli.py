@@ -323,6 +323,48 @@ def speaker_cluster() -> None:
     typer.echo(f"Performed {n} merge(s).")
 
 
+@speaker_app.command("reassign")
+def speaker_reassign(segment_id: int, speaker_id: int) -> None:
+    """Correct a segment's speaker (locks it + teaches the profile)."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        ok = service.reassign_segment(conn, segment_id, speaker_id, settings)
+    typer.echo("Reassigned." if ok else "Segment not found.")
+
+
+@speaker_app.command("reattribute")
+def speaker_reattribute() -> None:
+    """Re-label past low-confidence/unknown segments against improved profiles."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        n = service.reattribute(conn, settings)
+    typer.echo(f"Relabeled {n} segment(s).")
+
+
+@speaker_app.command("recompute")
+def speaker_recompute() -> None:
+    """Recompute all profile centroids from their kept exemplars."""
+    with db_session(settings=get_settings()) as conn:
+        n = service.recompute_profiles(conn)
+    typer.echo(f"Recomputed {n} profile(s).")
+
+
+@speaker_app.command("prune")
+def speaker_prune() -> None:
+    """Prune low-quality / excess voice exemplars."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        n = service.prune_profiles(conn, settings)
+    typer.echo(f"Pruned {n} exemplar(s).")
+
+
+@speaker_app.command("quality")
+def speaker_quality() -> None:
+    """Show speaker-profile quality metrics."""
+    with db_session(settings=get_settings()) as conn:
+        typer.echo(json.dumps(service.speaker_quality(conn), indent=2))
+
+
 # --- proactivity + goals (Phase 4) -------------------------------------------
 
 

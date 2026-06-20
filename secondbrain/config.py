@@ -82,6 +82,16 @@ class DiarizationConfig(BaseModel):
     cluster_distance_threshold: float = 0.30  # nightly agglomerative (cosine dist)
     low_confidence_threshold: float = 0.5  # below this a label is flagged
     min_cluster_speech_s: float = 1.0      # ignore clusters too short to embed
+    # Phase 7 — quality/self-correction
+    exemplar_k: int = 3                    # match vs k nearest stored exemplars
+    max_exemplars_per_speaker: int = 50    # cap kept exemplars (prune beyond)
+    reattribute_threshold: float = 0.80    # HIGH bar to relabel past low-conf segs
+    prune_min_confidence: float = 0.3      # drop exemplars below this quality
+    overlap_flag: bool = True              # flag overlapped segments low-confidence
+    # Mac-side pyannote knobs (passed through; tune on device)
+    segmentation_threshold: float = 0.5
+    min_speakers: int = 0                  # 0 = auto
+    max_speakers: int = 0                  # 0 = auto
 
 
 class ApiConfig(BaseModel):

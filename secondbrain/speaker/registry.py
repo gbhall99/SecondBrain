@@ -92,6 +92,7 @@ class MatchResult:
     speaker_id: int | None
     similarity: float
     is_owner: bool = False
+    margin: float = 0.0   # top-1 minus top-2 similarity (confidence signal)
 
 
 def _candidate_profiles(conn: sqlite3.Connection) -> list[tuple[int, str, list[float]]]:
@@ -107,34 +108,61 @@ def _candidate_profiles(conn: sqlite3.Connection) -> list[tuple[int, str, list[f
     return out
 
 
+def _exemplars_by_speaker(conn: sqlite3.Connection) -> dict[int, list[list[float]]]:
+    out: dict[int, list[list[float]]] = {}
+    rows = conn.execute(
+        "SELECT speaker_id, embedding FROM speaker_observations "
+        "WHERE pruned=0 AND embedding IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        vec = deserialize_embedding(r["embedding"])
+        if vec:
+            out.setdefault(int(r["speaker_id"]), []).append(vec)
+    return out
+
+
+def _speaker_score(emb: list[float], centroid: list[float], exemplars: list[list[float]],
+                   k: int) -> float:
+    """Best of centroid similarity and the k-nearest exemplar similarities."""
+    best = cosine(emb, centroid)
+    if exemplars:
+        sims = sorted((cosine(emb, e) for e in exemplars), reverse=True)[:k]
+        if sims:
+            best = max(best, sims[0])
+    return best
+
+
 def match_embedding(
     conn: sqlite3.Connection, emb: list[float], settings: Settings | None = None
 ) -> MatchResult:
     """Resolve a cluster embedding to a known speaker, or no match.
 
-    Owner is checked first with a slightly looser threshold so the user's own
-    voice is the most reliable distinction.
+    Exemplar-aware: each candidate is scored by the best of its centroid and its
+    k-nearest stored exemplars (falls back to centroid-only when a speaker has no
+    exemplars, preserving prior behaviour). Owner is checked first.
     """
     settings = settings or get_settings()
     d = settings.diarization
     candidates = _candidate_profiles(conn)
     if not candidates:
         return MatchResult(None, 0.0)
+    exemplars = _exemplars_by_speaker(conn)
 
-    best_owner = (-1.0, None)
-    best_any = (-1.0, None)
+    scored: list[tuple[float, int, str]] = []
     for sid, kind, vec in candidates:
-        sim = cosine(emb, vec)
-        if sim > best_any[0]:
-            best_any = (sim, sid)
-        if kind == "owner" and sim > best_owner[0]:
-            best_owner = (sim, sid)
+        score = _speaker_score(emb, vec, exemplars.get(sid, []), d.exemplar_k)
+        scored.append((score, sid, kind))
+    scored.sort(key=lambda x: x[0], reverse=True)
 
-    if best_owner[1] is not None and best_owner[0] >= d.owner_match_threshold:
-        return MatchResult(best_owner[1], best_owner[0], is_owner=True)
-    if best_any[1] is not None and best_any[0] >= d.match_threshold:
-        return MatchResult(best_any[1], best_any[0])
-    return MatchResult(None, best_any[0] if best_any[0] >= 0 else 0.0)
+    top_sim, top_sid, _ = scored[0]
+    margin = round(top_sim - scored[1][0], 4) if len(scored) > 1 else round(top_sim, 4)
+
+    best_owner = next(((s, sid) for s, sid, kind in scored if kind == "owner"), None)
+    if best_owner is not None and best_owner[0] >= d.owner_match_threshold:
+        return MatchResult(best_owner[1], best_owner[0], is_owner=True, margin=margin)
+    if top_sim >= d.match_threshold:
+        return MatchResult(top_sid, top_sim, margin=margin)
+    return MatchResult(None, max(0.0, top_sim), margin=margin)
 
 
 # --- observations + centroid updates -----------------------------------------
@@ -151,13 +179,16 @@ def record_observation(
     start_at: str | None,
     confidence: float | None,
     embedding: list[float],
+    duration_s: float | None = None,
+    quality: float | None = None,
+    source: str = "auto",
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO speaker_observations
             (speaker_id, conversation_id, audio_file_id, start_offset_s,
-             end_offset_s, start_at, confidence, embedding)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             end_offset_s, start_at, confidence, embedding, duration_s, quality, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             speaker_id,
@@ -168,6 +199,9 @@ def record_observation(
             start_at,
             confidence,
             serialize_embedding(embedding),
+            duration_s if duration_s is not None else max(0.0, end_offset_s - start_offset_s),
+            quality if quality is not None else confidence,
+            source,
         ),
     )
     return int(cur.lastrowid)
@@ -201,11 +235,13 @@ def touch_speaker_stats(
 
 
 def assign_segment_speaker(
-    conn: sqlite3.Connection, segment_id: int, speaker_id: int, confidence: float | None
+    conn: sqlite3.Connection, segment_id: int, speaker_id: int, confidence: float | None,
+    *, observation_id: int | None = None, source: str = "auto",
 ) -> None:
     conn.execute(
-        "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=? WHERE id=?",
-        (speaker_id, confidence, segment_id),
+        "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=?, "
+        "observation_id=COALESCE(?, observation_id), speaker_source=? WHERE id=?",
+        (speaker_id, confidence, observation_id, source, segment_id),
     )
 
 
@@ -256,9 +292,10 @@ def redact_speaker_segments(conn: sqlite3.Connection, speaker_id: int) -> int:
 
 
 def recompute_centroid(conn: sqlite3.Connection, speaker_id: int) -> None:
-    """Recompute a speaker's centroid as the mean of all its observations."""
+    """Recompute a speaker's centroid as the mean of its non-pruned observations."""
     rows = conn.execute(
-        "SELECT embedding FROM speaker_observations WHERE speaker_id=? AND embedding IS NOT NULL",
+        "SELECT embedding FROM speaker_observations "
+        "WHERE speaker_id=? AND pruned=0 AND embedding IS NOT NULL",
         (speaker_id,),
     ).fetchall()
     vecs = [v for v in (deserialize_embedding(r["embedding"]) for r in rows) if v]
@@ -270,6 +307,55 @@ def recompute_centroid(conn: sqlite3.Connection, speaker_id: int) -> None:
         "UPDATE speakers SET centroid=?, exemplar_count=? WHERE id=?",
         (serialize_embedding(normalize(mean)), len(vecs), speaker_id),
     )
+
+
+def add_confirmed_exemplar(
+    conn: sqlite3.Connection, speaker_id: int, embedding: list[float],
+    *, start_at: str | None = None,
+) -> int:
+    """Add a user-confirmed exemplar and refresh the centroid (correction loop)."""
+    obs = record_observation(
+        conn, speaker_id=speaker_id, audio_file_id=None, conversation_id=None,
+        start_offset_s=0.0, end_offset_s=0.0, start_at=start_at, confidence=1.0,
+        embedding=embedding, quality=1.0, source="correction",
+    )
+    recompute_centroid(conn, speaker_id)
+    return obs
+
+
+def prune_exemplars(
+    conn: sqlite3.Connection, speaker_id: int, settings: Settings | None = None
+) -> int:
+    """Drop low-quality exemplars and cap to max_exemplars_per_speaker.
+
+    Keeps user corrections + highest-quality/most-recent; recomputes the centroid.
+    Returns the number newly pruned.
+    """
+    settings = settings or get_settings()
+    d = settings.diarization
+    rows = conn.execute(
+        "SELECT id, quality, source, created_at FROM speaker_observations "
+        "WHERE speaker_id=? AND pruned=0",
+        (speaker_id,),
+    ).fetchall()
+    # rank: corrections first, then by quality desc, then recency
+    ranked = sorted(
+        rows,
+        key=lambda r: (r["source"] == "correction", r["quality"] or 0.0, r["created_at"] or ""),
+        reverse=True,
+    )
+    to_prune: list[int] = []
+    for i, r in enumerate(ranked):
+        low = (r["quality"] is not None and r["quality"] < d.prune_min_confidence
+               and r["source"] != "correction")
+        over_cap = i >= d.max_exemplars_per_speaker
+        if low or over_cap:
+            to_prune.append(int(r["id"]))
+    for oid in to_prune:
+        conn.execute("UPDATE speaker_observations SET pruned=1 WHERE id=?", (oid,))
+    if to_prune:
+        recompute_centroid(conn, speaker_id)
+    return len(to_prune)
 
 
 def _recount_segments(conn: sqlite3.Connection, speaker_id: int) -> None:
