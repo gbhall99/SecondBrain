@@ -86,9 +86,7 @@ def resolve_entity(
                 if sim > best_sim:
                     best_id, best_sim = int(cand["id"]), sim
             d = settings.extraction
-            if best_id is not None and best_sim >= d.entity_match_threshold:
-                node_id = best_id
-            elif (
+            if best_id is not None and best_sim >= d.entity_match_threshold or (
                 best_id is not None
                 and best_sim >= d.entity_review_threshold
                 and llm is not None

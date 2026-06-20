@@ -115,7 +115,7 @@ def is_loopback(host: str | None) -> bool:
 
 
 def is_exempt(path: str) -> bool:
-    return any(path == p or path.startswith(p + "/") or path.startswith(p) for p in EXEMPT_PREFIXES)
+    return any(path == p or path.startswith((p + "/", p)) for p in EXEMPT_PREFIXES)
 
 
 def env_password() -> str | None:

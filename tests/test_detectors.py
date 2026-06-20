@@ -9,9 +9,8 @@ NOW = datetime(2026, 6, 16, 12, 0, 0, tzinfo=UTC)
 
 def _owner_node(conn):
     owner_spk = registry.get_or_create_owner(conn, "Me")
-    nid = graph.create_node(conn, type="person", name="Me", embedding=None,
+    return graph.create_node(conn, type="person", name="Me", embedding=None,
                             confidence=1.0, extraction_id=None, speaker_id=owner_spk)
-    return nid
 
 
 def _person(conn, name):
