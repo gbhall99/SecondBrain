@@ -222,6 +222,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with db() as conn:
             return service.speaker_quality(conn, settings)
 
+    # --- person dossier (Phase 8A) -------------------------------------------
+
+    @app.get("/api/person/{speaker_id}")
+    def api_person(speaker_id: int):
+        with db() as conn:
+            d = service.person_dossier(conn, speaker_id, settings)
+        if d is None:
+            raise HTTPException(404, "person not found")
+        return d
+
+    @app.get("/person/{speaker_id}", response_class=HTMLResponse)
+    def person_page(request: Request, speaker_id: int):
+        with db() as conn:
+            d = service.person_dossier(conn, speaker_id, settings)
+        if d is None:
+            raise HTTPException(404, "person not found")
+        return templates.TemplateResponse(request, "person.html", {"d": d})
+
     # --- knowledge graph + Q&A (Phase 3) -------------------------------------
 
     @app.get("/chat", response_class=HTMLResponse)

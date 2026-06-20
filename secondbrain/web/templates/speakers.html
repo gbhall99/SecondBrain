@@ -47,9 +47,9 @@
   <h2>Known voices</h2>
   {% for s in known %}
     <div class="card">
-      <span class="{{ 'owner' if s.is_owner else '' }}">{{ s.name or s.display_label }}</span>
+      <a href="/person/{{ s.id }}" class="{{ 'owner' if s.is_owner else '' }}">{{ s.name or s.display_label }}</a>
       <span class="meta">· {{ s.kind }}{% if s.opted_out %} · opted-out{% endif %}
-        · {{ s.segment_count }} segments</span>
+        · {{ s.segment_count }} segments · <a href="/person/{{ s.id }}">dossier →</a></span>
     </div>
   {% endfor %}
 
