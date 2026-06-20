@@ -97,6 +97,29 @@ def test_export_data_both_formats(conn, settings, tmp_path):
     assert suffixes == [".json", ".md"]
 
 
+def test_list_backups_newest_first(conn, settings):
+    backups_dir = settings.data_path / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    (backups_dir / "secondbrain-20260101-000000.db").write_bytes(b"aa")
+    (backups_dir / "secondbrain-20260103-000000.db").write_bytes(b"cccc")
+    (backups_dir / "secondbrain-20260102-000000-pre-restore.db").write_bytes(b"bbb")
+    (backups_dir / "ignore-me.db").write_bytes(b"z")  # not a snapshot
+
+    rows = service.list_backups(settings=settings)
+    names = [r["name"] for r in rows]
+    assert names == [
+        "secondbrain-20260103-000000.db",
+        "secondbrain-20260102-000000-pre-restore.db",
+        "secondbrain-20260101-000000.db",
+    ]
+    assert rows[0]["size_bytes"] == 4
+    assert "modified" in rows[0]
+
+
+def test_list_backups_no_dir(settings):
+    assert service.list_backups(settings=settings) == []
+
+
 def test_prune_backups_keeps_newest(conn, settings):
     backups_dir = settings.data_path / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)

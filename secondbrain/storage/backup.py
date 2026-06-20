@@ -39,6 +39,26 @@ def backup_database(settings: Settings | None = None, dest: Path | None = None) 
     return dest
 
 
+def list_backups(settings: Settings | None = None) -> list[dict]:
+    """List backup snapshots, newest first: {name, path, size_bytes, modified}."""
+    settings = settings or get_settings()
+    backups_dir = settings.data_path / "backups"
+    if not backups_dir.is_dir():
+        return []
+    out = []
+    for p in sorted(backups_dir.glob("secondbrain-*.db"), reverse=True):
+        st = p.stat()
+        out.append(
+            {
+                "name": p.name,
+                "path": str(p),
+                "size_bytes": st.st_size,
+                "modified": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(),
+            }
+        )
+    return out
+
+
 def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
     """Keep the newest ``keep`` backup snapshots; delete older ones. Returns count removed.
 
