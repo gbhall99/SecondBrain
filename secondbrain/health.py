@@ -72,6 +72,20 @@ def _encryption(settings: Settings) -> Check:
                  f"passphrase={'set' if has_pass else 'missing'}")
 
 
+def _secrets() -> Check:
+    """Warn if a secret was placed in the version-controlled config.toml."""
+    from secondbrain.config import committed_secrets
+
+    leaked = committed_secrets()
+    if leaked:
+        return Check(
+            "secrets", False,
+            "in committed config.toml: " + ", ".join(leaked)
+            + " (move to config.local.toml or env)",
+        )
+    return Check("secrets", True, "no secrets in committed config.toml")
+
+
 def _recording(conn: sqlite3.Connection, settings: Settings) -> Check:
     paused = state.is_paused(conn, default=settings.consent.paused)
     on = settings.consent.recording_enabled and not paused
@@ -112,6 +126,7 @@ def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> li
         _counts(conn),
         _llm(settings),
         _encryption(settings),
+        _secrets(),
         _recording(conn, settings),
         _daemon(conn),
     ]
