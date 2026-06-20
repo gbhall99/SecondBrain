@@ -105,6 +105,16 @@ def status(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
     }
 
 
+def queue_overview(conn: sqlite3.Connection, failures: int = 10) -> dict:
+    """Job-queue counts plus the most recent dead-lettered failures."""
+    return {"counts": q.counts(conn), "recent_failures": q.recent_failures(conn, failures)}
+
+
+def reclaim_stale_jobs(conn: sqlite3.Connection, older_than_minutes: int = 30) -> int:
+    """Re-queue jobs stuck in 'running' (e.g. a worker died mid-job)."""
+    return q.reclaim_stale(conn, older_than_minutes)
+
+
 def corpus_stats(conn: sqlite3.Connection) -> dict:
     """A high-level overview of what the second brain has captured."""
 
