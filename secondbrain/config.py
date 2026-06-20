@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -47,11 +47,22 @@ class VadConfig(BaseModel):
     min_silence_ms: int = 700
 
 
+def _one_of(field: str, value: str, allowed: set[str]) -> str:
+    if value not in allowed:
+        raise ValueError(f"{field} must be one of {sorted(allowed)}, got {value!r}")
+    return value
+
+
 class TranscriptionConfig(BaseModel):
     backend: str = "parakeet"  # parakeet | whisper | mock
     whisper_model: str = "mlx-community/whisper-large-v3-turbo"
     parakeet_model: str = "mlx-community/parakeet-tdt-0.6b-v2"
     language: str = ""
+
+    @field_validator("backend")
+    @classmethod
+    def _check_backend(cls, v: str) -> str:
+        return _one_of("transcription.backend", v, {"parakeet", "whisper", "mock"})
 
 
 class SearchConfig(BaseModel):
@@ -93,10 +104,33 @@ class DiarizationConfig(BaseModel):
     min_speakers: int = 0                  # 0 = auto
     max_speakers: int = 0                  # 0 = auto
 
+    @field_validator("backend")
+    @classmethod
+    def _check_backend(cls, v: str) -> str:
+        return _one_of("diarization.backend", v, {"pyannote", "mock"})
+
+    @field_validator(
+        "match_threshold", "owner_match_threshold", "centroid_update_threshold",
+        "cluster_distance_threshold", "low_confidence_threshold", "reattribute_threshold",
+        "prune_min_confidence", "segmentation_threshold",
+    )
+    @classmethod
+    def _check_unit_interval(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"threshold must be in [0.0, 1.0], got {v}")
+        return v
+
 
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
+
+    @field_validator("port")
+    @classmethod
+    def _check_port(cls, v: int) -> int:
+        if not 1 <= v <= 65535:
+            raise ValueError(f"api.port must be in [1, 65535], got {v}")
+        return v
 
 
 class SecurityConfig(BaseModel):
@@ -114,6 +148,12 @@ class SecurityConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
 
+    @field_validator("level")
+    @classmethod
+    def _check_level(cls, v: str) -> str:
+        up = v.upper()
+        return _one_of("logging.level", up, {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
 
 class TasksConfig(BaseModel):
     # Goal decomposition + tasks + daily planning (Phase 6). OFF by default.
@@ -125,6 +165,11 @@ class TasksConfig(BaseModel):
     web_research_enabled: bool = False
     web_search_url: str = ""           # e.g. a SearXNG JSON endpoint; user-supplied
     autonomy: str = "propose"          # propose (approve) | auto
+
+    @field_validator("autonomy")
+    @classmethod
+    def _check_autonomy(cls, v: str) -> str:
+        return _one_of("tasks.autonomy", v, {"propose", "auto"})
 
 
 class ProactiveConfig(BaseModel):
@@ -148,6 +193,27 @@ class ProactiveConfig(BaseModel):
     suppress_days: int = 30
     urgent_due_hours: int = 24
 
+    @field_validator("digest_hour")
+    @classmethod
+    def _check_hour(cls, v: int) -> int:
+        if not 0 <= v <= 23:
+            raise ValueError(f"proactive.digest_hour must be in [0, 23], got {v}")
+        return v
+
+    @field_validator("weekly_review_weekday")
+    @classmethod
+    def _check_weekday(cls, v: int) -> int:
+        if not 0 <= v <= 6:
+            raise ValueError(f"proactive.weekly_review_weekday must be in [0, 6], got {v}")
+        return v
+
+    @field_validator("connection_threshold", "goal_link_threshold", "confidence_floor")
+    @classmethod
+    def _check_unit_interval(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"threshold must be in [0.0, 1.0], got {v}")
+        return v
+
 
 class LLMConfig(BaseModel):
     # Local LLM for knowledge extraction + Q&A. "mock" is the CI/dev default;
@@ -157,6 +223,18 @@ class LLMConfig(BaseModel):
     host: str = "http://127.0.0.1:11434"
     temperature: float = 0.0
     request_timeout_s: float = 120.0
+
+    @field_validator("backend")
+    @classmethod
+    def _check_backend(cls, v: str) -> str:
+        return _one_of("llm.backend", v, {"mock", "ollama"})
+
+    @field_validator("temperature")
+    @classmethod
+    def _check_temperature(cls, v: float) -> float:
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"llm.temperature must be in [0.0, 2.0], got {v}")
+        return v
 
 
 class ExtractionConfig(BaseModel):
