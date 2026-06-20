@@ -99,3 +99,27 @@ intelligence. All local, default-safe, opt-out-filtered, green-gated.
 - **8D Unified dashboard (#35):** shared `base.html` nav; `index.html` reworked as
   a home dashboard with corpus stats deep-linking to every section; person/
   relationships/timeline pages share the nav.
+
+## Mac deploy automation
+One-command, no-hand-editing deployment for an always-on Mac mini.
+- launchd templates for the **web** and **menu bar** agents (alongside the existing
+  daemon); `python -m secondbrain` entrypoint; `sb deploy launchd [--load
+  --include-menubar --unload]` fills the templates with this venv's Python + repo
+  path, installs to `~/Library/LaunchAgents`, and (un)loads via `launchctl` after a
+  `sb doctor` preflight (blocks only on migrations/disk/database).
+- `deploy/install.sh` idempotent bootstrap; `docs/DEPLOY.md` canonical guide
+  (install, config, Ollama/pyannote, Tailscale, verify, troubleshooting).
+
+## Phase 9 — Project Intelligence
+Project surfaces mirroring the Phase 8 people pattern (projects are first-class KG
+nodes). No migration; local, opt-out-filtered, green-gated.
+- **9A service:** `service.list_projects` ranks projects by activity (conversations
+  then mention volume, with linked-goal and open-action-item counts);
+  `service.project_dossier` aggregates identity/aliases, activity, linked goals,
+  associated people (opt-out filtered), decisions, facts, open commitments, and
+  recent cited quotes. `corpus_stats` gains a `projects` count.
+- **9B API:** `GET /api/projects`, `GET /api/project/{node_id}` (404 if unknown).
+- **9C web:** `projects.html` (ranked list) + `project.html` (dossier) extending
+  `base.html`; **Projects** added to the nav and a projects deep-link on the home
+  dashboard.
+- **9D CLI:** `sb projects`, `sb project <node_id>`.
