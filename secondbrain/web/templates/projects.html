@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}SecondBrain — Projects{% endblock %}
+{% block content %}
+  <h1>Projects</h1>
+  <p class="meta">Projects from your knowledge graph, ranked by activity.</p>
+  {% if not projects %}<p class="meta">No projects extracted yet.</p>{% endif %}
+  {% if projects %}
+  <table>
+    <tr><th>Project</th><th>Conversations</th><th>Mentions</th><th>Goals</th>
+      <th>Open items</th><th>Last seen</th></tr>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/project/{{ p.node_id }}">{{ p.label }}</a></td>
+      <td>{{ p.conversations }}</td>
+      <td>{{ p.edges }}</td>
+      <td>{{ p.linked_goals }}</td>
+      <td>{{ p.open_action_items }}</td>
+      <td>{{ (p.last_seen or '')[:10] or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+{% endblock %}

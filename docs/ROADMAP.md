@@ -99,9 +99,17 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** speaker accuracy that learns and self-corrects over time.
 
+## Shipped since
+- Backup/export (Markdown + JSON) and data "forget" (purge a person/day/range,
+  VACUUM) — see CHANGELOG.
+- **People & Memory Intelligence** (Phase 8): person dossiers, relationships,
+  memory timeline, unified dashboard.
+- **Project Intelligence** (Phase 9): project dossiers + ranked project list,
+  mirroring the people surfaces.
+- **Mac deploy automation:** one-command `install.sh`, all three launchd agents,
+  and `sb deploy` — see [DEPLOY.md](DEPLOY.md).
+
 ## Later — still open
-- Backup/export (Markdown + JSON) and import/restore.
-- Data "forget": purge a person/day/range, VACUUM.
 - Calendar time-blocking (push scheduled tasks to Google Calendar).
 - Deeper overlap separation (Mac/ML, beyond config knobs).
 

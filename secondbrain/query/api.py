@@ -252,6 +252,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rel = service.relationships(conn, settings)
         return templates.TemplateResponse(request, "relationships.html", {"relationships": rel})
 
+    # --- project intelligence (Phase 9) --------------------------------------
+
+    @app.get("/api/projects")
+    def api_projects():
+        with db() as conn:
+            return {"projects": service.list_projects(conn, settings)}
+
+    @app.get("/api/project/{node_id}")
+    def api_project(node_id: int):
+        with db() as conn:
+            d = service.project_dossier(conn, node_id, settings)
+        if d is None:
+            raise HTTPException(404, "project not found")
+        return d
+
+    @app.get("/projects", response_class=HTMLResponse)
+    def projects_page(request: Request):
+        with db() as conn:
+            projects = service.list_projects(conn, settings)
+        return templates.TemplateResponse(request, "projects.html", {"projects": projects})
+
+    @app.get("/project/{node_id}", response_class=HTMLResponse)
+    def project_page(request: Request, node_id: int):
+        with db() as conn:
+            d = service.project_dossier(conn, node_id, settings)
+        if d is None:
+            raise HTTPException(404, "project not found")
+        return templates.TemplateResponse(request, "project.html", {"d": d})
+
     # --- memory timeline (Phase 8C) ------------------------------------------
 
     @app.get("/api/timeline/{day}")

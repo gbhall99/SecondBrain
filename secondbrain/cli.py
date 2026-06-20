@@ -142,6 +142,24 @@ def timeline(day: str = typer.Argument(None, help="YYYY-MM-DD (default: today)."
 
 
 @app.command()
+def projects() -> None:
+    """List projects from the knowledge graph, ranked by activity."""
+    with db_session(settings=get_settings()) as conn:
+        typer.echo(json.dumps(service.list_projects(conn, get_settings()), indent=2))
+
+
+@app.command()
+def project(node_id: int = typer.Argument(..., help="Project kg node id.")) -> None:
+    """Show a project dossier (people, goals, decisions, facts, commitments)."""
+    with db_session(settings=get_settings()) as conn:
+        d = service.project_dossier(conn, node_id, get_settings())
+    if d is None:
+        typer.echo(f"No such project node: {node_id}")
+        raise typer.Exit(1)
+    typer.echo(json.dumps(d, indent=2))
+
+
+@app.command()
 def queue(
     reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
 ) -> None:
