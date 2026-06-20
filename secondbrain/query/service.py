@@ -404,6 +404,13 @@ def backup_database(settings: Settings | None = None, dest=None):
     return backup.backup_database(settings=settings or get_settings(), dest=dest)
 
 
+def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
+    """Keep the newest ``keep`` backup snapshots; delete older. Returns count removed."""
+    from secondbrain.storage import backup
+
+    return backup.prune_backups(settings=settings or get_settings(), keep=keep)
+
+
 def restore_database(settings: Settings | None = None, src=None, *, backup_current: bool = True):
     """Replace the live database with a snapshot; returns the restored path."""
     from secondbrain.storage import backup

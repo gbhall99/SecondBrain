@@ -196,10 +196,20 @@ def sweep() -> None:
 
 
 @app.command()
-def backup(dest: str = typer.Option(None, help="Destination .db path.")) -> None:
+def backup(
+    dest: str = typer.Option(None, help="Destination .db path."),
+    keep: int = typer.Option(
+        0, help="Prune to the newest N snapshots afterwards (0 = keep all)."
+    ),
+) -> None:
     """Write a consistent snapshot of the database (safe with WAL)."""
-    path = service.backup_database(settings=get_settings(), dest=dest)
+    settings = get_settings()
+    path = service.backup_database(settings=settings, dest=dest)
     typer.echo(f"Database backed up to {path}")
+    if keep > 0:
+        removed = service.prune_backups(settings=settings, keep=keep)
+        if removed:
+            typer.echo(f"Pruned {removed} old snapshot(s), kept newest {keep}.")
 
 
 @app.command()

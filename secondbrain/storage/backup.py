@@ -39,6 +39,30 @@ def backup_database(settings: Settings | None = None, dest: Path | None = None) 
     return dest
 
 
+def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
+    """Keep the newest ``keep`` backup snapshots; delete older ones. Returns count removed.
+
+    Operates on ``<data>/backups/secondbrain-*.db`` (both regular and
+    pre-restore snapshots), newest by filename timestamp. ``keep <= 0`` is a
+    no-op guard so an accidental 0 never wipes every backup.
+    """
+    settings = settings or get_settings()
+    if keep <= 0:
+        return 0
+    backups_dir = settings.data_path / "backups"
+    if not backups_dir.is_dir():
+        return 0
+    snaps = sorted(backups_dir.glob("secondbrain-*.db"), reverse=True)
+    removed = 0
+    for old in snaps[keep:]:
+        try:
+            old.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 class RestoreError(Exception):
     """Raised when a restore source isn't a usable SecondBrain database."""
 

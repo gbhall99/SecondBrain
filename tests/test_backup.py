@@ -97,6 +97,41 @@ def test_export_data_both_formats(conn, settings, tmp_path):
     assert suffixes == [".json", ".md"]
 
 
+def test_prune_backups_keeps_newest(conn, settings):
+    backups_dir = settings.data_path / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    # 5 snapshots with ascending timestamps in the filename
+    names = [
+        "secondbrain-20260101-000000.db",
+        "secondbrain-20260102-000000.db",
+        "secondbrain-20260103-000000.db",
+        "secondbrain-20260104-000000.db",
+        "secondbrain-20260105-000000-pre-restore.db",
+    ]
+    for n in names:
+        (backups_dir / n).write_bytes(b"x")
+
+    removed = service.prune_backups(settings=settings, keep=2)
+    assert removed == 3
+    remaining = sorted(p.name for p in backups_dir.glob("secondbrain-*.db"))
+    assert remaining == [
+        "secondbrain-20260104-000000.db",
+        "secondbrain-20260105-000000-pre-restore.db",
+    ]
+
+
+def test_prune_backups_keep_zero_is_noop(conn, settings):
+    backups_dir = settings.data_path / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    (backups_dir / "secondbrain-20260101-000000.db").write_bytes(b"x")
+    assert service.prune_backups(settings=settings, keep=0) == 0
+    assert list(backups_dir.glob("secondbrain-*.db"))  # nothing deleted
+
+
+def test_prune_backups_no_dir(settings):
+    assert service.prune_backups(settings=settings, keep=5) == 0
+
+
 def test_restore_replaces_live_db_and_backs_up_current(conn, settings, tmp_path):
     _seed(conn)
     snap = service.backup_database(settings=settings, dest=tmp_path / "snap.db")
