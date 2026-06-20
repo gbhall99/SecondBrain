@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Relationships</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    h1 { margin-bottom: .25rem; }
+    .meta { color: #888; font-size: .85rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #8884; }
+    .stale { color: #c70; }
+  </style>
+</head>
+<body>
+  <p class="meta"><a href="/">← Home</a> · <a href="/speakers">People</a></p>
+  <h1>Relationships</h1>
+  <p class="meta">Who you interact with, ranked. Opted-out people are excluded.</p>
+  {% if not relationships %}<p class="meta">No interactions recorded yet.</p>{% endif %}
+  {% if relationships %}
+  <table>
+    <tr><th>Person</th><th>Conversations</th><th>Talk min</th><th>Last seen</th></tr>
+    {% for r in relationships %}
+    <tr>
+      <td><a href="/person/{{ r.speaker_id }}">{{ r.label }}</a>
+        <span class="meta">{{ r.kind }}</span></td>
+      <td>{{ r.conversations }}</td>
+      <td>{{ r.talk_minutes }}</td>
+      <td class="{{ 'stale' if r.days_since_seen is not none and r.days_since_seen > 30 else '' }}">
+        {{ (r.last_seen or '')[:10] or '—' }}
+        {% if r.days_since_seen is not none %}<span class="meta">({{ r.days_since_seen }}d)</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</body>
+</html>

@@ -47,6 +47,14 @@ def test_person_endpoints(client, conn):
     assert client.get("/api/person/999").status_code == 404
 
 
+def test_relationships_endpoints(client, conn):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (6, 'Dana', 'known', 0)")
+    r = client.get("/api/relationships")
+    assert r.status_code == 200
+    assert "relationships" in r.json()
+    assert client.get("/relationships").status_code == 200  # page renders
+
+
 def test_search_endpoint(client):
     r = client.get("/api/search", params={"q": "onboarding"})
     assert r.status_code == 200

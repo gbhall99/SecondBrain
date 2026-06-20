@@ -128,6 +128,13 @@ def person(
 
 
 @app.command()
+def relationships() -> None:
+    """List people you interact with, ranked (opted-out excluded)."""
+    with db_session(settings=get_settings()) as conn:
+        typer.echo(json.dumps(service.relationships(conn, get_settings()), indent=2))
+
+
+@app.command()
 def queue(
     reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
 ) -> None:
