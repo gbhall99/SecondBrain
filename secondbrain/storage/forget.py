@@ -89,21 +89,61 @@ def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
     return removed
 
 
+def _purge_forgotten_conversations(conn: sqlite3.Connection, conv_ids: set[int]) -> int:
+    """Delete conversations that have no audio left, plus their extraction rows.
+
+    A ``knowledge_extractions`` row carries the LLM's raw extraction JSON for a
+    conversation — which echoes the transcript text. Once every chunk of a
+    conversation has been forgotten, that provenance text must go too. Deleting
+    the conversation cascades its extractions; first null the
+    ``source_extraction_id`` back-references on any surviving nodes/edges so the
+    cascade doesn't trip a foreign-key constraint. Returns conversations removed.
+    """
+    removed = 0
+    for cid in conv_ids:
+        still = conn.execute(
+            "SELECT 1 FROM audio_files WHERE conversation_id=? LIMIT 1", (cid,)
+        ).fetchone()
+        if still:
+            continue
+        ext_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM knowledge_extractions WHERE conversation_id=?", (cid,)
+            ).fetchall()
+        ]
+        if ext_ids:
+            ph = ",".join("?" * len(ext_ids))
+            conn.execute(
+                f"UPDATE kg_nodes SET source_extraction_id=NULL "
+                f"WHERE source_extraction_id IN ({ph})",
+                ext_ids,
+            )
+            conn.execute(
+                f"UPDATE kg_edges SET source_extraction_id=NULL "
+                f"WHERE source_extraction_id IN ({ph})",
+                ext_ids,
+            )
+        conn.execute("DELETE FROM conversations WHERE id=?", (cid,))  # cascades extractions
+        removed += 1
+    return removed
+
+
 def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> dict:
     """Delete the given segments + their vectors; drop now-orphaned audio files.
 
     The FTS index is kept in sync by the AFTER DELETE trigger on the table.
     """
     if not seg_ids:
-        return {"segments": 0, "audio_files": 0, "kg_edges": 0}
-    audio_ids = [
-        r["audio_file_id"]
-        for r in conn.execute(
-            f"SELECT DISTINCT audio_file_id FROM transcript_segments "
-            f"WHERE id IN ({','.join('?' * len(seg_ids))})",
-            seg_ids,
-        ).fetchall()
-    ]
+        return {"segments": 0, "audio_files": 0, "kg_edges": 0, "conversations": 0}
+    rows = conn.execute(
+        f"SELECT DISTINCT af.id AS aid, af.conversation_id AS cid "
+        f"FROM transcript_segments ts JOIN audio_files af ON af.id = ts.audio_file_id "
+        f"WHERE ts.id IN ({','.join('?' * len(seg_ids))})",
+        seg_ids,
+    ).fetchall()
+    audio_ids = [r["aid"] for r in rows]
+    conv_ids = {r["cid"] for r in rows if r["cid"] is not None}
     _delete_segment_vectors(conn, seg_ids)
     edges_removed = _prune_graph_citations(conn, seg_ids)
     conn.execute(
@@ -111,7 +151,13 @@ def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> dict:
         seg_ids,
     )
     audio_removed = _delete_orphan_audio(conn, audio_ids)
-    return {"segments": len(seg_ids), "audio_files": audio_removed, "kg_edges": edges_removed}
+    convs_removed = _purge_forgotten_conversations(conn, conv_ids)
+    return {
+        "segments": len(seg_ids),
+        "audio_files": audio_removed,
+        "kg_edges": edges_removed,
+        "conversations": convs_removed,
+    }
 
 
 def forget_day(
@@ -161,7 +207,10 @@ def forget_person(
         "SELECT is_owner FROM speakers WHERE id=?", (speaker_id,)
     ).fetchone()
     if row is None:
-        return {"segments": 0, "audio_files": 0, "kg_edges": 0, "speakers": 0, "kg_nodes": 0}
+        return {
+            "segments": 0, "audio_files": 0, "kg_edges": 0, "conversations": 0,
+            "speakers": 0, "kg_nodes": 0,
+        }
     if row["is_owner"]:
         raise ValueError("refusing to forget the owner; use day/range forget instead")
 
