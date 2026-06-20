@@ -70,3 +70,32 @@ Each item shipped behind the green gate (`ruff` + full `pytest` +
 - **#15** Database restore — reversible, validated snapshot replacement.
 - **#16** Backup retention — prune to the newest N snapshots.
 - **#17** Lint — enable ruff `C4`/`SIM`/`PIE`/`RET` and apply fixes.
+- **#18** CHANGELOG / loop-log.
+- **#19** `sb backups` — list snapshots.
+- **#20** `sb stats` — corpus overview (CLI).
+- **#21** Forget — prune knowledge-graph edge citations; drop ungrounded edges.
+- **#22** Forget — purge extraction provenance of fully-forgotten conversations.
+- **#23** `sb config show` / `check` — effective config with secrets redacted.
+- **#24** `/api/stats` — web parity for the corpus overview.
+- **#25** `sb queue` — job-queue inspection + stuck-job reclaim.
+- **#26** Export — optional `--since`/`--until` date range.
+- **#27** Search — optional `--since`/`--until` date range.
+- **#28** Backup-freshness check in `sb doctor` / `/health`.
+
+## Phase 8 — People & Memory Intelligence
+Larger net-new features turning the captured graph into relationship & memory
+intelligence. All local, default-safe, opt-out-filtered, green-gated.
+
+- **8A Person dossier (#29, #30):** `service.person_dossier` aggregates identity,
+  interactions/talk-time, known facts, commitments (owed by/to), recent quotes,
+  and connections; `GET /api/person/{id}`, `/person/{id}` page, `sb person`.
+  Opted-out people show identity/interaction shape only.
+- **8B Relationship intelligence (#31, #32):** `service.relationships` ranks
+  people by interaction; `detect_stale_relationships` reconnect nudge
+  (`reconnect_days`, gated); `/api/relationships`, `/relationships`, `sb relationships`.
+- **8C Memory timeline (#33, #34):** `service.timeline` renders a day as
+  conversations with attributed segments + inline extracted knowledge;
+  `/api/timeline/{day}`, `/timeline[/{day}]`, `sb timeline`.
+- **8D Unified dashboard (#35):** shared `base.html` nav; `index.html` reworked as
+  a home dashboard with corpus stats deep-linking to every section; person/
+  relationships/timeline pages share the nav.
