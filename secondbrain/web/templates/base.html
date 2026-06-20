@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}SecondBrain{% endblock %}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 880px;
+           margin: 0 auto; padding: 1.2rem 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    h1 { margin-bottom: .25rem; }
+    .meta { color: #888; font-size: .85rem; }
+    .card { border: 1px solid #8884; border-radius: 10px; padding: .8rem 1rem; margin: .6rem 0; }
+    .pill { display: inline-block; padding: .3rem .7rem; border-radius: 999px;
+            background: #8882; font-size: .85rem; margin: .1rem; }
+    .nav { display: flex; flex-wrap: wrap; gap: .1rem .9rem; padding: .5rem 0;
+           border-bottom: 1px solid #8884; margin-bottom: 1rem; font-size: .92rem; }
+    .nav a { text-decoration: none; color: #888; }
+    .nav a:hover { color: inherit; font-weight: 600; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #8884; }
+    button { padding: .5rem .9rem; border-radius: 8px; border: 1px solid #8884;
+             cursor: pointer; background: #8882; }
+    {% block style %}{% endblock %}
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/">Home</a>
+    <a href="/timeline">Timeline</a>
+    <a href="/speakers">People</a>
+    <a href="/relationships">Relationships</a>
+    <a href="/graph">Graph</a>
+    <a href="/chat">Ask</a>
+    <a href="/brief">Brief</a>
+    <a href="/goals">Goals</a>
+    <a href="/tasks">Tasks</a>
+  </nav>
+  {% block content %}{% endblock %}
+</body>
+</html>

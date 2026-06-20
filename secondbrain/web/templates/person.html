@@ -1,27 +1,12 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — {{ d.label }}</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    h1 { margin-bottom: .1rem; }
-    .meta { color: #888; font-size: .85rem; }
-    .card { border: 1px solid #8884; border-radius: 10px; padding: .8rem 1rem; margin: .6rem 0; }
+{% extends "base.html" %}
+{% block title %}SecondBrain — {{ d.label }}{% endblock %}
+{% block style %}
     .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
     .stat { min-width: 7rem; }
     .stat b { display: block; font-size: 1.3rem; }
-    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #ccc; }
-    .pill { display: inline-block; background: #8882; border-radius: 999px;
-            padding: .1rem .6rem; font-size: .8rem; margin: .1rem; }
-  </style>
-</head>
-<body>
-  <p class="meta"><a href="/speakers">← People</a></p>
+    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #aaa; }
+{% endblock %}
+{% block content %}
   <h1>{{ d.label }}{% if d.is_owner %} <span class="meta">(you)</span>{% endif %}</h1>
   <p class="meta">{{ d.kind }}
     {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}
@@ -70,5 +55,4 @@
     <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
   {% endfor %}
   {% endif %}
-</body>
-</html>
+{% endblock %}

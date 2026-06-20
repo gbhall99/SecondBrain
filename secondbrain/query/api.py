@@ -96,7 +96,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def index(request: Request):
         with db() as conn:
             st = service.status(conn, settings)
-        return templates.TemplateResponse(request, "index.html", {"status": st})
+            stats = service.corpus_stats(conn)
+        return templates.TemplateResponse(request, "index.html", {"status": st, "stats": stats})
 
     @app.get("/api/status")
     def api_status():
