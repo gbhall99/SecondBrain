@@ -135,6 +135,13 @@ def relationships() -> None:
 
 
 @app.command()
+def timeline(day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).")) -> None:
+    """Show a day as conversations with inline extracted knowledge."""
+    with db_session(settings=get_settings()) as conn:
+        typer.echo(json.dumps(service.timeline(conn, day, get_settings()), indent=2))
+
+
+@app.command()
 def queue(
     reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
 ) -> None:
