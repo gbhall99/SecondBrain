@@ -251,6 +251,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rel = service.relationships(conn, settings)
         return templates.TemplateResponse(request, "relationships.html", {"relationships": rel})
 
+    # --- memory timeline (Phase 8C) ------------------------------------------
+
+    @app.get("/api/timeline/{day}")
+    def api_timeline(day: str):
+        with db() as conn:
+            return {"day": day, "conversations": service.timeline(conn, day, settings)}
+
+    @app.get("/timeline", response_class=HTMLResponse)
+    def timeline_today(request: Request):
+        return timeline_page(request, None)
+
+    @app.get("/timeline/{day}", response_class=HTMLResponse)
+    def timeline_page(request: Request, day: str | None = None):
+        with db() as conn:
+            blocks = service.timeline(conn, day, settings)
+        return templates.TemplateResponse(
+            request, "timeline.html", {"day": day or "today", "blocks": blocks}
+        )
+
     # --- knowledge graph + Q&A (Phase 3) -------------------------------------
 
     @app.get("/chat", response_class=HTMLResponse)

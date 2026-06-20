@@ -55,6 +55,14 @@ def test_relationships_endpoints(client, conn):
     assert client.get("/relationships").status_code == 200  # page renders
 
 
+def test_timeline_endpoints(client):
+    r = client.get("/api/timeline/2026-06-16")
+    assert r.status_code == 200
+    assert "conversations" in r.json()
+    assert client.get("/timeline/2026-06-16").status_code == 200  # page renders
+    assert client.get("/timeline").status_code == 200  # today
+
+
 def test_search_endpoint(client):
     r = client.get("/api/search", params={"q": "onboarding"})
     assert r.status_code == 200
