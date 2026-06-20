@@ -29,6 +29,15 @@ def test_status_endpoint(client):
     assert "disk_free_gb" in body
 
 
+def test_stats_endpoint(client):
+    r = client.get("/api/stats")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["segments"] == 1
+    assert "kg_nodes" in body
+    assert "goals" in body
+
+
 def test_search_endpoint(client):
     r = client.get("/api/search", params={"q": "onboarding"})
     assert r.status_code == 200

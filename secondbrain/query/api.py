@@ -103,6 +103,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with db() as conn:
             return service.status(conn, settings)
 
+    @app.get("/api/stats")
+    def api_stats():
+        with db() as conn:
+            return service.corpus_stats(conn)
+
     @app.get("/api/search")
     def api_search(
         q: str = Query(..., min_length=1),
