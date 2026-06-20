@@ -69,3 +69,6 @@ ignore = ["B008"]  # typer/fastapi use function calls in defaults by design
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: real-backend tests (Ollama/pyannote/MLX); opt-in via SB_SLOW=1, nightly CI only",
+]
