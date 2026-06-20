@@ -73,9 +73,21 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** safe to run daily and reach securely from anywhere.
 
+## ✅ Phase 6 — Goals as an advanced to-do list (shipped)
+- AI **goal decomposition** into a milestones→tasks tree (propose → you approve).
+- **Tasks** with estimates/effort/value/energy, dependencies + readiness, and
+  one-tap **promotion of conversation action items** into tasks.
+- **Prioritisation matrix**: Eisenhower quadrants + a weighted score; a daily
+  **planner** fits ready tasks into your capacity → a Today plan you accept.
+- **Task research**: local graph-RAG by default; **opt-in web research** (gated).
+- Surfaces: `/tasks` web board, `sb task` / `sb plan` / `sb decompose`.
+
+**Outcome:** goals become a prioritised, AI-supported, day-by-day action system.
+
 ## Later — still open
 - Backup/export (Markdown + JSON) and import/restore.
 - Data "forget": purge a person/day/range, VACUUM.
+- Calendar time-blocking (push scheduled tasks to Google Calendar).
 - Diarization overlap handling + speaker/profile-quality tuning.
 
 ## Cross-cutting principles

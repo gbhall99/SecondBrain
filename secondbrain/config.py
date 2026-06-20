@@ -105,6 +105,18 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
 
 
+class TasksConfig(BaseModel):
+    # Goal decomposition + tasks + daily planning (Phase 6). OFF by default.
+    enabled: bool = False
+    daily_capacity_minutes: int = 240
+    urgent_days: int = 2               # due within N days → "urgent" quadrant
+    important_value: int = 4           # value ≥ this → "important" quadrant
+    # Opt-in web research per task (local graph-RAG research is always available).
+    web_research_enabled: bool = False
+    web_search_url: str = ""           # e.g. a SearXNG JSON endpoint; user-supplied
+    autonomy: str = "propose"          # propose (approve) | auto
+
+
 class ProactiveConfig(BaseModel):
     # Proactive engine: nightly brief + weekly review, goals, nudges. OFF by
     # default so earlier phases/CI are unchanged until enabled on the Mac.
@@ -176,6 +188,7 @@ class Settings(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
 
     # --- derived paths -------------------------------------------------------
 

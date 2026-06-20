@@ -398,6 +398,92 @@ def goals_rm(goal_id: int) -> None:
     typer.echo(f"Deleted goal #{goal_id}.")
 
 
+# --- tasks + daily planning (Phase 6) ----------------------------------------
+
+task_app = typer.Typer(no_args_is_help=True, help="Tasks & daily planning.")
+app.add_typer(task_app, name="task")
+
+
+@task_app.command("add")
+def task_add(
+    title: str,
+    goal: int = typer.Option(None, "--goal", help="Link to goal id."),
+    minutes: int = typer.Option(None, "--minutes", help="Estimate."),
+    value: int = typer.Option(3, "--value"),
+    effort: int = typer.Option(3, "--effort"),
+    due: str = typer.Option(None, "--due", help="YYYY-MM-DD"),
+) -> None:
+    """Add a task."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        tid = service.create_task(conn, title=title, goal_id=goal, estimate_minutes=minutes,
+                                  value=value, effort=effort, due_date=due)
+    typer.echo(f"Added task #{tid}.")
+
+
+@task_app.command("list")
+def task_list(status: str = typer.Option(None), goal: int = typer.Option(None)) -> None:
+    """List tasks."""
+    with db_session(settings=get_settings()) as conn:
+        for t in service.list_tasks(conn, goal_id=goal, status=status):
+            due = f" due {t['due_date']}" if t["due_date"] else ""
+            typer.echo(f"#{t['id']:<4} [{t['status']}] {t['title']}{due}")
+
+
+@task_app.command("done")
+def task_done(task_id: int) -> None:
+    """Mark a task done."""
+    with db_session(settings=get_settings()) as conn:
+        service.task_set_status(conn, task_id, "done")
+    typer.echo(f"Task #{task_id} done.")
+
+
+@task_app.command("research")
+def task_research(task_id: int, web: bool = typer.Option(False, "--web")) -> None:
+    """Research a task (local graph-RAG by default; --web for opt-in web)."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        service.task_research(conn, task_id, web=web, settings=settings)
+        notes = service.task_research_notes(conn, task_id)
+    if notes:
+        typer.echo(notes[0]["summary_md"])
+
+
+@app.command()
+def plan(
+    accept: bool = typer.Option(False, "--accept", help="Accept the proposed plan."),
+    capacity: int = typer.Option(None, "--capacity", help="Minutes available today."),
+) -> None:
+    """Propose (or accept) today's prioritised plan."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        day = service.accept_day(conn) if accept else service.propose_day(
+            conn, capacity_minutes=capacity, settings=settings
+        )
+    if not day or not day.get("tasks"):
+        typer.echo("No ready tasks to plan.")
+        raise typer.Exit()
+    typer.echo(f"Today ({day['status']}, {day['capacity_minutes']}m):")
+    for t in day["tasks"]:
+        if t:
+            typer.echo(f"  #{t['id']:<4} {t['title']} ({t.get('estimate_minutes') or '–'}m)")
+
+
+@app.command("decompose")
+def decompose(goal_id: int, accept: bool = typer.Option(False, "--accept")) -> None:
+    """Propose an AI plan for a goal (use --accept to create the tasks)."""
+    settings = get_settings()
+    with db_session(settings=settings) as conn:
+        proposal = service.decompose_goal(conn, goal_id, settings)
+        for ms in proposal.get("milestones", []):
+            typer.echo(f"• {ms['title']}")
+            for t in ms.get("tasks", []):
+                typer.echo(f"    - {t['title']} ({t.get('estimate_minutes') or '–'}m)")
+        if accept:
+            ids = service.accept_plan(conn, goal_id, proposal)
+            typer.echo(f"\nCreated {len(ids)} task(s).")
+
+
 # --- hardening: health + auth (Phase 5) --------------------------------------
 
 

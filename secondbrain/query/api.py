@@ -281,6 +281,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             service.delete_goal(conn, goal_id)
         return {"ok": True}
 
+    # --- tasks + daily planning (Phase 6) ------------------------------------
+
+    @app.get("/tasks", response_class=HTMLResponse)
+    def tasks_page(request: Request):
+        with db() as conn:
+            today = service.get_day(conn)
+            backlog = service.list_tasks(conn)
+        return templates.TemplateResponse(
+            request, "tasks.html", {"today": today, "backlog": backlog}
+        )
+
+    @app.get("/api/tasks")
+    def api_tasks(goal_id: int = Query(None), status: str = Query(None)):
+        with db() as conn:
+            return {"tasks": service.list_tasks(conn, goal_id=goal_id, status=status)}
+
+    @app.post("/api/tasks")
+    def api_create_task(title: str = Body(...), goal_id: int = Body(None),
+                        estimate_minutes: int = Body(None), value: int = Body(3),
+                        effort: int = Body(3), due_date: str = Body(None)):
+        with db() as conn:
+            tid = service.create_task(conn, title=title, goal_id=goal_id,
+                                      estimate_minutes=estimate_minutes, value=value,
+                                      effort=effort, due_date=due_date)
+        return {"id": tid}
+
+    @app.post("/api/tasks/{task_id}/status")
+    def api_task_status(task_id: int, status: str = Body(..., embed=True)):
+        with db() as conn:
+            service.task_set_status(conn, task_id, status)
+        return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/research")
+    def api_task_research(task_id: int, web: bool = Body(False, embed=True)):
+        with db() as conn:
+            note_id = service.task_research(conn, task_id, web=web, settings=settings)
+            notes = service.task_research_notes(conn, task_id)
+        return {"id": note_id, "notes": notes}
+
+    @app.get("/api/plan/today")
+    def api_plan_today():
+        with db() as conn:
+            return service.get_day(conn) or service.propose_day(conn, settings=settings)
+
+    @app.post("/api/plan/today")
+    def api_plan_action(action: str = Body("propose", embed=True)):
+        with db() as conn:
+            if action == "accept":
+                return service.accept_day(conn) or {}
+            return service.propose_day(conn, settings=settings)
+
+    @app.post("/api/goals/{goal_id}/decompose")
+    def api_decompose(goal_id: int):
+        with db() as conn:
+            return service.decompose_goal(conn, goal_id, settings)
+
+    @app.post("/api/goals/{goal_id}/plan/accept")
+    def api_accept_plan(goal_id: int, plan: dict = Body(...)):
+        with db() as conn:
+            ids = service.accept_plan(conn, goal_id, plan)
+        return {"task_ids": ids}
+
     return app
 
 
