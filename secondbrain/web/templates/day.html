@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Day transcript</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    .meta { color: #888; font-size: .8rem; }
+    .seg { border-bottom: 1px solid #8883; padding: .45rem 0; }
+    .spk { font-weight: 600; }
+    .low { color: #c80; }
+    select { font: inherit; padding: .2rem; border: 1px solid #8884; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Transcript {{ date }}</h1>
+  <p class="meta"><a href="/">home</a> · <a href="/speakers">speakers</a> ·
+     fix a wrong speaker inline — it locks the line and teaches the profile.</p>
+
+  {% for s in segments %}
+    <div class="seg">
+      <span class="spk {{ 'low' if s.speaker_low_confidence else '' }}">
+        {{ s.speaker or 'Unknown' }}{{ ' (?)' if s.speaker_low_confidence else '' }}</span>
+      <span class="meta">{{ (s.start_at or '')[11:19] }}</span>
+      <select onchange="reassign({{ s.id }}, this.value)">
+        <option value="">— fix —</option>
+        {% for sp in speakers %}
+          <option value="{{ sp.id }}">{{ sp.name or sp.display_label or ('#' ~ sp.id) }}</option>
+        {% endfor %}
+      </select>
+      <div>{{ s.text }}</div>
+    </div>
+  {% else %}
+    <p class="meta">Nothing recorded for this day.</p>
+  {% endfor %}
+
+  <script>
+    async function reassign(segId, speakerId) {
+      if (!speakerId) return;
+      await fetch(`/api/segments/${segId}/speaker`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({speaker_id: parseInt(speakerId)})
+      });
+      location.reload();
+    }
+  </script>
+</body>
+</html>

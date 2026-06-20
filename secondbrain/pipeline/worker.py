@@ -26,6 +26,7 @@ from secondbrain.storage import models, retention
 
 JOB_TRANSCRIBE = "transcribe"
 JOB_CLUSTER = "cluster_speakers"
+JOB_REATTRIBUTE = "reattribute_speakers"
 
 
 def enqueue_transcription(conn: sqlite3.Connection, audio_file_id: int) -> int | None:
@@ -168,6 +169,10 @@ def run_once(
             from secondbrain.speaker import cluster
 
             cluster.run_clustering(conn, settings=settings)
+        elif job.type == JOB_REATTRIBUTE:
+            from secondbrain.speaker import reattribute
+
+            reattribute.run_reattribution(conn, settings=settings)
         elif job.type == engine.JOB_PROACTIVE:
             engine.run_digest(
                 conn, llm=llm or get_llm(settings),

@@ -78,13 +78,20 @@ def test_phase6_schema_present(conn):
     assert {"tasks", "task_deps", "task_research", "day_plans"} <= tables
 
 
+def test_phase7_columns_present(conn):
+    obs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(speaker_observations)").fetchall()}
+    assert {"duration_s", "quality", "pruned", "source"} <= obs_cols
+    seg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(transcript_segments)").fetchall()}
+    assert {"observation_id", "speaker_locked", "speaker_source"} <= seg_cols
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0005_tasks"
+    assert ver == "0006_speaker_quality"
 
 
 def test_pause_state_roundtrip(conn):

@@ -158,6 +158,57 @@ def set_owner(conn: sqlite3.Connection, speaker_id: int) -> None:
     conn.execute("UPDATE speakers SET is_owner=1, kind='owner' WHERE id=?", (sid,))
 
 
+# --- speaker quality / self-correction (Phase 7) -----------------------------
+
+
+def reassign_segment(
+    conn, segment_id: int, speaker_id: int, settings: Settings | None = None
+) -> bool:
+    from secondbrain.speaker import correct
+
+    return correct.reassign_segment(conn, segment_id, speaker_id, settings or get_settings())
+
+
+def reattribute(conn, settings: Settings | None = None) -> int:
+    from secondbrain.speaker import reattribute as ra
+
+    return ra.run_reattribution(conn, settings or get_settings())
+
+
+def recompute_profiles(conn) -> int:
+    rows = conn.execute("SELECT id FROM speakers WHERE merged_into IS NULL").fetchall()
+    for r in rows:
+        registry.recompute_centroid(conn, r["id"])
+    return len(rows)
+
+
+def prune_profiles(conn, settings: Settings | None = None) -> int:
+    settings = settings or get_settings()
+    rows = conn.execute("SELECT id FROM speakers WHERE merged_into IS NULL").fetchall()
+    return sum(registry.prune_exemplars(conn, r["id"], settings) for r in rows)
+
+
+def speaker_quality(conn, settings: Settings | None = None) -> dict:
+    settings = settings or get_settings()
+    low = settings.diarization.low_confidence_threshold
+    return {
+        "speakers": conn.execute(
+            "SELECT COUNT(*) AS n FROM speakers WHERE merged_into IS NULL"
+        ).fetchone()["n"],
+        "exemplars": conn.execute(
+            "SELECT COUNT(*) AS n FROM speaker_observations WHERE pruned=0"
+        ).fetchone()["n"],
+        "locked_segments": conn.execute(
+            "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_locked=1"
+        ).fetchone()["n"],
+        "low_confidence_segments": conn.execute(
+            "SELECT COUNT(*) AS n FROM transcript_segments "
+            "WHERE speaker_id IS NOT NULL AND speaker_confidence < ?",
+            (low,),
+        ).fetchone()["n"],
+    }
+
+
 # --- tasks + daily planning (Phase 6) ----------------------------------------
 
 

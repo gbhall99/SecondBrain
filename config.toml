@@ -150,3 +150,12 @@ centroid_update_threshold = 0.75
 cluster_distance_threshold = 0.30
 low_confidence_threshold = 0.5
 min_cluster_speech_s = 1.0
+# Phase 7 — voice-profile quality / self-correction
+exemplar_k = 3
+max_exemplars_per_speaker = 50
+reattribute_threshold = 0.80
+prune_min_confidence = 0.3
+overlap_flag = true
+segmentation_threshold = 0.5
+min_speakers = 0               # 0 = auto
+max_speakers = 0               # 0 = auto

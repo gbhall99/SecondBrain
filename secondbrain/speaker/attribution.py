@@ -46,6 +46,11 @@ def best_overlap(turns: list[SpeakerTurn], s0: float, s1: float) -> tuple[str | 
     return label, min(1.0, per_label[label] / seg_dur)
 
 
+def _overlap_count(turns: list[SpeakerTurn], s0: float, s1: float) -> int:
+    """How many distinct speaker labels overlap [s0, s1] (>1 ⇒ overlapped speech)."""
+    return len({t.local_label for t in turns if min(s1, t.end_s) - max(s0, t.start_s) > 0})
+
+
 def concat_offsets_from_db(
     conn: sqlite3.Connection, chunks: list[sqlite3.Row]
 ) -> list[ChunkOffset]:
@@ -123,6 +128,8 @@ def attribute_conversation(
     # 1. Resolve each local cluster to a global speaker.
     cluster_speaker: dict[str, int] = {}
     cluster_sim: dict[str, float] = {}
+    cluster_margin: dict[str, float] = {}
+    cluster_obs: dict[str, int] = {}
     for cluster in diar.clusters:
         m = registry.match_embedding(conn, cluster.embedding, settings)
         if m.speaker_id is None:
@@ -133,11 +140,12 @@ def attribute_conversation(
             sim = m.similarity
         cluster_speaker[cluster.local_label] = sid
         cluster_sim[cluster.local_label] = sim
+        cluster_margin[cluster.local_label] = m.margin
 
         # record one observation per cluster (mapped back to a chunk) + centroid.
         rep = cluster.turns[0] if cluster.turns else SpeakerTurn(0.0, 0.0, cluster.local_label)
         off = _concat_to_chunk(offsets, rep.start_s)
-        registry.record_observation(
+        cluster_obs[cluster.local_label] = registry.record_observation(
             conn,
             speaker_id=sid,
             audio_file_id=off.audio_file_id if off else None,
@@ -147,6 +155,8 @@ def attribute_conversation(
             start_at=off.row["started_at"] if off else None,
             confidence=sim,
             embedding=cluster.embedding,
+            duration_s=cluster.total_speech_s,
+            quality=sim,
         )
         if m.speaker_id is None or sim >= d.centroid_update_threshold:
             registry.update_centroid(conn, sid, cluster.embedding)
@@ -167,7 +177,13 @@ def attribute_conversation(
                 continue
             sid = cluster_speaker[label]
             conf = round(frac * cluster_sim[label], 4)
-            registry.assign_segment_speaker(conn, seg["id"], sid, conf)
+            # flag overlapped speech (multiple speakers cover this segment)
+            if settings.diarization.overlap_flag and _overlap_count(diar.turns, s0, s1) > 1:
+                conf = min(conf, settings.diarization.low_confidence_threshold - 0.01)
+            registry.assign_segment_speaker(
+                conn, seg["id"], sid, conf,
+                observation_id=cluster_obs.get(label), source="auto",
+            )
             labeled += 1
             per_speaker_count[sid] = per_speaker_count.get(sid, 0) + 1
             if seg["start_at"]:

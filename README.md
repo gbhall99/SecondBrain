@@ -5,11 +5,12 @@ continuously records ambient room audio, transcribes it on-device, and gives you
 a private, searchable record of everything that was said — with **nothing ever
 leaving your machine**.
 
-> **Phases 1–6 shipped: capture + transcript, diarization & voice profiles, a
+> **Phases 1–7 shipped:** capture + transcript, diarization & voice profiles, a
 > local-LLM knowledge graph with grounded Q&A, proactive assistance + goals,
-> hardening (auth, encryption, health), and goals-as-an-advanced-to-do-list (AI
-> decomposition, a prioritisation matrix, a daily plan, and task research).** See
-> [the roadmap](docs/ROADMAP.md).
+> hardening (auth, encryption, health), goals-as-an-advanced-to-do-list (AI
+> decomposition, prioritisation matrix, daily plan, task research), and
+> speaker-quality self-correction (exemplar matching, re-attribution, a correction
+> loop). See [the roadmap](docs/ROADMAP.md).
 
 ## What it does today
 
@@ -106,6 +107,15 @@ sb speaker opt-out 4              # redact a person's past + future words
 
 Or use the web **Speakers** page (`/speakers`) to play sample clips and label
 voices with the "Who is this?" queue.
+
+**Improving accuracy over time (Phase 7):** matching is exemplar-aware (a voice is
+compared to a person's centroid *and* their nearest stored samples). Fix a wrong
+line on the **`/day`** page (or `sb speaker reassign <segment> <speaker>`) — it
+locks that line and adds a confirmed sample so future matching improves. As
+profiles improve, `sb speaker reattribute` (also nightly) relabels past
+low-confidence lines; `sb speaker recompute`/`prune`/`quality` manage profiles.
+Overlapping-speech lines are flagged low-confidence; pyannote overlap params are
+exposed in `[diarization]` for on-device tuning.
 
 ### Knowledge graph & Q&A (Phase 3)
 

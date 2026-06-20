@@ -84,11 +84,26 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** goals become a prioritised, AI-supported, day-by-day action system.
 
+## ✅ Phase 7 — Diarization & voice-profile quality (shipped)
+- **Exemplar-aware matching**: best of {centroid, k-nearest stored exemplars};
+  centroid fallback preserves prior behaviour.
+- **Exemplar management**: capped, low-quality pruning + centroid recompute.
+- **Re-attribution**: on-demand + nightly relabel of unknown/low-confidence,
+  non-locked segments that now clear a HIGH bar (never overwrites confirmed labels).
+- **Correction loop**: fix a line's speaker (web `/day` or CLI) → locks it + adds
+  a confirmed exemplar that teaches the profile.
+- **Confidence**: top-1/top-2 margin signal; overlapped segments flagged
+  low-confidence; pyannote overlap params exposed as Mac-side config.
+- Surfaces: `/day` inline fix-speaker, `sb speaker reassign/reattribute/recompute/
+  prune/quality`.
+
+**Outcome:** speaker accuracy that learns and self-corrects over time.
+
 ## Later — still open
 - Backup/export (Markdown + JSON) and import/restore.
 - Data "forget": purge a person/day/range, VACUUM.
 - Calendar time-blocking (push scheduled tasks to Google Calendar).
-- Diarization overlap handling + speaker/profile-quality tuning.
+- Deeper overlap separation (Mac/ML, beyond config knobs).
 
 ## Cross-cutting principles
 - **Local-first / offline** at every phase.

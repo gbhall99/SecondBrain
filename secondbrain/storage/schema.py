@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0005_tasks"
+SCHEMA_VERSION = "0006_speaker_quality"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -418,6 +418,23 @@ ALTERS_0005: list[str] = [
     f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0005
 ]
 
+# --- Phase 7: speaker-quality / self-correction (migration 0006) --------------
+STATEMENTS_0006_CREATE: list[str] = []
+
+COLUMNS_0006: list[tuple[str, str, str]] = [
+    ("speaker_observations", "duration_s", "REAL"),
+    ("speaker_observations", "quality", "REAL"),
+    ("speaker_observations", "pruned", "INTEGER NOT NULL DEFAULT 0"),
+    ("speaker_observations", "source", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("transcript_segments", "observation_id", "INTEGER"),
+    ("transcript_segments", "speaker_locked", "INTEGER NOT NULL DEFAULT 0"),
+    ("transcript_segments", "speaker_source", "TEXT"),
+]
+
+ALTERS_0006: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0006
+]
+
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -465,6 +482,14 @@ def apply_phase6_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase7_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0006 additions idempotently (columns on existing tables)."""
+    for table, column, ddl in COLUMNS_0006:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0006_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -478,6 +503,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase3_schema(conn)
     apply_phase4_schema(conn)
     apply_phase6_schema(conn)
+    apply_phase7_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

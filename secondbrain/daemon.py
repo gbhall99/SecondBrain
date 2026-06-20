@@ -116,6 +116,16 @@ class Daemon:
                 state.set_state(conn, cluster.LAST_RUN_KEY, utcnow_iso())
         except Exception:  # noqa: BLE001
             log.exception("clustering enqueue failed")
+        try:
+            from secondbrain.speaker import reattribute
+
+            today = utcnow_iso()[:10]
+            last = (state.get_state(conn, reattribute.LAST_RUN_KEY) or "")[:10]
+            if last != today:
+                q.enqueue(conn, worker.JOB_REATTRIBUTE, {}, dedupe_key=None)
+                state.set_state(conn, reattribute.LAST_RUN_KEY, utcnow_iso())
+        except Exception:  # noqa: BLE001
+            log.exception("reattribution enqueue failed")
         # Catch-up: enqueue extraction for diarized conversations not yet processed.
         if self.settings.extraction.enabled:
             try:

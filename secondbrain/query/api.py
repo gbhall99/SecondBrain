@@ -182,6 +182,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             service.set_owner(conn, speaker_id)
         return {"ok": True}
 
+    # --- speaker quality / corrections (Phase 7) -----------------------------
+
+    @app.get("/day", response_class=HTMLResponse)
+    def day_page(request: Request, date: str = Query(None)):
+        with db() as conn:
+            segments = service.day_segments(conn, date)
+            speakers = service.list_speakers(conn)
+        return templates.TemplateResponse(
+            request, "day.html", {"segments": segments, "speakers": speakers, "date": date or ""}
+        )
+
+    @app.post("/api/segments/{segment_id}/speaker")
+    def api_reassign_segment(segment_id: int, speaker_id: int = Body(..., embed=True)):
+        with db() as conn:
+            ok = service.reassign_segment(conn, segment_id, speaker_id, settings)
+        return {"ok": ok}
+
+    @app.post("/api/speakers/reattribute")
+    def api_reattribute():
+        with db() as conn:
+            return {"relabeled": service.reattribute(conn, settings)}
+
+    @app.get("/api/speakers/quality")
+    def api_speaker_quality():
+        with db() as conn:
+            return service.speaker_quality(conn, settings)
+
     # --- knowledge graph + Q&A (Phase 3) -------------------------------------
 
     @app.get("/chat", response_class=HTMLResponse)
