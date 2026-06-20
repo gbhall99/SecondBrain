@@ -107,6 +107,36 @@ def test_forget_person_refuses_owner(conn):
         service.forget_person(conn, 1)
 
 
+def test_forget_day_prunes_graph_citations(conn, tmp_path):
+    import json
+
+    _audio(conn, 1, "2026-06-15", str(tmp_path / "mon.flac"))
+    _audio(conn, 2, "2026-06-16", str(tmp_path / "tue.flac"))
+    _seg(conn, 1, 1, "2026-06-15", "monday")
+    _seg(conn, 2, 2, "2026-06-16", "tuesday")
+    conn.execute("INSERT INTO kg_nodes (id, type, name) VALUES (1, 'person', 'A')")
+    conn.execute("INSERT INTO kg_nodes (id, type, name) VALUES (2, 'project', 'B')")
+    # edge1 grounded only in the forgotten day → dropped
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, dst_node_id, kind, source_segment_ids) "
+        "VALUES (1, 1, 2, 'fact', ?)",
+        (json.dumps([1]),),
+    )
+    # edge2 cites both days → kept, but citation to the forgotten segment removed
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, dst_node_id, kind, source_segment_ids) "
+        "VALUES (2, 1, 2, 'fact', ?)",
+        (json.dumps([1, 2]),),
+    )
+
+    res = service.forget_day(conn, "2026-06-15")
+
+    assert res["kg_edges"] == 1  # edge1 dropped
+    assert conn.execute("SELECT COUNT(*) AS n FROM kg_edges").fetchone()["n"] == 1
+    remaining = conn.execute("SELECT source_segment_ids FROM kg_edges WHERE id=2").fetchone()
+    assert json.loads(remaining["source_segment_ids"]) == [2]  # forgotten cite pruned
+
+
 def test_vacuum_runs(conn, tmp_path):
     _audio(conn, 1, "2026-06-16", str(tmp_path / "a.flac"))
     _seg(conn, 1, 1, "2026-06-16", "ephemeral")

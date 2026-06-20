@@ -3,14 +3,17 @@
 The user's right to be forgotten, enforced across every store that holds their
 words: transcript segments (and their FTS index, kept in sync by triggers),
 semantic search vectors, speaker profiles/observations, and the knowledge graph
-nodes/edges derived from them. Raw audio files on disk are removed too once no
-segment references them. ``vacuum`` reclaims the freed pages so deleted data
-doesn't linger in the file.
+nodes/edges derived from them. Knowledge-graph edges have the forgotten segments
+removed from their citations, and any edge left ungrounded (no remaining
+citation) is deleted — a forgotten statement must not survive as an asserted
+fact. Raw audio files on disk are removed too once no segment references them.
+``vacuum`` reclaims the freed pages so deleted data doesn't linger in the file.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -26,6 +29,42 @@ def _delete_segment_vectors(conn: sqlite3.Connection, seg_ids: list[int]) -> Non
         conn.execute(
             f"DELETE FROM segment_vectors WHERE segment_id IN ({placeholders})", seg_ids
         )
+
+
+def _prune_graph_citations(conn: sqlite3.Connection, seg_ids: list[int]) -> int:
+    """Remove forgotten segments from edge citations; drop now-ungrounded edges.
+
+    A knowledge-graph edge cites the transcript segment(s) it was extracted from.
+    When those segments are forgotten, the citation is removed; an edge left with
+    no citations is no longer grounded in anything the user retains, so it is
+    deleted (a forgotten statement must not survive as an asserted fact). Returns
+    the number of edges deleted.
+    """
+    if not seg_ids:
+        return 0
+    gone = set(seg_ids)
+    deleted = 0
+    rows = conn.execute(
+        "SELECT id, source_segment_ids FROM kg_edges "
+        "WHERE source_segment_ids IS NOT NULL AND source_segment_ids != '[]'"
+    ).fetchall()
+    for r in rows:
+        try:
+            cites = json.loads(r["source_segment_ids"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        kept = [c for c in cites if c not in gone]
+        if len(kept) == len(cites):
+            continue  # this edge didn't cite any forgotten segment
+        if kept:
+            conn.execute(
+                "UPDATE kg_edges SET source_segment_ids=? WHERE id=?",
+                (json.dumps(kept), r["id"]),
+            )
+        else:
+            conn.execute("DELETE FROM kg_edges WHERE id=?", (r["id"],))
+            deleted += 1
+    return deleted
 
 
 def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
@@ -56,7 +95,7 @@ def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> dict:
     The FTS index is kept in sync by the AFTER DELETE trigger on the table.
     """
     if not seg_ids:
-        return {"segments": 0, "audio_files": 0}
+        return {"segments": 0, "audio_files": 0, "kg_edges": 0}
     audio_ids = [
         r["audio_file_id"]
         for r in conn.execute(
@@ -66,12 +105,13 @@ def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> dict:
         ).fetchall()
     ]
     _delete_segment_vectors(conn, seg_ids)
+    edges_removed = _prune_graph_citations(conn, seg_ids)
     conn.execute(
         f"DELETE FROM transcript_segments WHERE id IN ({','.join('?' * len(seg_ids))})",
         seg_ids,
     )
     audio_removed = _delete_orphan_audio(conn, audio_ids)
-    return {"segments": len(seg_ids), "audio_files": audio_removed}
+    return {"segments": len(seg_ids), "audio_files": audio_removed, "kg_edges": edges_removed}
 
 
 def forget_day(
@@ -121,7 +161,7 @@ def forget_person(
         "SELECT is_owner FROM speakers WHERE id=?", (speaker_id,)
     ).fetchone()
     if row is None:
-        return {"segments": 0, "audio_files": 0, "speakers": 0, "kg_nodes": 0}
+        return {"segments": 0, "audio_files": 0, "kg_edges": 0, "speakers": 0, "kg_nodes": 0}
     if row["is_owner"]:
         raise ValueError("refusing to forget the owner; use day/range forget instead")
 
