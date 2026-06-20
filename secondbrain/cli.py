@@ -270,12 +270,16 @@ def restore(
 def export(
     fmt: str = typer.Option("both", "--format", help="json | md | both."),
     out: str = typer.Option(None, "--out", help="Output directory."),
+    since: str = typer.Option(None, "--since", help="Segments on/after this day (YYYY-MM-DD)."),
+    until: str = typer.Option(None, "--until", help="Segments on/before this day (YYYY-MM-DD)."),
 ) -> None:
     """Export transcripts, graph, goals, and tasks (opted-out speakers excluded)."""
     settings = get_settings()
     out_dir = Path(out) if out else settings.data_path / "exports"
     with db_session(settings=settings) as conn:
-        paths = service.export_data(conn, out_dir, fmt=fmt, settings=settings)
+        paths = service.export_data(
+            conn, out_dir, fmt=fmt, settings=settings, since=since, until=until
+        )
     for p in paths:
         typer.echo(f"Exported {p}")
 

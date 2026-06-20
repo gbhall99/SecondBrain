@@ -464,16 +464,17 @@ def restore_database(settings: Settings | None = None, src=None, *, backup_curre
     )
 
 
-def export_data(conn, out_dir, fmt: str = "both", settings: Settings | None = None) -> list:
+def export_data(conn, out_dir, fmt: str = "both", settings: Settings | None = None,
+                since: str | None = None, until: str | None = None) -> list:
     """Export transcripts/graph/goals/tasks as JSON and/or Markdown. Returns paths."""
     from secondbrain.storage import backup
 
     settings = settings or get_settings()
     paths = []
     if fmt in ("json", "both"):
-        paths.append(backup.export_json(conn, out_dir, settings))
+        paths.append(backup.export_json(conn, out_dir, settings, since, until))
     if fmt in ("md", "markdown", "both"):
-        paths.append(backup.export_markdown(conn, out_dir, settings))
+        paths.append(backup.export_markdown(conn, out_dir, settings, since, until))
     return paths
 
 
