@@ -11,6 +11,8 @@ Examples:
     sb pause / sb resume         # toggle recording live
     sb drain                     # process pending transcription jobs now
     sb sweep                     # delete expired raw audio per retention policy
+    sb backup                    # consistent DB snapshot (safe with WAL)
+    sb export --format md        # portable transcript/graph/goals dump
 """
 
 from __future__ import annotations
@@ -190,6 +192,27 @@ def sweep() -> None:
     with db_session(settings=settings) as conn:
         n = retention.sweep_expired_audio(conn, settings)
     typer.echo(f"Deleted {n} expired raw-audio file(s).")
+
+
+@app.command()
+def backup(dest: str = typer.Option(None, help="Destination .db path.")) -> None:
+    """Write a consistent snapshot of the database (safe with WAL)."""
+    path = service.backup_database(settings=get_settings(), dest=dest)
+    typer.echo(f"Database backed up to {path}")
+
+
+@app.command()
+def export(
+    fmt: str = typer.Option("both", "--format", help="json | md | both."),
+    out: str = typer.Option(None, "--out", help="Output directory."),
+) -> None:
+    """Export transcripts, graph, goals, and tasks (opted-out speakers excluded)."""
+    settings = get_settings()
+    out_dir = Path(out) if out else settings.data_path / "exports"
+    with db_session(settings=settings) as conn:
+        paths = service.export_data(conn, out_dir, fmt=fmt, settings=settings)
+    for p in paths:
+        typer.echo(f"Exported {p}")
 
 
 # --- speaker management (Phase 2) --------------------------------------------

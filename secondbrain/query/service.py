@@ -394,6 +394,29 @@ def _today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+# --- backup & export (roadmap) -----------------------------------------------
+
+
+def backup_database(settings: Settings | None = None, dest=None):
+    """Write a consistent snapshot of the database; returns the destination path."""
+    from secondbrain.storage import backup
+
+    return backup.backup_database(settings=settings or get_settings(), dest=dest)
+
+
+def export_data(conn, out_dir, fmt: str = "both", settings: Settings | None = None) -> list:
+    """Export transcripts/graph/goals/tasks as JSON and/or Markdown. Returns paths."""
+    from secondbrain.storage import backup
+
+    settings = settings or get_settings()
+    paths = []
+    if fmt in ("json", "both"):
+        paths.append(backup.export_json(conn, out_dir, settings))
+    if fmt in ("md", "markdown", "both"):
+        paths.append(backup.export_markdown(conn, out_dir, settings))
+    return paths
+
+
 def graph_node(conn: sqlite3.Connection, node_id: int) -> dict | None:
     from secondbrain.knowledge.graph import resolve_node_id
 
