@@ -111,6 +111,23 @@ def stats() -> None:
 
 
 @app.command()
+def person(
+    speaker_id: int = typer.Argument(None, help="Speaker id (omit with --list)."),
+    list_: bool = typer.Option(False, "--list", help="List people instead."),
+) -> None:
+    """Show a person dossier (identity, interactions, facts, commitments, quotes)."""
+    with db_session(settings=get_settings()) as conn:
+        if list_ or speaker_id is None:
+            typer.echo(json.dumps(service.list_speakers(conn), indent=2))
+            return
+        d = service.person_dossier(conn, speaker_id, get_settings())
+        if d is None:
+            typer.echo(f"No such speaker: {speaker_id}")
+            raise typer.Exit(1)
+        typer.echo(json.dumps(d, indent=2))
+
+
+@app.command()
 def queue(
     reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
 ) -> None:

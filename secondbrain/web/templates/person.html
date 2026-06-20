@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — {{ d.label }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    h1 { margin-bottom: .1rem; }
+    .meta { color: #888; font-size: .85rem; }
+    .card { border: 1px solid #8884; border-radius: 10px; padding: .8rem 1rem; margin: .6rem 0; }
+    .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat { min-width: 7rem; }
+    .stat b { display: block; font-size: 1.3rem; }
+    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #ccc; }
+    .pill { display: inline-block; background: #8882; border-radius: 999px;
+            padding: .1rem .6rem; font-size: .8rem; margin: .1rem; }
+  </style>
+</head>
+<body>
+  <p class="meta"><a href="/speakers">← People</a></p>
+  <h1>{{ d.label }}{% if d.is_owner %} <span class="meta">(you)</span>{% endif %}</h1>
+  <p class="meta">{{ d.kind }}
+    {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}
+    {% if d.opted_out %}· <strong>opted out</strong> (content hidden){% endif %}
+  </p>
+
+  <div class="card grid">
+    <div class="stat"><b>{{ d.interactions.conversations }}</b>conversations</div>
+    <div class="stat"><b>{{ d.interactions.segments }}</b>segments</div>
+    <div class="stat"><b>{{ d.interactions.talk_minutes }}</b>talk minutes</div>
+    <div class="stat"><b>{{ d.profile.exemplar_count }}</b>voice exemplars</div>
+  </div>
+  <p class="meta">First seen {{ d.interactions.first_seen or "—" }} ·
+     last seen {{ d.interactions.last_seen or "—" }}
+     {% if not d.profile.voice_profile %}· no voice profile yet{% endif %}</p>
+
+  {% if d.facts %}
+  <h2>Known facts</h2>
+  {% for f in d.facts %}
+    <div class="card">{{ f.predicate or "—" }}: {{ f.object_text }}
+      <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}%)</span></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.commitments.owed_by or d.commitments.owed_to %}
+  <h2>Commitments</h2>
+  {% for c in d.commitments.owed_by %}
+    <div class="card">⬆ owes: {{ c.object_text }}{% if c.due_date %}
+      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
+  {% endfor %}
+  {% for c in d.commitments.owed_to %}
+    <div class="card">⬇ owed to them: {{ c.object_text }}{% if c.due_date %}
+      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.connections %}
+  <h2>Connections</h2>
+  <p>{% for c in d.connections %}<a class="pill" href="/person/{{ c.speaker_id }}">{{ c.label }}
+     ({{ c.shared_conversations }})</a>{% endfor %}</p>
+  {% endif %}
+
+  {% if d.recent_quotes %}
+  <h2>Recent quotes</h2>
+  {% for q in d.recent_quotes %}
+    <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
+  {% endfor %}
+  {% endif %}
+</body>
+</html>
