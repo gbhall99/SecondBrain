@@ -4,7 +4,7 @@ from secondbrain.tasks import prioritize
 
 
 def _task(**kw):
-    base = dict(id=1, value=3, effort=3, due_date=None, goal_id=None)
+    base = {"id": 1, "value": 3, "effort": 3, "due_date": None, "goal_id": None}
     base.update(kw)
     return base
 

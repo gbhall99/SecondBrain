@@ -49,7 +49,7 @@ def test_day_view_excludes_opted_out(conn, settings):
     priv = _opted_out_speaker(conn)
     _seg(conn, "secret thing", priv)
     segs = service.day_segments(conn, "2026-06-16", settings)
-    assert all("secret thing" != s["text"] for s in segs)
+    assert all(s["text"] != "secret thing" for s in segs)
 
 
 def test_chat_excludes_opted_out_segment(conn, settings):

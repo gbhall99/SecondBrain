@@ -10,6 +10,7 @@ fully testable on CI.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import sqlite3
 import struct
@@ -299,10 +300,8 @@ def redact_segment(conn: sqlite3.Connection, segment_id: int) -> None:
         "UPDATE transcript_segments SET text=? WHERE id=?", (REDACTED_TEXT, segment_id)
     )
     # Best-effort purge of any semantic vector (table may not exist).
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("DELETE FROM segment_vectors WHERE segment_id=?", (segment_id,))
-    except sqlite3.OperationalError:
-        pass
 
 
 def redact_speaker_segments(conn: sqlite3.Connection, speaker_id: int) -> int:

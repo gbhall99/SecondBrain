@@ -10,6 +10,7 @@ doesn't linger in the file.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -21,12 +22,10 @@ def _delete_segment_vectors(conn: sqlite3.Connection, seg_ids: list[int]) -> Non
     if not seg_ids:
         return
     placeholders = ",".join("?" * len(seg_ids))
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             f"DELETE FROM segment_vectors WHERE segment_id IN ({placeholders})", seg_ids
         )
-    except sqlite3.OperationalError:
-        pass
 
 
 def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
@@ -44,10 +43,8 @@ def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
         row = conn.execute("SELECT path FROM audio_files WHERE id=?", (aid,)).fetchone()
         if row and row["path"]:
             p = Path(row["path"])
-            try:
+            with contextlib.suppress(OSError):
                 p.unlink(missing_ok=True)
-            except OSError:
-                pass
         conn.execute("DELETE FROM audio_files WHERE id=?", (aid,))
         removed += 1
     return removed

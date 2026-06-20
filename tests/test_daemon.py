@@ -11,11 +11,11 @@ from secondbrain.storage import state
 
 
 def _settings(tmp_path, **over) -> Settings:
-    base = dict(
-        paths={"data_dir": str(tmp_path / "data")},
-        transcription={"backend": "mock"},
-        search={"semantic_enabled": False},
-    )
+    base = {
+        "paths": {"data_dir": str(tmp_path / "data")},
+        "transcription": {"backend": "mock"},
+        "search": {"semantic_enabled": False},
+    }
     base.update(over)
     return Settings(**base)
 
