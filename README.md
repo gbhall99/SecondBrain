@@ -77,10 +77,16 @@ sb serve          # local web UI at http://127.0.0.1:8765
 python -m secondbrain.menubar.app   # menu bar indicator + pause control
 ```
 
-For an always-on setup, install the `launchd` agent in
-[`deploy/com.secondbrain.daemon.plist`](deploy/com.secondbrain.daemon.plist)
-(edit the paths first). macOS will prompt for **Microphone** permission on first
-run.
+For an always-on setup (survives reboot), install the `launchd` agents with one
+command — it fills in the paths and loads them for you:
+
+```bash
+sb deploy launchd --load --include-menubar
+```
+
+macOS will prompt for **Microphone** permission on first run. The full Mac mini
+deployment guide — install script, config, optional Ollama/pyannote, Tailscale
+remote access, and verification — is in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ## Use
 

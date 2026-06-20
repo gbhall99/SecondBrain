@@ -673,6 +673,59 @@ def doctor() -> None:
         raise typer.Exit(1)
 
 
+deploy_app = typer.Typer(no_args_is_help=True, help="Install always-on launchd agents (macOS).")
+app.add_typer(deploy_app, name="deploy")
+
+# Checks that must pass before installing always-on agents (others are warnings).
+_DEPLOY_CRITICAL = {"migrations", "disk", "database"}
+
+
+@deploy_app.command("launchd")
+def deploy_launchd(
+    load: bool = typer.Option(False, "--load", help="Load each agent via launchctl after writing."),
+    include_menubar: bool = typer.Option(
+        False, "--include-menubar", help="Also install the menu bar agent (needs the `mac` extra)."
+    ),
+    unload: bool = typer.Option(
+        False, "--unload", help="Unload the agents via launchctl instead of installing."
+    ),
+) -> None:
+    """Render deploy/*.plist into ~/Library/LaunchAgents with this venv's Python and
+    repo path, then optionally (un)load them via launchctl."""
+    from secondbrain import deploy as deploy_mod
+    from secondbrain import health
+
+    if not unload:
+        # Preflight: refuse to install agents on top of a broken setup.
+        settings = get_settings()
+        try:
+            with db_session(settings=settings) as conn:
+                checks = health.run_checks(conn, settings)
+        except Exception as exc:  # noqa: BLE001 - surface a clear setup hint
+            typer.echo(f"Could not open the database ({exc}). Run `sb init` first.")
+            raise typer.Exit(1) from exc
+        critical = [c for c in checks if not c.ok and c.name in _DEPLOY_CRITICAL]
+        warnings = [c for c in checks if not c.ok and c.name not in _DEPLOY_CRITICAL]
+        for c in warnings:
+            typer.echo(f"  ! {c.name}: {c.detail}")
+        if critical:
+            typer.echo("Preflight failed — fix these before installing agents:")
+            for c in critical:
+                typer.echo(f"  ✗ {c.name}: {c.detail}")
+            raise typer.Exit(1)
+
+    written = deploy_mod.install_launchd(load=load, include_menubar=include_menubar, unload=unload)
+    if unload:
+        typer.echo("Unloaded SecondBrain launchd agents.")
+        return
+    for p in written:
+        typer.echo(f"Wrote {p}")
+    if load:
+        typer.echo("Loaded via launchctl. macOS will prompt for Microphone permission first run.")
+    else:
+        typer.echo("Re-run with --load to start them now (or `launchctl load <plist>`).")
+
+
 auth_app = typer.Typer(no_args_is_help=True, help="Authentication for remote access.")
 app.add_typer(auth_app, name="auth")
 
