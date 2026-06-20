@@ -77,6 +77,10 @@ class WebResearcher(Researcher):
         url = self.settings.tasks.web_search_url
         if not url:
             raise RuntimeError("tasks.web_search_url is not configured")
+        if not url.lower().startswith("https://"):
+            raise RuntimeError(
+                "tasks.web_search_url must be https:// — task titles may be sensitive"
+            )
         r = httpx.get(url, params={"q": query, "format": "json"}, timeout=15.0)
         r.raise_for_status()
         results = r.json().get("results", [])[:5]

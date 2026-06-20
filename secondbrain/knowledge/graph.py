@@ -213,6 +213,8 @@ def merge_nodes(conn: sqlite3.Connection, src_id: int, dst_id: int) -> int:
     dst = resolve_node_id(conn, dst_id)
     if src == dst:
         return 0
+    if resolve_node_id(conn, dst) == src:
+        raise ValueError(f"merge nodes {src}->{dst} would create a cycle")
     n = conn.execute(
         "SELECT COUNT(*) AS n FROM kg_edges WHERE src_node_id=? OR dst_node_id=?", (src, src)
     ).fetchone()["n"]

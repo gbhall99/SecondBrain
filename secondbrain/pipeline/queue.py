@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import timedelta
 
+from secondbrain.storage import models
 from secondbrain.storage.models import utcnow_iso
 
 
@@ -101,17 +103,35 @@ def complete(conn: sqlite3.Connection, job_id: int) -> None:
 
 
 def fail(conn: sqlite3.Connection, job: Job, error: str) -> None:
-    """Mark a job failed; re-queue (pending) if attempts remain."""
+    """Mark a job failed; re-queue with exponential backoff if attempts remain."""
     if job.attempts >= job.max_attempts:
         conn.execute(
             "UPDATE jobs SET state='failed', finished_at=?, error=? WHERE id=?",
             (utcnow_iso(), error[:2000], job.id),
         )
     else:
-        conn.execute(
-            "UPDATE jobs SET state='pending', error=? WHERE id=?",
-            (error[:2000], job.id),
+        # Back off so a persistently-failing (often heavy) job doesn't busy-loop.
+        delay_min = 2 ** (job.attempts - 1)
+        scheduled = models.iso_from_dt(
+            models.parse_iso(utcnow_iso()) + timedelta(minutes=delay_min)
         )
+        conn.execute(
+            "UPDATE jobs SET state='pending', error=?, scheduled_at=? WHERE id=?",
+            (error[:2000], scheduled, job.id),
+        )
+
+
+def reclaim_stale(conn: sqlite3.Connection, older_than_minutes: int = 30) -> int:
+    """Return jobs stuck in 'running' (worker died mid-job) to 'pending'."""
+    cutoff = models.iso_from_dt(
+        models.parse_iso(utcnow_iso()) - timedelta(minutes=older_than_minutes)
+    )
+    cur = conn.execute(
+        "UPDATE jobs SET state='pending' WHERE state='running' AND started_at IS NOT NULL "
+        "AND started_at < ?",
+        (cutoff,),
+    )
+    return cur.rowcount or 0
 
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:

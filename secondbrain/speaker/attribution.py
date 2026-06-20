@@ -13,6 +13,7 @@ builder + ``MockDiarizer``.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ from secondbrain.config import Settings, get_settings
 from secondbrain.pipeline.diarize import DiarizationResult, Diarizer, SpeakerTurn
 from secondbrain.speaker import registry
 from secondbrain.storage import retention
+
+log = logging.getLogger("secondbrain.attribution")
 
 
 @dataclass
@@ -119,7 +122,13 @@ def attribute_conversation(
 
     conn.execute("UPDATE conversations SET status='diarizing' WHERE id=?", (conversation_id,))
     concat_path, offsets = audio_builder(conn, chunks, settings)
-    if not offsets:  # nothing left on disk to diarize
+    # If any chunk audio is missing, the concat timeline no longer matches the
+    # segments — skip rather than silently mislabel (offsets[-1] fallback).
+    if len(offsets) < len(chunks):
+        log.warning(
+            "conversation %s: %d/%d chunks available; skipping diarization to avoid mislabeling",
+            conversation_id, len(offsets), len(chunks),
+        )
         _finalize(conn, conversation_id, chunks, settings)
         return 0
 
@@ -179,7 +188,7 @@ def attribute_conversation(
             conf = round(frac * cluster_sim[label], 4)
             # flag overlapped speech (multiple speakers cover this segment)
             if settings.diarization.overlap_flag and _overlap_count(diar.turns, s0, s1) > 1:
-                conf = min(conf, settings.diarization.low_confidence_threshold - 0.01)
+                conf = min(conf, max(0.0, settings.diarization.low_confidence_threshold - 0.01))
             registry.assign_segment_speaker(
                 conn, seg["id"], sid, conf,
                 observation_id=cluster_obs.get(label), source="auto",

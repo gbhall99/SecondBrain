@@ -85,6 +85,27 @@ def test_phase7_columns_present(conn):
     assert {"observation_id", "speaker_locked", "speaker_source"} <= seg_cols
 
 
+def test_upgrade_from_old_db(tmp_path):
+    """Simulate an OLD (phase-1-only) DB upgrading to current via apply_base_schema."""
+
+    from secondbrain.storage.db import connect
+    from secondbrain.storage.schema import STATEMENTS, apply_base_schema
+
+    db = tmp_path / "old.db"
+    c = connect(db)
+    for stmt in STATEMENTS:  # only the phase-1 tables
+        c.execute(stmt)
+    c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+    c.execute("INSERT INTO alembic_version VALUES ('0001_initial')")
+    c.commit()
+    # upgrade to current
+    apply_base_schema(c)
+    tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_speaker_quality"
+    c.close()
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
