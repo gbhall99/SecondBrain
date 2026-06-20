@@ -104,6 +104,13 @@ def status() -> None:
 
 
 @app.command()
+def stats() -> None:
+    """Show a high-level overview of the captured corpus (graph, goals, tasks)."""
+    with db_session(settings=get_settings()) as conn:
+        typer.echo(json.dumps(service.corpus_stats(conn), indent=2))
+
+
+@app.command()
 def search(
     query: str = typer.Argument(..., help="Search phrase."),
     limit: int = typer.Option(20, "--limit", "-n"),
