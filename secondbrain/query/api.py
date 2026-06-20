@@ -113,9 +113,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         q: str = Query(..., min_length=1),
         limit: int = Query(20, ge=1, le=200),
         mode: str = Query("auto", pattern="^(auto|fulltext|semantic)$"),
+        since: str | None = Query(None),
+        until: str | None = Query(None),
     ):
         with db() as conn:
-            results = service.search(conn, q, limit, mode, settings)
+            results = service.search(conn, q, limit, mode, settings, since=since, until=until)
         return {"query": q, "mode": mode, "results": results}
 
     @app.get("/api/day/{day}")
