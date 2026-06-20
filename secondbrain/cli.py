@@ -213,6 +213,18 @@ def backup(
 
 
 @app.command()
+def backups() -> None:
+    """List available backup snapshots (newest first)."""
+    rows = service.list_backups(settings=get_settings())
+    if not rows:
+        typer.echo("No backups found.")
+        return
+    for r in rows:
+        mb = r["size_bytes"] / (1024 * 1024)
+        typer.echo(f"{r['name']}  ({mb:.1f} MB, {r['modified'][:19]})")
+
+
+@app.command()
 def restore(
     src: str = typer.Argument(..., help="Path to a backup .db snapshot."),
     backup_current: bool = typer.Option(

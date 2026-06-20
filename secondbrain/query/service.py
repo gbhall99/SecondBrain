@@ -411,6 +411,13 @@ def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
     return backup.prune_backups(settings=settings or get_settings(), keep=keep)
 
 
+def list_backups(settings: Settings | None = None) -> list:
+    """List available backup snapshots, newest first."""
+    from secondbrain.storage import backup
+
+    return backup.list_backups(settings=settings or get_settings())
+
+
 def restore_database(settings: Settings | None = None, src=None, *, backup_current: bool = True):
     """Replace the live database with a snapshot; returns the restored path."""
     from secondbrain.storage import backup
