@@ -70,6 +70,9 @@ def connect(db_path: DbPath = None, *, settings: Settings | None = None) -> sqli
             conn.execute("PRAGMA key = ?", (passphrase,))
         except Exception:  # noqa: BLE001 - never surface the passphrase in a traceback
             raise RuntimeError("SQLCipher key setup failed (check db_passphrase)") from None
+        # At-rest hygiene: v4 page format (encrypts the WAL too) + scrub freed pages.
+        conn.execute("PRAGMA cipher_compatibility = 4")
+        conn.execute("PRAGMA secure_delete = ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
