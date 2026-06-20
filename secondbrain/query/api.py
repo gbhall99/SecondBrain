@@ -240,6 +240,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "person not found")
         return templates.TemplateResponse(request, "person.html", {"d": d})
 
+    @app.get("/api/relationships")
+    def api_relationships():
+        with db() as conn:
+            return {"relationships": service.relationships(conn, settings)}
+
+    @app.get("/relationships", response_class=HTMLResponse)
+    def relationships_page(request: Request):
+        with db() as conn:
+            rel = service.relationships(conn, settings)
+        return templates.TemplateResponse(request, "relationships.html", {"relationships": rel})
+
     # --- knowledge graph + Q&A (Phase 3) -------------------------------------
 
     @app.get("/chat", response_class=HTMLResponse)
