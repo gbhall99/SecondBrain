@@ -245,6 +245,39 @@ class Settings(BaseSettings):
         )
 
 
+# Secret fields that must never be committed to the version-controlled
+# config.toml — they belong in config.local.toml (gitignored) or the
+# environment. Each entry is (section, field).
+SECRET_FIELDS: tuple[tuple[str, str], ...] = (
+    ("security", "db_passphrase"),
+    ("diarization", "hf_token"),
+    ("tasks", "web_search_url"),  # may embed an API key / token
+)
+
+
+def committed_secrets(config_path: Path | None = None) -> list[str]:
+    """Return secret field paths that have a non-empty value in committed config.toml.
+
+    Reads ONLY the version-controlled ``config.toml`` (never config.local.toml or
+    env), so this flags secrets a user accidentally placed where git would track
+    them. Returns dotted paths like ``"security.db_passphrase"``; empty if clean
+    or the file is absent/unreadable.
+    """
+    import tomllib
+
+    path = config_path or (REPO_ROOT / "config.toml")
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    found = []
+    for section, field in SECRET_FIELDS:
+        value = data.get(section, {}).get(field) if isinstance(data.get(section), dict) else None
+        if value:
+            found.append(f"{section}.{field}")
+    return found
+
+
 def load_settings() -> Settings:
     """Build :class:`Settings` from TOML files + environment overrides."""
     return Settings()
