@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 
 from secondbrain.config import Settings
 from secondbrain.knowledge.graph import resolve_node_id
+from secondbrain.speaker import registry
 
 
 @dataclass
@@ -216,4 +217,39 @@ def detect_stale_goals(conn, settings: Settings, *, owner_id, now: datetime) -> 
     return out
 
 
-DETECTORS = [detect_commitments, detect_connections, detect_goal_alignment, detect_stale_goals]
+def detect_stale_relationships(
+    conn, settings: Settings, *, owner_id, now: datetime
+) -> list[Suggestion]:
+    """A known (named) person not seen in > reconnect_days → a reconnect nudge."""
+    cutoff = (now - timedelta(days=settings.proactive.reconnect_days)).strftime(
+        "%Y-%m-%dT%H:%M:%fZ"
+    )
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    rows = conn.execute(
+        """
+        SELECT sp.id, sp.name, sp.display_label, MAX(ts.start_at) AS last_seen
+        FROM speakers sp JOIN transcript_segments ts ON ts.speaker_id = sp.id
+        WHERE sp.is_owner=0 AND sp.merged_into IS NULL AND sp.kind='known'
+        GROUP BY sp.id HAVING last_seen IS NOT NULL AND last_seen < ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    out: list[Suggestion] = []
+    for r in rows:
+        if r["id"] in opted:
+            continue
+        name = r["name"] or r["display_label"] or f"Speaker {r['id']}"
+        out.append(Suggestion(
+            kind="relationship_reconnect",
+            title=f"Reconnect with {name}",
+            detail=f"You haven't spoken with {name} since {(r['last_seen'] or '')[:10]}.",
+            confidence=0.5,
+            payload={"key": {"speaker": r["id"]}, "speaker_id": r["id"]},
+        ))
+    return out
+
+
+DETECTORS = [
+    detect_commitments, detect_connections, detect_goal_alignment, detect_stale_goals,
+    detect_stale_relationships,
+]

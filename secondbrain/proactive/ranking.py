@@ -16,6 +16,7 @@ BASE_WEIGHT = {
     "connection": 0.6,
     "stale_goal": 0.5,
     "stale_commitment": 0.5,
+    "relationship_reconnect": 0.45,
     "coaching": 0.4,
 }
 _PRIORITY_FACTOR = {1: 1.0, 2: 0.7, 3: 0.4}

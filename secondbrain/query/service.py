@@ -11,7 +11,7 @@ from secondbrain.pipeline import queue as q
 from secondbrain.search import combined
 from secondbrain.speaker import registry
 from secondbrain.storage import retention, state
-from secondbrain.storage.models import segments_for_day
+from secondbrain.storage.models import parse_iso, segments_for_day
 
 
 def _speaker_label(row: sqlite3.Row | None) -> str | None:
@@ -237,6 +237,49 @@ def _person_connections(conn, sid: int, settings: Settings, limit: int = 8) -> l
             continue
         lbl = "Me" if s["is_owner"] else (s["name"] or s["display_label"] or f"Speaker {osid}")
         out.append({"speaker_id": osid, "label": lbl, "shared_conversations": shared})
+    return out
+
+
+def relationships(conn: sqlite3.Connection, settings: Settings | None = None) -> list[dict]:
+    """People you interact with, ranked by interaction; opt-out/owner excluded."""
+    settings = settings or get_settings()
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    now = datetime.now(UTC)
+    rows = conn.execute(
+        """
+        SELECT sp.id, sp.name, sp.display_label, sp.kind,
+               COUNT(*) AS segments,
+               COUNT(DISTINCT af.conversation_id) AS conversations,
+               COALESCE(SUM(ts.end_offset_s - ts.start_offset_s), 0) AS talk_seconds,
+               MAX(ts.start_at) AS last_seen
+        FROM speakers sp
+        JOIN transcript_segments ts ON ts.speaker_id = sp.id
+        JOIN audio_files af ON af.id = ts.audio_file_id
+        WHERE sp.is_owner=0 AND sp.merged_into IS NULL
+        GROUP BY sp.id
+        """
+    ).fetchall()
+    out = []
+    for r in rows:
+        if r["id"] in opted:
+            continue
+        days_since = None
+        if r["last_seen"]:
+            try:
+                days_since = (now - parse_iso(r["last_seen"])).days
+            except ValueError:
+                days_since = None
+        out.append({
+            "speaker_id": r["id"],
+            "label": r["name"] or r["display_label"] or f"Speaker {r['id']}",
+            "kind": r["kind"],
+            "conversations": r["conversations"],
+            "segments": r["segments"],
+            "talk_minutes": round((r["talk_seconds"] or 0) / 60.0, 1),
+            "last_seen": r["last_seen"],
+            "days_since_seen": days_since,
+        })
+    out.sort(key=lambda x: (x["conversations"], x["talk_minutes"]), reverse=True)
     return out
 
 

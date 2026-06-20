@@ -192,6 +192,7 @@ class ProactiveConfig(BaseModel):
     confidence_floor: float = 0.4
     suppress_days: int = 30
     urgent_due_hours: int = 24
+    reconnect_days: int = 30           # flag a known person not seen in N days
 
     @field_validator("digest_hour")
     @classmethod
