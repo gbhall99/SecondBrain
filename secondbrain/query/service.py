@@ -404,6 +404,15 @@ def backup_database(settings: Settings | None = None, dest=None):
     return backup.backup_database(settings=settings or get_settings(), dest=dest)
 
 
+def restore_database(settings: Settings | None = None, src=None, *, backup_current: bool = True):
+    """Replace the live database with a snapshot; returns the restored path."""
+    from secondbrain.storage import backup
+
+    return backup.restore_database(
+        settings=settings or get_settings(), src=src, backup_current=backup_current
+    )
+
+
 def export_data(conn, out_dir, fmt: str = "both", settings: Settings | None = None) -> list:
     """Export transcripts/graph/goals/tasks as JSON and/or Markdown. Returns paths."""
     from secondbrain.storage import backup

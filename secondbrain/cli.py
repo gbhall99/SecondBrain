@@ -203,6 +203,29 @@ def backup(dest: str = typer.Option(None, help="Destination .db path.")) -> None
 
 
 @app.command()
+def restore(
+    src: str = typer.Argument(..., help="Path to a backup .db snapshot."),
+    backup_current: bool = typer.Option(
+        True, help="Snapshot the current DB before replacing it."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Replace the live database with a backup snapshot (stop the daemon first)."""
+    from secondbrain.storage.backup import RestoreError
+
+    if not yes:
+        typer.confirm("This replaces the current database. Continue?", abort=True)
+    try:
+        path = service.restore_database(
+            settings=get_settings(), src=src, backup_current=backup_current
+        )
+    except RestoreError as exc:
+        typer.echo(f"Restore failed: {exc}")
+        raise typer.Exit(1) from exc
+    typer.echo(f"Database restored to {path}")
+
+
+@app.command()
 def export(
     fmt: str = typer.Option("both", "--format", help="json | md | both."),
     out: str = typer.Option(None, "--out", help="Output directory."),

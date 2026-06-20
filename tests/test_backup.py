@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from secondbrain.query import service
 from secondbrain.storage import backup
+from secondbrain.storage.backup import RestoreError
 
 
 def _seed(conn) -> None:
@@ -92,3 +95,47 @@ def test_export_data_both_formats(conn, settings, tmp_path):
     paths = service.export_data(conn, tmp_path, fmt="both", settings=settings)
     suffixes = sorted(p.suffix for p in paths)
     assert suffixes == [".json", ".md"]
+
+
+def test_restore_replaces_live_db_and_backs_up_current(conn, settings, tmp_path):
+    _seed(conn)
+    snap = service.backup_database(settings=settings, dest=tmp_path / "snap.db")
+    # mutate the live DB after the snapshot
+    conn.execute("DELETE FROM transcript_segments")
+    conn.close()
+
+    restored = service.restore_database(settings=settings, src=snap)
+    assert restored == settings.db_path
+
+    check = sqlite3.connect(str(settings.db_path))
+    try:
+        n = check.execute("SELECT COUNT(*) FROM transcript_segments").fetchone()[0]
+    finally:
+        check.close()
+    assert n == 3  # snapshot's rows are back
+
+    # current DB was snapshotted to a *-pre-restore.db before replacement
+    pre = list((settings.data_path / "backups").glob("*-pre-restore.db"))
+    assert pre
+
+
+def test_restore_rejects_non_database(conn, settings, tmp_path):
+    bogus = tmp_path / "notes.txt"
+    bogus.write_text("just some text, not sqlite")
+    with pytest.raises(RestoreError):
+        service.restore_database(settings=settings, src=bogus)
+
+
+def test_restore_rejects_missing_source(conn, settings, tmp_path):
+    with pytest.raises(RestoreError):
+        service.restore_database(settings=settings, src=tmp_path / "nope.db")
+
+
+def test_restore_rejects_unrelated_sqlite_db(conn, settings, tmp_path):
+    other = tmp_path / "other.db"
+    c = sqlite3.connect(str(other))
+    c.execute("CREATE TABLE foo (id INTEGER)")
+    c.commit()
+    c.close()
+    with pytest.raises(RestoreError):
+        service.restore_database(settings=settings, src=other)

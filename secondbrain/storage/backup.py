@@ -39,6 +39,74 @@ def backup_database(settings: Settings | None = None, dest: Path | None = None) 
     return dest
 
 
+class RestoreError(Exception):
+    """Raised when a restore source isn't a usable SecondBrain database."""
+
+
+def _is_secondbrain_db(path: Path) -> bool:
+    """A readable SQLite DB carrying the core SecondBrain tables."""
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        names = {
+            r[0]
+            for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        c.close()
+    return {"transcript_segments", "speakers"}.issubset(names)
+
+
+def restore_database(
+    settings: Settings | None = None, src: Path | str | None = None, *, backup_current: bool = True
+) -> Path:
+    """Replace the live database with the snapshot at ``src``.
+
+    Validates ``src`` is a real SecondBrain DB first. By default the current
+    database is snapshotted to a timestamped ``*-pre-restore.db`` before being
+    replaced, so a restore is itself reversible. Run with the daemon stopped.
+    Returns the restored database path.
+    """
+    settings = settings or get_settings()
+    if src is None:
+        raise RestoreError("no restore source provided")
+    src = Path(src)
+    if not src.exists():
+        raise RestoreError(f"restore source not found: {src}")
+    if not _is_secondbrain_db(src):
+        raise RestoreError(f"not a SecondBrain database: {src}")
+
+    db_path = settings.db_path
+    if backup_current and db_path.exists():
+        backup_database(
+            settings=settings,
+            dest=db_path.parent / "backups" / f"secondbrain-{_stamp()}-pre-restore.db",
+        )
+
+    # Remove the live DB and its WAL sidecars, then write a clean single-file
+    # copy from the snapshot via the online backup API.
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db_path) + suffix)
+        p.unlink(missing_ok=True)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    source = sqlite3.connect(str(src))
+    try:
+        out = sqlite3.connect(str(db_path))
+        try:
+            source.backup(out)
+        finally:
+            out.close()
+    finally:
+        source.close()
+    return db_path
+
+
 def _non_opted_segments(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
     opted = registry.opted_out_speaker_ids(conn, settings)
     rows = conn.execute(
