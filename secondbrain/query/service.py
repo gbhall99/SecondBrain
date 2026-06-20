@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -238,6 +239,65 @@ def _person_connections(conn, sid: int, settings: Settings, limit: int = 8) -> l
         lbl = "Me" if s["is_owner"] else (s["name"] or s["display_label"] or f"Speaker {osid}")
         out.append({"speaker_id": osid, "label": lbl, "shared_conversations": shared})
     return out
+
+
+def timeline(conn: sqlite3.Connection, day: str | None = None,
+             settings: Settings | None = None) -> list[dict]:
+    """A day as a chronological list of conversations, each with attributed
+    segments (opt-out filtered) and the knowledge extracted from it."""
+    settings = settings or get_settings()
+    day = day or datetime.now(UTC).strftime("%Y-%m-%d")
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    rows = conn.execute(
+        """
+        SELECT ts.id, ts.start_at, ts.text, ts.speaker_id, af.conversation_id AS conv,
+               COALESCE(sp.name, sp.display_label) AS speaker,
+               CASE WHEN sp.is_owner THEN 1 ELSE 0 END AS is_owner
+        FROM transcript_segments ts
+        JOIN audio_files af ON af.id = ts.audio_file_id
+        LEFT JOIN speakers sp ON sp.id = ts.speaker_id
+        WHERE substr(ts.start_at, 1, 10) = ?
+        ORDER BY ts.start_at, ts.id
+        """,
+        (day,),
+    ).fetchall()
+    blocks: dict = {}
+    order: list = []
+    for r in rows:
+        if r["speaker_id"] in opted:
+            continue
+        cid = r["conv"]
+        if cid not in blocks:
+            blocks[cid] = {
+                "conversation_id": cid,
+                "started_at": r["start_at"],
+                "participants": set(),
+                "segments": [],
+                "extractions": {},
+            }
+            order.append(cid)
+        b = blocks[cid]
+        label = "Me" if r["is_owner"] else (r["speaker"] or "Unknown")
+        b["participants"].add(label)
+        b["segments"].append(
+            {"id": r["id"], "start_at": r["start_at"], "speaker": label, "text": r["text"]}
+        )
+    for cid, b in blocks.items():
+        if cid is not None:
+            grouped: dict = {}
+            for e in conn.execute(
+                "SELECT kind, predicate, object_text, source_segment_ids FROM kg_edges "
+                "WHERE conversation_id=? AND valid=1 ORDER BY kind",
+                (cid,),
+            ).fetchall():
+                grouped.setdefault(e["kind"], []).append({
+                    "predicate": e["predicate"],
+                    "object_text": e["object_text"],
+                    "segment_ids": json.loads(e["source_segment_ids"] or "[]"),
+                })
+            b["extractions"] = grouped
+        b["participants"] = sorted(b["participants"])
+    return [blocks[c] for c in order]
 
 
 def relationships(conn: sqlite3.Connection, settings: Settings | None = None) -> list[dict]:
