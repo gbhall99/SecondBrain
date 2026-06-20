@@ -16,6 +16,7 @@ from secondbrain.config import Settings, get_settings
 from secondbrain.knowledge import graph
 from secondbrain.llm.client import LLM, get_llm
 from secondbrain.search import combined
+from secondbrain.speaker import registry
 
 _CITE = re.compile(r"\[(?:seg_id=)?(\d+)\]")
 _GENERAL_TAG = "(general knowledge"
@@ -35,7 +36,7 @@ def _seg_info(conn: sqlite3.Connection, seg_ids: list[int]) -> dict[int, dict]:
     ph = ",".join("?" * len(seg_ids))
     rows = conn.execute(
         f"""
-        SELECT ts.id, ts.text, ts.start_at, af.conversation_id,
+        SELECT ts.id, ts.text, ts.start_at, ts.speaker_id, af.conversation_id,
                COALESCE(sp.name, sp.display_label) AS speaker,
                CASE WHEN sp.is_owner THEN 1 ELSE 0 END AS is_owner
         FROM transcript_segments ts
@@ -45,8 +46,11 @@ def _seg_info(conn: sqlite3.Connection, seg_ids: list[int]) -> dict[int, dict]:
         """,
         seg_ids,
     ).fetchall()
+    opted = registry.opted_out_speaker_ids(conn)
     out = {}
     for r in rows:
+        if r["speaker_id"] in opted:  # never surface opted-out speech in answers
+            continue
         d = dict(r)
         d["speaker"] = "Me" if r["is_owner"] else (r["speaker"] or "Unknown")
         out[r["id"]] = d

@@ -58,9 +58,14 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, mode: str = "a
     return results
 
 
-def day_segments(conn: sqlite3.Connection, day: str | None = None) -> list[dict]:
+def day_segments(
+    conn: sqlite3.Connection, day: str | None = None, settings: Settings | None = None
+) -> list[dict]:
     day = day or datetime.now(UTC).strftime("%Y-%m-%d")
-    rows = [dict(r) for r in segments_for_day(conn, day)]
+    opted = registry.opted_out_speaker_ids(conn, settings or get_settings())
+    rows = [
+        dict(r) for r in segments_for_day(conn, day) if r["speaker_id"] not in opted
+    ]
     labels = _speaker_labels(conn, [r["id"] for r in rows])
     for r in rows:
         r.update(labels.get(r["id"], {}))

@@ -54,6 +54,7 @@ class Daemon:
         conn = init_db(settings=self.settings)
         try:
             while not self._stop.is_set():
+                state.set_state(conn, "heartbeat:worker", utcnow_iso())
                 try:
                     ran = worker.run_once(conn, settings=self.settings)
                 except Exception:  # noqa: BLE001
@@ -68,12 +69,16 @@ class Daemon:
         conn = init_db(settings=self.settings)
         try:
             while not self._stop.is_set():
+                state.set_state(conn, "heartbeat:maintenance", utcnow_iso())
                 try:
                     n = retention.sweep_expired_audio(conn, self.settings)
                     if n:
                         log.info("retention: deleted %d expired raw-audio files", n)
+                    reclaimed = q.reclaim_stale(conn)
+                    if reclaimed:
+                        log.warning("reclaimed %d stale 'running' job(s)", reclaimed)
                 except Exception:  # noqa: BLE001
-                    log.exception("retention sweep failed")
+                    log.exception("retention/reclaim failed")
                 if self.settings.diarization.enabled:
                     self._diarization_maintenance(conn)
                 if self.settings.proactive.enabled:

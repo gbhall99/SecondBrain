@@ -211,8 +211,10 @@ sb auth set-password               # set the web UI username/password
   bind without auth). Loopback requests never need a login.
 - **Encryption at rest:** `pip install -e ".[secure]"`, set
   `[security].encrypt_db = true` + a passphrase (in `config.local.toml` or
-  `SB_SECURITY__DB_PASSPHRASE`) to open the SQLite DB via SQLCipher. (Otherwise
-  rely on macOS FileVault.)
+  `SB_SECURITY__DB_PASSPHRASE`) to open the SQLite DB via SQLCipher. Note this does
+  **not** cover the WAL sidecar files or the raw audio on disk — use **FileVault**
+  for true full-disk at-rest protection. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
+  for security caveats, troubleshooting, and tuning.
 
 ### Goals as an advanced to-do list (Phase 6)
 

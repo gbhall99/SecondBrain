@@ -121,3 +121,25 @@ def is_exempt(path: str) -> bool:
 def env_password() -> str | None:
     """Optional bootstrap password from env (e.g. for headless first-run)."""
     return os.environ.get("SB_AUTH_PASSWORD")
+
+
+# --- login rate limiting (in-memory, single-process) -------------------------
+
+_MAX_FAILURES = 5
+_WINDOW_SECONDS = 300
+_login_failures: dict[str, list[float]] = {}
+
+
+def login_allowed(ip: str) -> bool:
+    now = time.time()
+    fails = [t for t in _login_failures.get(ip, []) if now - t < _WINDOW_SECONDS]
+    _login_failures[ip] = fails
+    return len(fails) < _MAX_FAILURES
+
+
+def record_login_failure(ip: str) -> None:
+    _login_failures.setdefault(ip, []).append(time.time())
+
+
+def reset_login_failures(ip: str) -> None:
+    _login_failures.pop(ip, None)

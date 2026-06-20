@@ -8,6 +8,7 @@ retention deadline.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import timedelta
 
@@ -23,6 +24,8 @@ from secondbrain.proactive import engine
 from secondbrain.search import semantic
 from secondbrain.speaker import attribution
 from secondbrain.storage import models, retention
+
+log = logging.getLogger("secondbrain.worker")
 
 JOB_TRANSCRIBE = "transcribe"
 JOB_CLUSTER = "cluster_speakers"
@@ -109,7 +112,7 @@ def process_audio_file(
         try:
             conversation.assign_chunk(conn, audio_file_id, settings)
         except Exception:  # noqa: BLE001 - never block transcription on this
-            pass
+            log.warning("failed to assign chunk %s to a conversation", audio_file_id, exc_info=True)
 
     # 5. Best-effort semantic indexing (no-op if unavailable).
     if segs:
@@ -122,8 +125,8 @@ def process_audio_file(
         ]
         try:
             semantic.index_segments(conn, ids, [s.text for s in segs], settings)
-        except Exception:
-            pass  # semantic search is optional; full-text still works
+        except Exception:  # noqa: BLE001 - semantic search is optional; full-text still works
+            log.warning("semantic indexing failed; search may degrade", exc_info=True)
 
     return len(segs)
 

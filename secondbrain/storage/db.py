@@ -66,7 +66,10 @@ def connect(db_path: DbPath = None, *, settings: Settings | None = None) -> sqli
         passphrase = settings.security.db_passphrase
         if not passphrase:
             raise RuntimeError("security.encrypt_db is true but security.db_passphrase is empty")
-        conn.execute("PRAGMA key = ?", (passphrase,))
+        try:
+            conn.execute("PRAGMA key = ?", (passphrase,))
+        except Exception:  # noqa: BLE001 - never surface the passphrase in a traceback
+            raise RuntimeError("SQLCipher key setup failed (check db_passphrase)") from None
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")

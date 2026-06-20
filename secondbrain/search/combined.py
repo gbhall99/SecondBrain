@@ -10,9 +10,21 @@ import sqlite3
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.search import fulltext, semantic
+from secondbrain.speaker import registry
 from secondbrain.storage.models import SearchHit
 
 _RRF_K = 60
+
+
+def _drop_opted_out(
+    conn: sqlite3.Connection, hits: list[SearchHit], settings: Settings
+) -> list[SearchHit]:
+    """Filter out hits whose segment belongs to an opted-out speaker (privacy)."""
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    if not opted:
+        return hits
+    spk = registry.segments_speaker_map(conn, [h.segment_id for h in hits])
+    return [h for h in hits if spk.get(h.segment_id) not in opted]
 
 
 def search(
@@ -26,14 +38,14 @@ def search(
     settings = settings or get_settings()
 
     if mode == "fulltext":
-        return fulltext.search(conn, query, limit)
+        return _drop_opted_out(conn, fulltext.search(conn, query, limit), settings)
     if mode == "semantic":
-        return semantic.search(conn, query, limit, settings)
+        return _drop_opted_out(conn, semantic.search(conn, query, limit, settings), settings)
 
     ft = fulltext.search(conn, query, limit)
     sem = semantic.search(conn, query, limit, settings) if settings.search.semantic_enabled else []
     if not sem:
-        return ft
+        return _drop_opted_out(conn, ft, settings)
 
     scores: dict[int, float] = {}
     hits: dict[int, SearchHit] = {}
@@ -44,8 +56,8 @@ def search(
 
     ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     out: list[SearchHit] = []
-    for seg_id, fused in ordered[:limit]:
+    for seg_id, fused in ordered:
         hit = hits[seg_id]
         hit.score = round(fused, 6)  # RRF: higher is better
         out.append(hit)
-    return out
+    return _drop_opted_out(conn, out, settings)[:limit]

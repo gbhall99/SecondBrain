@@ -262,6 +262,34 @@ def is_opted_out(
     return bool(row["name"]) and row["name"] in set(settings.consent.speaker_opt_out)
 
 
+def opted_out_speaker_ids(conn: sqlite3.Connection, settings: Settings | None = None) -> set[int]:
+    """All speaker ids that are opted out (flag or name in consent list).
+
+    Used to filter opted-out speech out of every READ surface (search, chat, day
+    view, graph), not just the write path.
+    """
+    settings = settings or get_settings()
+    names = set(settings.consent.speaker_opt_out)
+    out: set[int] = set()
+    for r in conn.execute("SELECT id, name, opted_out, is_owner FROM speakers").fetchall():
+        if r["is_owner"]:
+            continue
+        if r["opted_out"] or (r["name"] and r["name"] in names):
+            out.add(int(r["id"]))
+    return out
+
+
+def segments_speaker_map(conn: sqlite3.Connection, segment_ids: list[int]) -> dict[int, int]:
+    """segment_id → speaker_id for the given segments (only those with a speaker)."""
+    if not segment_ids:
+        return {}
+    ph = ",".join("?" * len(segment_ids))
+    rows = conn.execute(
+        f"SELECT id, speaker_id FROM transcript_segments WHERE id IN ({ph})", segment_ids
+    ).fetchall()
+    return {int(r["id"]): int(r["speaker_id"]) for r in rows if r["speaker_id"] is not None}
+
+
 def redact_segment(conn: sqlite3.Connection, segment_id: int) -> None:
     """Replace a segment's text with a sentinel and purge its search vectors.
 
@@ -399,6 +427,9 @@ def merge_speakers(
     dst = resolve_speaker_id(conn, dst_id)
     if src == dst:
         return 0
+    # Guard against creating a merge cycle (dst already resolves through src).
+    if resolve_speaker_id(conn, dst) == src:
+        raise ValueError(f"merge {src}->{dst} would create a cycle")
     n = conn.execute(
         "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=?", (src,)
     ).fetchone()["n"]

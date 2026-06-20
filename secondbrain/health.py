@@ -78,6 +78,32 @@ def _recording(conn: sqlite3.Connection, settings: Settings) -> Check:
     return Check("recording", True, "on" if on else "paused/off")
 
 
+def _daemon(conn: sqlite3.Connection) -> Check:
+    """Report whether the daemon's loops are alive (via their heartbeats)."""
+    from datetime import UTC, datetime
+
+    from secondbrain.storage.models import parse_iso
+
+    beats = {
+        name: state.get_state(conn, f"heartbeat:{name}") for name in ("worker", "maintenance")
+    }
+    if not any(beats.values()):
+        return Check("daemon", True, "no heartbeat yet (daemon may not be running)")
+    now = datetime.now(UTC)
+    stale = []
+    for name, ts in beats.items():
+        if ts is None:
+            stale.append(f"{name}:missing")
+            continue
+        try:
+            age = (now - parse_iso(ts)).total_seconds()
+        except ValueError:
+            continue
+        if age > 7200:  # > 2h since last heartbeat → likely dead loop
+            stale.append(f"{name}:{int(age)}s")
+    return Check("daemon", not stale, "ok" if not stale else "stale " + ", ".join(stale))
+
+
 def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> list[Check]:
     settings = settings or get_settings()
     return [
@@ -87,6 +113,7 @@ def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> li
         _llm(settings),
         _encryption(settings),
         _recording(conn, settings),
+        _daemon(conn),
     ]
 
 

@@ -65,11 +65,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "login.html", {})
 
     @app.post("/login")
-    def login(username: str = Body(...), password: str = Body(...)):
+    def login(request: Request, username: str = Body(...), password: str = Body(...)):
+        ip = request.client.host if request.client else "?"
+        if not auth.login_allowed(ip):
+            raise HTTPException(429, "too many attempts; try again shortly")
         with db() as conn:
             ok = auth.authenticate(conn, username, password)
         if not ok:
+            auth.record_login_failure(ip)
             raise HTTPException(401, "invalid credentials")
+        auth.reset_login_failures(ip)
         resp = JSONResponse({"ok": True})
         resp.set_cookie(
             auth.COOKIE_NAME,
@@ -77,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_age=settings.security.session_max_age_days * 86400,
             httponly=True,
             samesite="lax",
+            secure=request.url.scheme == "https",  # set Secure when served over TLS
         )
         return resp
 
