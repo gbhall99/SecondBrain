@@ -105,6 +105,33 @@ def status(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
     }
 
 
+def corpus_stats(conn: sqlite3.Connection) -> dict:
+    """A high-level overview of what the second brain has captured."""
+
+    def _count(sql: str) -> int:
+        return conn.execute(sql).fetchone()["n"]
+
+    span = conn.execute(
+        "SELECT MIN(substr(start_at,1,10)) AS first, MAX(substr(start_at,1,10)) AS last "
+        "FROM transcript_segments WHERE start_at IS NOT NULL"
+    ).fetchone()
+    return {
+        "segments": _count("SELECT COUNT(*) AS n FROM transcript_segments"),
+        "conversations": _count("SELECT COUNT(*) AS n FROM conversations"),
+        "speakers": _count("SELECT COUNT(*) AS n FROM speakers WHERE merged_into IS NULL"),
+        "kg_nodes": _count("SELECT COUNT(*) AS n FROM kg_nodes WHERE merged_into IS NULL"),
+        "kg_edges": _count("SELECT COUNT(*) AS n FROM kg_edges WHERE valid=1"),
+        "goals": _count("SELECT COUNT(*) AS n FROM goals"),
+        "goals_active": _count("SELECT COUNT(*) AS n FROM goals WHERE status='active'"),
+        "tasks": _count("SELECT COUNT(*) AS n FROM tasks"),
+        "tasks_open": _count(
+            "SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ('done','dropped')"
+        ),
+        "first_day": span["first"],
+        "last_day": span["last"],
+    }
+
+
 # --- speaker management (shared by CLI / API / web) --------------------------
 
 
