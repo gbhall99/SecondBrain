@@ -111,6 +111,18 @@ def stats() -> None:
 
 
 @app.command()
+def queue(
+    reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
+) -> None:
+    """Show job-queue counts and recent failures (optionally reclaim stuck jobs)."""
+    with db_session(settings=get_settings()) as conn:
+        if reclaim:
+            n = service.reclaim_stale_jobs(conn)
+            typer.echo(f"Reclaimed {n} stuck job(s).")
+        typer.echo(json.dumps(service.queue_overview(conn), indent=2))
+
+
+@app.command()
 def search(
     query: str = typer.Argument(..., help="Search phrase."),
     limit: int = typer.Option(20, "--limit", "-n"),

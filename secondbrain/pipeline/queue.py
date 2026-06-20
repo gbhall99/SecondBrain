@@ -137,3 +137,13 @@ def reclaim_stale(conn: sqlite3.Connection, older_than_minutes: int = 30) -> int
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state").fetchall()
     return {r["state"]: r["n"] for r in rows}
+
+
+def recent_failures(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    """The most recently dead-lettered jobs (state='failed'), newest first."""
+    rows = conn.execute(
+        "SELECT id, type, attempts, max_attempts, error, finished_at "
+        "FROM jobs WHERE state='failed' ORDER BY finished_at DESC, id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
