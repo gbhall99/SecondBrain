@@ -127,11 +127,13 @@ def search(
     query: str = typer.Argument(..., help="Search phrase."),
     limit: int = typer.Option(20, "--limit", "-n"),
     mode: str = typer.Option("auto", help="auto | fulltext | semantic"),
+    since: str = typer.Option(None, "--since", help="On/after this day (YYYY-MM-DD)."),
+    until: str = typer.Option(None, "--until", help="On/before this day (YYYY-MM-DD)."),
 ) -> None:
     """Search transcripts (full-text + semantic)."""
     settings = get_settings()
     with db_session(settings=settings) as conn:
-        hits = service.search(conn, query, limit, mode, settings)
+        hits = service.search(conn, query, limit, mode, settings, since=since, until=until)
     if not hits:
         typer.echo("No matches.")
         raise typer.Exit()

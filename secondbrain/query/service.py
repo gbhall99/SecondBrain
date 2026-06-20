@@ -48,14 +48,29 @@ def _speaker_labels(conn: sqlite3.Connection, segment_ids: list[int]) -> dict[in
 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, mode: str = "auto",
-           settings: Settings | None = None) -> list[dict]:
+           settings: Settings | None = None, since: str | None = None,
+           until: str | None = None) -> list[dict]:
     settings = settings or get_settings()
-    hits = combined.search(conn, query, limit, settings=settings, mode=mode)
+    # Over-fetch when date-filtering so the post-filter can still return ~limit.
+    fetch = limit * 4 if (since or until) else limit
+    hits = combined.search(conn, query, fetch, settings=settings, mode=mode)
     results = [asdict(h) for h in hits]
+    if since or until:
+        results = [r for r in results if _in_day_range(r.get("start_at"), since, until)]
+    results = results[:limit]
     labels = _speaker_labels(conn, [h["segment_id"] for h in results])
     for h in results:
         h.update(labels.get(h["segment_id"], {}))
     return results
+
+
+def _in_day_range(start_at: str | None, since: str | None, until: str | None) -> bool:
+    day = (start_at or "")[:10]
+    if not day:
+        return False
+    if since and day < since:
+        return False
+    return not (until and day > until)
 
 
 def day_segments(
