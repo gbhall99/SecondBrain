@@ -657,6 +657,31 @@ def auth_status() -> None:
     typer.echo(f"require_auth={settings.security.require_auth} · password_set={has}")
 
 
+config_app = typer.Typer(no_args_is_help=True, help="Inspect configuration.")
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print the effective configuration as JSON (secrets redacted)."""
+    from secondbrain.config import redacted_dict
+
+    typer.echo(json.dumps(redacted_dict(get_settings()), indent=2, default=str))
+
+
+@config_app.command("check")
+def config_check() -> None:
+    """Report any secrets found in the committed config.toml."""
+    from secondbrain.config import committed_secrets
+
+    leaked = committed_secrets()
+    if leaked:
+        typer.echo("Secrets in committed config.toml: " + ", ".join(leaked))
+        typer.echo("Move them to config.local.toml or environment variables.")
+        raise typer.Exit(1)
+    typer.echo("No secrets in committed config.toml.")
+
+
 forget_app = typer.Typer(no_args_is_help=True, help="Permanently delete captured data.")
 app.add_typer(forget_app, name="forget")
 

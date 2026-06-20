@@ -333,6 +333,23 @@ SECRET_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+_REDACTED = "***redacted***"
+
+
+def redacted_dict(settings: Settings) -> dict:
+    """The effective settings as a dict with secret fields masked.
+
+    Safe to print/log — masks every value listed in :data:`SECRET_FIELDS` that
+    is non-empty (empty stays empty, so it's clear nothing is set).
+    """
+    data = settings.model_dump()
+    for section, field in SECRET_FIELDS:
+        sec = data.get(section)
+        if isinstance(sec, dict) and sec.get(field):
+            sec[field] = _REDACTED
+    return data
+
+
 def committed_secrets(config_path: Path | None = None) -> list[str]:
     """Return secret field paths that have a non-empty value in committed config.toml.
 
