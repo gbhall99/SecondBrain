@@ -417,6 +417,31 @@ def export_data(conn, out_dir, fmt: str = "both", settings: Settings | None = No
     return paths
 
 
+# --- data "forget" (right to be forgotten) -----------------------------------
+
+
+def forget_day(conn, date: str, settings: Settings | None = None, *, vacuum: bool = False) -> dict:
+    from secondbrain.storage import forget
+
+    return forget.forget_day(conn, date, settings or get_settings(), vacuum=vacuum)
+
+
+def forget_range(conn, start_date: str, end_date: str, settings: Settings | None = None,
+                 *, vacuum: bool = False) -> dict:
+    from secondbrain.storage import forget
+
+    return forget.forget_range(
+        conn, start_date, end_date, settings or get_settings(), vacuum=vacuum
+    )
+
+
+def forget_person(conn, speaker_id: int, settings: Settings | None = None,
+                  *, vacuum: bool = False) -> dict:
+    from secondbrain.storage import forget
+
+    return forget.forget_person(conn, speaker_id, settings or get_settings(), vacuum=vacuum)
+
+
 def graph_node(conn: sqlite3.Connection, node_id: int) -> dict | None:
     from secondbrain.knowledge.graph import resolve_node_id
 

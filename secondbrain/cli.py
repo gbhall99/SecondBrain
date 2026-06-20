@@ -13,6 +13,7 @@ Examples:
     sb sweep                     # delete expired raw audio per retention policy
     sb backup                    # consistent DB snapshot (safe with WAL)
     sb export --format md        # portable transcript/graph/goals dump
+    sb forget day 2026-06-16     # permanently delete a day (right to be forgotten)
 """
 
 from __future__ import annotations
@@ -602,6 +603,58 @@ def auth_status() -> None:
     with db_session(settings=settings) as conn:
         has = auth.has_password(conn)
     typer.echo(f"require_auth={settings.security.require_auth} · password_set={has}")
+
+
+forget_app = typer.Typer(no_args_is_help=True, help="Permanently delete captured data.")
+app.add_typer(forget_app, name="forget")
+
+
+def _confirm_forget(yes: bool) -> None:
+    if not yes:
+        typer.confirm("This permanently deletes data and cannot be undone. Continue?", abort=True)
+
+
+@forget_app.command("day")
+def forget_day(
+    date: str = typer.Argument(..., help="Day to forget (YYYY-MM-DD)."),
+    vacuum: bool = typer.Option(False, help="Reclaim freed disk space afterwards."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Forget everything captured on a day (transcripts, vectors, raw audio)."""
+    _confirm_forget(yes)
+    with db_session(settings=get_settings()) as conn:
+        res = service.forget_day(conn, date, vacuum=vacuum)
+    typer.echo(f"Forgot {res['segments']} segment(s), {res['audio_files']} audio file(s).")
+
+
+@forget_app.command("range")
+def forget_range(
+    start: str = typer.Argument(..., help="Start day (YYYY-MM-DD)."),
+    end: str = typer.Argument(..., help="End day, inclusive (YYYY-MM-DD)."),
+    vacuum: bool = typer.Option(False, help="Reclaim freed disk space afterwards."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Forget everything captured across a date range (inclusive)."""
+    _confirm_forget(yes)
+    with db_session(settings=get_settings()) as conn:
+        res = service.forget_range(conn, start, end, vacuum=vacuum)
+    typer.echo(f"Forgot {res['segments']} segment(s), {res['audio_files']} audio file(s).")
+
+
+@forget_app.command("person")
+def forget_person(
+    speaker_id: int = typer.Argument(..., help="Speaker id to forget."),
+    vacuum: bool = typer.Option(False, help="Reclaim freed disk space afterwards."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Forget a person: their segments, voice profile, and knowledge-graph nodes."""
+    _confirm_forget(yes)
+    with db_session(settings=get_settings()) as conn:
+        res = service.forget_person(conn, speaker_id, vacuum=vacuum)
+    typer.echo(
+        f"Forgot speaker {speaker_id}: {res['segments']} segment(s), "
+        f"{res['speakers']} profile(s), {res['kg_nodes']} graph node(s)."
+    )
 
 
 if __name__ == "__main__":
