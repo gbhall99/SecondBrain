@@ -1,25 +1,13 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Timeline {{ day }}</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    h1 { margin-bottom: .25rem; }
-    .meta { color: #888; font-size: .85rem; }
+{% extends "base.html" %}
+{% block title %}SecondBrain — Timeline {{ day }}{% endblock %}
+{% block style %}
     .conv { border-left: 3px solid #8886; padding: .2rem 0 .2rem 1rem; margin: 1rem 0; }
     .seg { margin: .15rem 0; }
     .seg .who { font-weight: 600; }
     .extractions { background: #8881; border-radius: 8px; padding: .5rem .8rem; margin: .5rem 0; }
     .kind { text-transform: capitalize; color: #888; font-size: .8rem; }
-  </style>
-</head>
-<body>
-  <p class="meta"><a href="/">← Home</a> · <a href="/relationships">Relationships</a></p>
+{% endblock %}
+{% block content %}
   <h1>Timeline · {{ day }}</h1>
   {% if not blocks %}<p class="meta">Nothing recorded for this day.</p>{% endif %}
   {% for b in blocks %}
@@ -40,5 +28,4 @@
     {% endfor %}
   </div>
   {% endfor %}
-</body>
-</html>
+{% endblock %}

@@ -1,23 +1,9 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Relationships</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    h1 { margin-bottom: .25rem; }
-    .meta { color: #888; font-size: .85rem; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #8884; }
+{% extends "base.html" %}
+{% block title %}SecondBrain — Relationships{% endblock %}
+{% block style %}
     .stale { color: #c70; }
-  </style>
-</head>
-<body>
-  <p class="meta"><a href="/">← Home</a> · <a href="/speakers">People</a></p>
+{% endblock %}
+{% block content %}
   <h1>Relationships</h1>
   <p class="meta">Who you interact with, ranked. Opted-out people are excluded.</p>
   {% if not relationships %}<p class="meta">No interactions recorded yet.</p>{% endif %}
@@ -38,5 +24,4 @@
     {% endfor %}
   </table>
   {% endif %}
-</body>
-</html>
+{% endblock %}

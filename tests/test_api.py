@@ -81,6 +81,17 @@ def test_index_page_renders(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "SecondBrain" in r.text
+    # unified dashboard: shared nav links present
+    for href in ('href="/timeline"', 'href="/relationships"', 'href="/speakers"'):
+        assert href in r.text
+
+
+def test_shared_nav_on_new_pages(client, conn):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (7, 'Dana', 'known', 0)")
+    for path in ("/person/7", "/relationships", "/timeline"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert 'class="nav"' in r.text  # extends base.html
 
 
 def test_speakers_endpoints(client, conn):
