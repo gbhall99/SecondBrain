@@ -181,8 +181,25 @@ def unknown_speakers(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def speaker_samples(conn: sqlite3.Connection, speaker_id: int, n: int = 3) -> list[dict]:
-    """Top observations (audio still on disk preferred) for clip playback."""
+def is_opted_out(
+    conn: sqlite3.Connection, speaker_id: int, settings: Settings | None = None
+) -> bool:
+    """True if the (resolved) speaker has opted out of data collection."""
+    settings = settings or get_settings()
+    return registry.resolve_speaker_id(conn, speaker_id) in registry.opted_out_speaker_ids(
+        conn, settings
+    )
+
+
+def speaker_samples(
+    conn: sqlite3.Connection, speaker_id: int, n: int = 3, settings: Settings | None = None
+) -> list[dict]:
+    """Top observations (audio still on disk preferred) for clip playback.
+
+    Returns nothing for opted-out speakers — their raw audio must never be served.
+    """
+    if is_opted_out(conn, speaker_id, settings):
+        return []
     rows = conn.execute(
         """
         SELECT so.id, so.audio_file_id, so.start_offset_s, so.end_offset_s, so.start_at,
