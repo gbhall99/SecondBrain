@@ -136,3 +136,17 @@ Closes the gaps that could make a fresh Mac mini look "broken" silently.
 - **First-run UX:** added `config.local.toml.example` (seeded by `install.sh`); and
   `docs/DEPLOY.md` now calls out the Microphone-permission step, the one-time
   first-run model downloads, and an on/off-by-default feature matrix.
+
+## AI features on by default (turnkey local setup)
+The seeded `config.local.toml` now enables diarization, knowledge extraction, and
+the proactive brief (with `[llm].backend = "ollama"`), and `deploy/install.sh` sets
+up their prerequisites so first run is turnkey:
+- Installs Ollama (Homebrew), starts it as a service, and pulls the model
+  (`SB_OLLAMA_MODEL`, default `llama3.1:8b-instruct`).
+- Prompts for a HuggingFace token, writes it into `config.local.toml`, and runs
+  `sb speaker setup` to fetch the gated pyannote models.
+- `SB_SKIP_AI=1 ./deploy/install.sh` opts out (capture-only); committed defaults
+  (`config.toml`) and CI are unchanged — these flags live only in the gitignored
+  local override, so fresh clones stay capture-only and green.
+- DEPLOY.md documents the diarization → extraction → proactive chain (a HF token is
+  required for the knowledge graph to populate).
