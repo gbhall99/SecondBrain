@@ -123,3 +123,16 @@ nodes). No migration; local, opt-out-filtered, green-gated.
   `base.html`; **Projects** added to the nav and a projects deep-link on the home
   dashboard.
 - **9D CLI:** `sb projects`, `sb project <node_id>`.
+
+## Deployment hardening
+Closes the gaps that could make a fresh Mac mini look "broken" silently.
+- **Microphone health check:** `sb doctor` / `/health` now include a `microphone`
+  check (best-effort, degradable) that flags a missing input device or a configured
+  device that can't be found — surfacing the case where capture silently
+  crash-loops because no mic is available or macOS Microphone permission was denied.
+- **Semantic search out of the box:** added `sentence-transformers` to the `ml`
+  extra so semantic search activates on install instead of silently falling back to
+  full-text only.
+- **First-run UX:** added `config.local.toml.example` (seeded by `install.sh`); and
+  `docs/DEPLOY.md` now calls out the Microphone-permission step, the one-time
+  first-run model downloads, and an on/off-by-default feature matrix.
