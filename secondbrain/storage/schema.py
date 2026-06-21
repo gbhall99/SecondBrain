@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0006_speaker_quality"
+SCHEMA_VERSION = "0007_perf_indexes"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -436,6 +436,20 @@ ALTERS_0006: list[str] = [
 ]
 
 
+# --- Phase 9: performance indexes (migration 0007) ----------------------------
+# Composite indexes for hot interactive read paths (project/person dossiers,
+# timeline, opt-out filtering at scale). All additive + IF NOT EXISTS.
+STATEMENTS_0007_CREATE: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_goal_links_kind_ref ON goal_links(kind, ref_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_src_kind_valid "
+    "ON kg_edges(src_node_id, kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_dst_kind_valid "
+    "ON kg_edges(dst_node_id, kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_segments_speaker_conf "
+    "ON transcript_segments(speaker_id, speaker_confidence)",
+]
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
@@ -490,6 +504,12 @@ def apply_phase7_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase9_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0007 additions idempotently (performance indexes only)."""
+    for stmt in STATEMENTS_0007_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -504,6 +524,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase4_schema(conn)
     apply_phase6_schema(conn)
     apply_phase7_schema(conn)
+    apply_phase9_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

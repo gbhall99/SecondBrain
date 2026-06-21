@@ -6,7 +6,7 @@ from secondbrain.query.api import create_app
 
 def test_summary_ok_with_mock_backends(conn, settings):
     s = health.summary(conn, settings)
-    assert s["version"] == "0006_speaker_quality"
+    assert s["version"] == "0007_perf_indexes"
     names = {c["name"] for c in s["checks"]}
     assert {"migrations", "disk", "database", "llm", "encryption", "recording"} <= names
     # llm backend is mock + encryption off → those checks pass
