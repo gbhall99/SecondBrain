@@ -99,6 +99,28 @@ def db_session(
         conn.close()
 
 
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Group writes into one atomic unit (BEGIN IMMEDIATE / COMMIT / ROLLBACK).
+
+    Connections are opened in autocommit mode (``isolation_level=None``), so each
+    statement otherwise commits on its own; wrapping a multi-step write here makes
+    it all-or-nothing if an error or crash hits mid-sequence. Reentrant: if a
+    transaction is already active it yields without starting a nested one (SQLite
+    has none), so callers can wrap helpers that are also used standalone.
+    """
+    if conn.in_transaction:
+        yield conn
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
 def try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
     """Attempt to load the sqlite-vec extension. Returns True on success.
 

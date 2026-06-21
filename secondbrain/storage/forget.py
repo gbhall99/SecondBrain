@@ -18,6 +18,7 @@ import sqlite3
 from pathlib import Path
 
 from secondbrain.config import Settings, get_settings
+from secondbrain.storage.db import transaction
 
 
 def _delete_segment_vectors(conn: sqlite3.Connection, seg_ids: list[int]) -> None:
@@ -176,16 +177,17 @@ def forget_range(
     vacuum: bool = False,
 ) -> dict:
     """Forget everything captured between ``start_date`` and ``end_date`` (inclusive)."""
-    seg_ids = [
-        r["id"]
-        for r in conn.execute(
-            "SELECT id FROM transcript_segments "
-            "WHERE substr(start_at, 1, 10) BETWEEN ? AND ?",
-            (start_date, end_date),
-        ).fetchall()
-    ]
-    result = _purge_segments(conn, seg_ids)
-    if vacuum:
+    with transaction(conn):
+        seg_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM transcript_segments "
+                "WHERE substr(start_at, 1, 10) BETWEEN ? AND ?",
+                (start_date, end_date),
+            ).fetchall()
+        ]
+        result = _purge_segments(conn, seg_ids)
+    if vacuum:  # VACUUM cannot run inside a transaction
         _vacuum(conn)
     return result
 
@@ -222,25 +224,26 @@ def forget_person(
     id_list = list(ids)
     ph = ",".join("?" * len(id_list))
 
-    seg_ids = [
-        r["id"]
-        for r in conn.execute(
-            f"SELECT id FROM transcript_segments WHERE speaker_id IN ({ph})", id_list
-        ).fetchall()
-    ]
-    result = _purge_segments(conn, seg_ids)
+    with transaction(conn):
+        seg_ids = [
+            r["id"]
+            for r in conn.execute(
+                f"SELECT id FROM transcript_segments WHERE speaker_id IN ({ph})", id_list
+            ).fetchall()
+        ]
+        result = _purge_segments(conn, seg_ids)
 
-    conn.execute(f"DELETE FROM speaker_observations WHERE speaker_id IN ({ph})", id_list)
-    node_count = conn.execute(
-        f"SELECT COUNT(*) AS n FROM kg_nodes WHERE speaker_id IN ({ph})", id_list
-    ).fetchone()["n"]
-    # kg_edges + kg_aliases cascade via ON DELETE CASCADE.
-    conn.execute(f"DELETE FROM kg_nodes WHERE speaker_id IN ({ph})", id_list)
-    conn.execute(f"DELETE FROM speakers WHERE id IN ({ph})", id_list)
+        conn.execute(f"DELETE FROM speaker_observations WHERE speaker_id IN ({ph})", id_list)
+        node_count = conn.execute(
+            f"SELECT COUNT(*) AS n FROM kg_nodes WHERE speaker_id IN ({ph})", id_list
+        ).fetchone()["n"]
+        # kg_edges + kg_aliases cascade via ON DELETE CASCADE.
+        conn.execute(f"DELETE FROM kg_nodes WHERE speaker_id IN ({ph})", id_list)
+        conn.execute(f"DELETE FROM speakers WHERE id IN ({ph})", id_list)
 
     result["speakers"] = len(id_list)
     result["kg_nodes"] = node_count
-    if vacuum:
+    if vacuum:  # VACUUM cannot run inside a transaction
         _vacuum(conn)
     return result
 

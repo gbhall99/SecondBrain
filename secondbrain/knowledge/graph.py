@@ -11,6 +11,7 @@ import json
 import sqlite3
 
 from secondbrain.speaker import registry
+from secondbrain.storage.db import transaction
 from secondbrain.storage.models import utcnow_iso
 
 
@@ -215,17 +216,18 @@ def merge_nodes(conn: sqlite3.Connection, src_id: int, dst_id: int) -> int:
         return 0
     if resolve_node_id(conn, dst) == src:
         raise ValueError(f"merge nodes {src}->{dst} would create a cycle")
-    n = conn.execute(
-        "SELECT COUNT(*) AS n FROM kg_edges WHERE src_node_id=? OR dst_node_id=?", (src, src)
-    ).fetchone()["n"]
-    conn.execute("UPDATE kg_edges SET src_node_id=? WHERE src_node_id=?", (dst, src))
-    conn.execute("UPDATE kg_edges SET dst_node_id=? WHERE dst_node_id=?", (dst, src))
-    src_row = get_node(conn, src)
-    if src_row is not None and src_row["name"]:
-        add_alias(conn, dst, src_row["name"])
-    conn.execute("UPDATE kg_aliases SET node_id=? WHERE node_id=?", (dst, src))
-    # carry a speaker link if dst lacks one
-    if src_row is not None and src_row["speaker_id"] is not None:
-        set_node_speaker(conn, dst, int(src_row["speaker_id"]))
-    conn.execute("UPDATE kg_nodes SET merged_into=? WHERE id=?", (dst, src))
+    with transaction(conn):
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM kg_edges WHERE src_node_id=? OR dst_node_id=?", (src, src)
+        ).fetchone()["n"]
+        conn.execute("UPDATE kg_edges SET src_node_id=? WHERE src_node_id=?", (dst, src))
+        conn.execute("UPDATE kg_edges SET dst_node_id=? WHERE dst_node_id=?", (dst, src))
+        src_row = get_node(conn, src)
+        if src_row is not None and src_row["name"]:
+            add_alias(conn, dst, src_row["name"])
+        conn.execute("UPDATE kg_aliases SET node_id=? WHERE node_id=?", (dst, src))
+        # carry a speaker link if dst lacks one
+        if src_row is not None and src_row["speaker_id"] is not None:
+            set_node_speaker(conn, dst, int(src_row["speaker_id"]))
+        conn.execute("UPDATE kg_nodes SET merged_into=? WHERE id=?", (dst, src))
     return n
