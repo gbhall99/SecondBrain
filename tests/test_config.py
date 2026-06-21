@@ -8,6 +8,14 @@ def test_defaults_and_derived_paths(tmp_path):
     assert s.db_path == tmp_path / "secondbrain.db"
 
 
+def test_ensure_dirs_creates_data_path(tmp_path):
+    # data_path itself must be created (launchd writes logs there before threads start).
+    s = Settings(paths={"data_dir": str(tmp_path / "fresh")})
+    s.ensure_dirs()
+    assert s.data_path.exists()
+    assert s.audio_raw_dir.exists() and s.models_dir.exists()
+
+
 def test_env_override(monkeypatch):
     monkeypatch.setenv("SB_API__PORT", "9999")
     monkeypatch.setenv("SB_TRANSCRIPTION__BACKEND", "mock")

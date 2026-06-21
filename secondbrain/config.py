@@ -303,7 +303,8 @@ class Settings(BaseSettings):
         return self.data_path / "secondbrain.db"
 
     def ensure_dirs(self) -> None:
-        for d in (self.audio_raw_dir, self.audio_processed_dir, self.models_dir):
+        # data_path first so it exists before launchd writes its logs into it.
+        for d in (self.data_path, self.audio_raw_dir, self.audio_processed_dir, self.models_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     @classmethod
