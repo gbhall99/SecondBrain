@@ -12,23 +12,33 @@ input_device = ""
 # 0 = delete immediately, negative = keep forever.
 raw_audio_retention_hours = 168    # 7 days
 
-# --- Optional features (all OFF by default). Uncomment + configure to enable. ---
+# --- AI features (ON by default here; `deploy/install.sh` sets up their deps) ---
+# These need their prerequisites or their queued jobs will fail/no-op:
+#   • diarization → a HuggingFace token (gated pyannote models)
+#   • LLM / extraction / proactive → a running Ollama with the model pulled
+# The chain is: diarization (who-spoke) → extraction (knowledge graph) → proactive
+# brief. Extraction only runs on diarized conversations, so a HF token is required
+# for the knowledge graph to populate. `install.sh` installs Ollama, pulls the
+# model, and prompts for the token. To run capture-only, set enabled = false below.
 
-# Speaker diarization (who-spoke). Needs a HuggingFace token + accepting the gated
-# pyannote terms, then `sb speaker setup` / `sb speaker enroll-owner`.
-# [diarization]
-# enabled = true
-# hf_token = "hf_xxx"              # or set HF_TOKEN in the environment
+[diarization]
+# Who-spoke + voice profiles. REQUIRES a HuggingFace token: accept the terms on
+# pyannote/speaker-diarization-3.1 while logged in, create a read token, and put it
+# here (or set HF_TOKEN). Then run `sb speaker setup` / `sb speaker enroll-owner`.
+enabled = true
+hf_token = ""                     # REQUIRED — install.sh fills this if you provide it
 
-# Local LLM for knowledge graph, Q&A, and the proactive brief (fully offline via
-# Ollama: `ollama serve` + `ollama pull llama3.1:8b-instruct`).
-# [llm]
-# backend = "ollama"
-# model = "llama3.1:8b-instruct"
-# [extraction]
-# enabled = true
-# [proactive]
-# enabled = true
+[llm]
+# Local LLM for the knowledge graph, Q&A, and the proactive brief. Fully offline
+# via Ollama (`ollama serve` + `ollama pull llama3.1:8b-instruct`).
+backend = "ollama"
+model = "llama3.1:8b-instruct"
+
+[extraction]
+enabled = true
+
+[proactive]
+enabled = true
 
 # Remote access over Tailscale by binding off-loopback (the server refuses this
 # without auth — run `sb auth set-password` first). Or keep 127.0.0.1 + `tailscale

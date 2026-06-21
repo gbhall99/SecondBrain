@@ -62,21 +62,34 @@ everything runs **fully offline**. Ensure outbound access to HuggingFace for thi
 one-time fetch (or pre-seed the cache).
 
 ## What's on vs off by default
-| Feature | Default | To enable |
-|---------|---------|-----------|
+The seeded `config.local.toml` enables the AI features, and `install.sh` sets up
+their prerequisites (Ollama + HF token). To run **capture-only**, set
+`enabled = false` under `[diarization]`/`[extraction]`/`[proactive]` (or
+`SB_SKIP_AI=1 ./deploy/install.sh`).
+
+| Feature | Default (local) | Prerequisite |
+|---------|-----------------|--------------|
 | Capture + transcription + VAD | **ON** | set the mic; grant permission |
 | Full-text + semantic search | **ON** | included in the `ml` extra |
-| Speaker diarization (who-spoke) | OFF | HF token + `[diarization].enabled` + `sb speaker setup` |
-| Knowledge graph / Q&A / brief | OFF | Ollama + `[llm].backend="ollama"` + `[extraction]`/`[proactive]` |
+| Speaker diarization (who-spoke) | **ON** | HF token (install.sh prompts; gated pyannote terms) |
+| Knowledge graph / Q&A / proactive brief | **ON** | Ollama running + model pulled (install.sh does this) |
 | Remote access · at-rest encryption | OFF | Tailscale + auth · `[secure]` extra + passphrase |
 
-## 3. Optional backends (still fully offline)
+> **The chain:** diarization (who-spoke) → extraction (knowledge graph) → proactive
+> brief. Extraction only runs on diarized conversations, so **a HF token is required
+> for the knowledge graph to populate.** No token / no Ollama ⇒ those jobs stay idle
+> (capture + search still work).
+
+## 3. AI backends (set up automatically by install.sh, still fully offline)
+`install.sh` installs/starts Ollama, pulls the model, and prompts for the HF token.
+To do it by hand (or on a re-run where `config.local.toml` already exists):
 - **Local LLM** (Q&A, morning brief, knowledge extraction):
   ```bash
-  brew install ollama && ollama serve &
+  brew install ollama && brew services start ollama
   ollama pull llama3.1:8b-instruct
   ```
-  then set `[llm].backend = "ollama"` and `[extraction].enabled = true`.
+  ensure `[llm].backend = "ollama"` and `[extraction].enabled = true` (default in
+  the seeded local config).
 - **Speaker diarization** (pyannote): create a HuggingFace read token, accept the
   gated-model terms, then:
   ```bash
