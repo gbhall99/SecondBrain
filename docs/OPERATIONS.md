@@ -2,7 +2,10 @@
 
 ## Health & troubleshooting
 - `sb doctor` runs preflight checks (migrations, disk, DB, Ollama, encryption,
-  recording, **daemon heartbeat**). `GET /health` returns the same as JSON.
+  **microphone/input device**, recording, **daemon heartbeat**). `GET /health`
+  returns the same as JSON. The `microphone` check flags a missing input device or
+  a configured device that isn't found — the usual sign that capture is silently
+  failing because no mic is available or macOS Microphone permission was denied.
 - **Stuck pipeline?** Check `sb status` (queue depth) and `sb doctor`. The daemon
   writes `heartbeat:worker` / `heartbeat:maintenance` to `app_state`; if `/health`
   shows the `daemon` check **stale**, a loop has died — restart the daemon

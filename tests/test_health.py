@@ -27,3 +27,41 @@ def test_health_endpoint_no_auth(conn, settings):
 def test_doctor_checks_run(conn, settings):
     checks = health.run_checks(conn, settings)
     assert all(hasattr(c, "ok") for c in checks)
+    assert "microphone" in {c.name for c in checks}
+
+
+def test_microphone_check_import_error_degrades_ok(settings, monkeypatch):
+    # No audio extra installed (CI): the check must pass, not raise.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name == "secondbrain.capture.devices":
+            raise ImportError("no sounddevice")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    c = health._microphone(settings)
+    assert c.ok and "audio extra" in c.detail
+
+
+def test_microphone_check_no_devices_fails(settings, monkeypatch):
+    monkeypatch.setattr(
+        "secondbrain.capture.devices.list_input_devices", list, raising=False
+    )
+    c = health._microphone(settings)
+    assert not c.ok and "Microphone" in c.detail
+
+
+def test_microphone_check_configured_device_missing_fails(settings, monkeypatch):
+    from secondbrain.capture.devices import InputDevice
+
+    monkeypatch.setattr(
+        "secondbrain.capture.devices.list_input_devices",
+        lambda: [InputDevice(index=0, name="Built-in", channels=1, default=True)],
+        raising=False,
+    )
+    settings.capture.input_device = "Nonexistent Mic"
+    c = health._microphone(settings)
+    assert not c.ok and "not found" in c.detail

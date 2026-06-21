@@ -110,6 +110,33 @@ def _recording(conn: sqlite3.Connection, settings: Settings) -> Check:
     return Check("recording", True, "on" if on else "paused/off")
 
 
+def _microphone(settings: Settings) -> Check:
+    """Best-effort capture readiness: is there a usable input device?
+
+    Surfaces the silent-failure case where the daemon's capture loop crash-loops
+    because no mic is available or macOS Microphone (TCC) permission was denied.
+    Degradable: never raises; on dev/CI without the audio extra it passes.
+    """
+    try:
+        from secondbrain.capture.devices import list_input_devices, resolve_device
+    except ImportError:
+        return Check("microphone", True, "audio extra not installed")
+    try:
+        devices = list_input_devices()
+    except Exception as exc:  # noqa: BLE001 - PortAudio/CoreAudio best-effort
+        return Check("microphone", True, f"could not enumerate devices: {exc}")
+    if not devices:
+        return Check(
+            "microphone", False,
+            "no input devices — check System Settings → Privacy & Security → Microphone",
+        )
+    name = settings.capture.input_device
+    if name and resolve_device(name) is None:
+        return Check("microphone", False, f"device {name!r} not found (run `sb devices`)")
+    detail = f"{len(devices)} input device(s)" + (f", using {name!r}" if name else ", default")
+    return Check("microphone", True, detail)
+
+
 def _daemon(conn: sqlite3.Connection) -> Check:
     """Report whether the daemon's loops are alive (via their heartbeats)."""
     from datetime import UTC, datetime
@@ -146,6 +173,7 @@ def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> li
         _encryption(settings),
         _secrets(),
         _backups(settings),
+        _microphone(settings),
         _recording(conn, settings),
         _daemon(conn),
     ]

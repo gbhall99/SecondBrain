@@ -34,6 +34,7 @@ ml = [
     "mlx-whisper>=0.4; platform_system == 'Darwin'",
     "parakeet-mlx>=0.2; platform_system == 'Darwin'",
     "sqlite-vec>=0.1.6",
+    "sentence-transformers>=2.7",
     "pyannote.audio>=3.1",
     "torch>=2.2",
 ]

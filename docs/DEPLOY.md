@@ -34,15 +34,41 @@ which overrides the committed `config.toml`.
 ```bash
 sb devices            # find your room mic
 ```
-At minimum set the input device and review consent/retention:
+`install.sh` seeds `config.local.toml` from `config.local.toml.example`. Edit it —
+at minimum set the input device and review consent/retention:
 ```toml
 [capture]
-input_device = "Your Room Mic"      # name from `sb devices`
+input_device = "Your Room Mic"      # name (or substring) from `sb devices`
 
 [consent]
 raw_audio_retention_hours = 168     # raw FLAC auto-deleted after this (transcripts kept)
 ```
 Check the effective config (secrets redacted): `sb config show`.
+
+## 2a. Grant Microphone permission (required)
+macOS gates microphone access (TCC). The **first time** the daemon opens the mic,
+macOS shows a Microphone permission prompt — **allow it**. If the daemon is started
+headless by launchd you may not see a prompt; in that case grant it manually:
+**System Settings → Privacy & Security → Microphone** and enable the entry for your
+terminal / Python. Without this, capture silently fails (the daemon retries
+forever and records nothing). `sb doctor` includes a **microphone** check that
+flags a missing or unconfigured input device.
+
+## 2b. First run downloads models (network needed once)
+On the first capture, the transcription model (Parakeet) and the VAD model (Silero)
+auto-download from HuggingFace (a few hundred MB) into the HuggingFace cache;
+semantic-search embeddings (`bge-small`) download on first index. After that
+everything runs **fully offline**. Ensure outbound access to HuggingFace for this
+one-time fetch (or pre-seed the cache).
+
+## What's on vs off by default
+| Feature | Default | To enable |
+|---------|---------|-----------|
+| Capture + transcription + VAD | **ON** | set the mic; grant permission |
+| Full-text + semantic search | **ON** | included in the `ml` extra |
+| Speaker diarization (who-spoke) | OFF | HF token + `[diarization].enabled` + `sb speaker setup` |
+| Knowledge graph / Q&A / brief | OFF | Ollama + `[llm].backend="ollama"` + `[extraction]`/`[proactive]` |
+| Remote access · at-rest encryption | OFF | Tailscale + auth · `[secure]` extra + passphrase |
 
 ## 3. Optional backends (still fully offline)
 - **Local LLM** (Q&A, morning brief, knowledge extraction):

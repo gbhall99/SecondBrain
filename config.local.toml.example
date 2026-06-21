@@ -1,0 +1,45 @@
+# SecondBrain — local overrides (gitignored). Copy of the knobs you'll most likely
+# change on your Mac mini. Anything you omit falls back to config.toml defaults.
+# Secrets (hf_token, db_passphrase) belong HERE, never in the committed config.toml.
+# Env vars also work: SB_CAPTURE__INPUT_DEVICE="MacBook Microphone", HF_TOKEN=...
+
+[capture]
+# Name (or substring) from `sb devices`. Empty = system default microphone.
+input_device = ""
+
+[consent]
+# Raw audio is deleted this many hours after transcription (transcripts are kept).
+# 0 = delete immediately, negative = keep forever.
+raw_audio_retention_hours = 168    # 7 days
+
+# --- Optional features (all OFF by default). Uncomment + configure to enable. ---
+
+# Speaker diarization (who-spoke). Needs a HuggingFace token + accepting the gated
+# pyannote terms, then `sb speaker setup` / `sb speaker enroll-owner`.
+# [diarization]
+# enabled = true
+# hf_token = "hf_xxx"              # or set HF_TOKEN in the environment
+
+# Local LLM for knowledge graph, Q&A, and the proactive brief (fully offline via
+# Ollama: `ollama serve` + `ollama pull llama3.1:8b-instruct`).
+# [llm]
+# backend = "ollama"
+# model = "llama3.1:8b-instruct"
+# [extraction]
+# enabled = true
+# [proactive]
+# enabled = true
+
+# Remote access over Tailscale by binding off-loopback (the server refuses this
+# without auth — run `sb auth set-password` first). Or keep 127.0.0.1 + `tailscale
+# serve https / 127.0.0.1:8765` and leave this untouched.
+# [api]
+# host = "100.x.y.z"              # your tailnet IP / MagicDNS name
+# [security]
+# require_auth = true
+
+# At-rest DB encryption (needs `pip install -e ".[secure]"`). FileVault is the
+# recommended baseline; this is defense-in-depth for the structured data.
+# [security]
+# encrypt_db = true
+# db_passphrase = "choose-a-strong-passphrase"   # or SB_SECURITY__DB_PASSPHRASE

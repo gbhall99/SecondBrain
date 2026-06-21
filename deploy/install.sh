@@ -60,6 +60,12 @@ pip install -e ".[audio,ml,mac]" "${CONSTRAINTS[@]}"
 say "Initialising data directory and database"
 sb init
 
+# Seed a local override file from the template so the user edits a real file.
+if [[ ! -f config.local.toml && -f config.local.toml.example ]]; then
+  cp config.local.toml.example config.local.toml
+  say "Created config.local.toml (edit it to set your mic + options)"
+fi
+
 # --- 6. Next steps ----------------------------------------------------------
 cat <<'EOF'
 
