@@ -137,14 +137,28 @@ The web UI binds to `127.0.0.1` only. To reach it from your phone/laptop:
 The server **fail-closes**: it refuses to bind off-loopback without
 `require_auth` + a password. Avoid `tailscale funnel` (exposes publicly).
 
-## 6. Verify
+## 6. Verify (on-device checklist)
+Development and CI run on Linux with mock backends, so the macOS-only paths
+(CoreAudio capture, MLX transcription, pyannote, `rumps`, `launchctl`, the mic TCC
+prompt) are **only verified here, on the Mac.** Run through this once:
 ```bash
 sb status            # recording state, queue depth, disk
-sb doctor            # migrations, disk, DB, backends, daemon heartbeat
+sb doctor            # migrations, disk, DB, backends, microphone, daemon heartbeat
 open http://127.0.0.1:8765
 ```
-Speak for a few minutes, then confirm transcripts appear (`sb show <today>`), the
-menu bar shows "recording", and a reboot relaunches the agents.
+1. `sb doctor` is all green (note the **microphone** check — see caveat below).
+2. Speak for a few minutes → `sb show <today>` shows transcripts; the menu bar
+   shows "recording".
+3. Hold a short multi-person conversation → after it closes it diarizes
+   (`sb timeline <today>` attributes speakers); then `sb projects` / `/graph`
+   show extracted entities and `sb ask "…"` returns a cited answer.
+4. Reboot → all three launchd agents relaunch.
+
+> **Microphone-check caveat:** `sb doctor`'s `microphone` check is a *presence*
+> proxy — it catches a missing or misconfigured input device, but macOS may still
+> *list* the mic while denying access (TCC), which it cannot detect. If capture
+> records nothing, grant access in **System Settings → Privacy & Security →
+> Microphone** even when the check passes.
 
 ## 7. Troubleshooting
 - **Logs:** `data/daemon.{out,err}.log`, `data/web.{out,err}.log`,

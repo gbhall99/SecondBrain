@@ -802,6 +802,18 @@ def config_check() -> None:
     typer.echo("No secrets in committed config.toml.")
 
 
+@config_app.command("set-hf-token")
+def config_set_hf_token(
+    token: str = typer.Argument(..., help="HuggingFace read token for gated pyannote models."),
+) -> None:
+    """Write [diarization].hf_token into config.local.toml (used by install.sh)."""
+    from secondbrain import config_edit
+
+    path = Path("config.local.toml")
+    config_edit.write_hf_token(path, token)
+    typer.echo(f"Wrote hf_token to {path}")
+
+
 forget_app = typer.Typer(no_args_is_help=True, help="Permanently delete captured data.")
 app.add_typer(forget_app, name="forget")
 
