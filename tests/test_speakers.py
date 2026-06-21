@@ -17,6 +17,21 @@ def test_speaker_samples_blocked_for_opted_out(conn, settings):
     assert service.speaker_samples(conn, 5, settings=settings) == []
 
 
+def test_opted_out_ids_fast_path_no_config_names(conn, settings):
+    settings.consent.speaker_opt_out = []
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (1,'Me','owner',1,1)")
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (2,'P','known',0,1)")
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (3,'Q','known',0,0)")
+    # owner excluded even if flagged; non-opted excluded.
+    assert registry.opted_out_speaker_ids(conn, settings) == {2}
+
+
+def test_opted_out_ids_by_config_name(conn, settings):
+    settings.consent.speaker_opt_out = ["Q"]
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (3,'Q','known',0,0)")
+    assert registry.opted_out_speaker_ids(conn, settings) == {3}
+
+
 # --- matching + centroids ----------------------------------------------------
 
 

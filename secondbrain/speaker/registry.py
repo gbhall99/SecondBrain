@@ -272,6 +272,15 @@ def opted_out_speaker_ids(conn: sqlite3.Connection, settings: Settings | None = 
     """
     settings = settings or get_settings()
     names = set(settings.consent.speaker_opt_out)
+    # Fast path (the common case: no config opt-out names) — let SQL do the filter
+    # instead of scanning every speaker row in Python.
+    if not names:
+        return {
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM speakers WHERE opted_out=1 AND is_owner=0"
+            ).fetchall()
+        }
     out: set[int] = set()
     for r in conn.execute("SELECT id, name, opted_out, is_owner FROM speakers").fetchall():
         if r["is_owner"]:

@@ -15,7 +15,7 @@ import logging
 import signal
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 
 from secondbrain.capture.recorder import Recorder
 from secondbrain.config import Settings, get_settings
@@ -91,11 +91,14 @@ class Daemon:
         """Enqueue the daily morning brief and the weekly review when due."""
         from secondbrain.proactive import engine
 
-        now = datetime.now(UTC)
+        # digest_hour / weekly_review_weekday are LOCAL-time as documented; gate the
+        # schedule on local time (and store matching local-date run keys). Digest
+        # content generation keeps its own UTC clock, so only *when* it fires changes.
+        now = datetime.now().astimezone()
         try:
             if engine.due_daily(conn, self.settings, now):
                 q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": "daily"}, dedupe_key="kind")
-                state.set_state(conn, engine.DAILY_RUN_KEY, utcnow_iso())
+                state.set_state(conn, engine.DAILY_RUN_KEY, now.strftime("%Y-%m-%d"))
             if engine.due_weekly(conn, self.settings, now):
                 q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": "weekly"}, dedupe_key="kind")
                 state.set_state(conn, engine.WEEKLY_RUN_KEY, now.strftime("%Y-W%W"))
