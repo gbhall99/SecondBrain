@@ -22,6 +22,7 @@ from secondbrain.config import Settings, get_settings
 from secondbrain.pipeline.diarize import DiarizationResult, Diarizer, SpeakerTurn
 from secondbrain.speaker import registry
 from secondbrain.storage import retention
+from secondbrain.storage.db import transaction
 
 log = logging.getLogger("secondbrain.attribution")
 
@@ -110,7 +111,6 @@ def attribute_conversation(
 ) -> int:
     """Run diarization + attribution for one conversation. Returns segments labeled."""
     settings = settings or get_settings()
-    d = settings.diarization
 
     chunks = conn.execute(
         "SELECT * FROM audio_files WHERE conversation_id=? ORDER BY started_at, id",
@@ -133,7 +133,21 @@ def attribute_conversation(
         return 0
 
     diar: DiarizationResult = diarizer.diarize(concat_path)
+    # All post-diarization DB writes are one atomic unit; the slow diarize() ran
+    # above (outside the transaction) so no write lock is held during compute.
+    with transaction(conn):
+        return _attribute_and_finalize(conn, conversation_id, chunks, offsets, diar, settings)
 
+
+def _attribute_and_finalize(
+    conn: sqlite3.Connection,
+    conversation_id: int,
+    chunks: list[sqlite3.Row],
+    offsets: list,
+    diar: DiarizationResult,
+    settings: Settings,
+) -> int:
+    d = settings.diarization
     # 1. Resolve each local cluster to a global speaker.
     cluster_speaker: dict[str, int] = {}
     cluster_sim: dict[str, float] = {}

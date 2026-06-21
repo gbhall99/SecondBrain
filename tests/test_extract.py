@@ -93,6 +93,30 @@ def test_hallucinated_citations_dropped(conn, settings):
     assert json.loads(fact["source_segment_ids"]) == [seg_ids[0]]  # fake id 99999 dropped
 
 
+def test_chunk_write_is_atomic_on_failure(conn, settings, monkeypatch):
+    """If an edge write fails mid-chunk, that chunk's nodes/edges roll back."""
+    owner = registry.get_or_create_owner(conn, "Me")
+    conv, seg_ids = _diarized_conversation(conn, [("I'll loop in Dana.", owner, 0.95)])
+    payload = {
+        "entities": [{"type": "person", "name": "Dana", "source_segment_ids": [seg_ids[0]]}],
+        "facts": [{"subject_ref": 0, "predicate": "works_on", "object_text": "Atlas",
+                   "source_segment_ids": [seg_ids[0]], "confidence": 0.8}],
+        "action_items": [], "decisions": [], "ideas": [],
+    }
+    # Fail on the edge write, after the extraction record + entity node were written.
+    monkeypatch.setattr(
+        extract.graph, "upsert_edge",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    import pytest
+    with pytest.raises(RuntimeError):
+        extract.run_extraction(conn, conv, llm=MockLLM(responses=[json.dumps(payload)]), settings=settings)
+    # The whole chunk rolled back: no extraction record, no node, no edge.
+    assert conn.execute("SELECT COUNT(*) AS n FROM knowledge_extractions").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM kg_nodes WHERE name='Dana'").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM kg_edges").fetchone()["n"] == 0
+
+
 def test_redacted_and_optout_segments_excluded(conn, settings):
     settings.consent.speaker_opt_out = ["Private"]
     private = _named_speaker(conn, "Private")
