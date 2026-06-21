@@ -17,6 +17,7 @@ import struct
 from dataclasses import dataclass
 
 from secondbrain.config import Settings, get_settings
+from secondbrain.storage.db import transaction
 
 REDACTED_TEXT = "[redacted: opted-out speaker]"
 
@@ -429,14 +430,15 @@ def merge_speakers(
     # Guard against creating a merge cycle (dst already resolves through src).
     if resolve_speaker_id(conn, dst) == src:
         raise ValueError(f"merge {src}->{dst} would create a cycle")
-    n = conn.execute(
-        "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=?", (src,)
-    ).fetchone()["n"]
-    conn.execute("UPDATE transcript_segments SET speaker_id=? WHERE speaker_id=?", (dst, src))
-    conn.execute("UPDATE speaker_observations SET speaker_id=? WHERE speaker_id=?", (dst, src))
-    conn.execute("UPDATE speakers SET merged_into=? WHERE id=?", (dst, src))
-    recompute_centroid(conn, dst)
-    _recount_segments(conn, dst)
-    if is_opted_out(conn, dst, settings):
-        redact_speaker_segments(conn, dst)
+    with transaction(conn):
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=?", (src,)
+        ).fetchone()["n"]
+        conn.execute("UPDATE transcript_segments SET speaker_id=? WHERE speaker_id=?", (dst, src))
+        conn.execute("UPDATE speaker_observations SET speaker_id=? WHERE speaker_id=?", (dst, src))
+        conn.execute("UPDATE speakers SET merged_into=? WHERE id=?", (dst, src))
+        recompute_centroid(conn, dst)
+        _recount_segments(conn, dst)
+        if is_opted_out(conn, dst, settings):
+            redact_speaker_segments(conn, dst)
     return n
