@@ -249,11 +249,20 @@ def _person_connections(conn, sid: int, settings: Settings, limit: int = 8) -> l
         if osid == sid or osid in opted:
             continue
         agg[osid] = agg.get(osid, 0) + r["shared"]
+    top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    if not top:
+        return []
+    ph = ",".join("?" * len(top))
+    names = {
+        r["id"]: r
+        for r in conn.execute(
+            f"SELECT id, name, display_label, is_owner FROM speakers WHERE id IN ({ph})",
+            [osid for osid, _ in top],
+        ).fetchall()
+    }
     out = []
-    for osid, shared in sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
-        s = conn.execute(
-            "SELECT name, display_label, is_owner FROM speakers WHERE id=?", (osid,)
-        ).fetchone()
+    for osid, shared in top:
+        s = names.get(osid)
         if s is None:
             continue
         lbl = "Me" if s["is_owner"] else (s["name"] or s["display_label"] or f"Speaker {osid}")
@@ -302,20 +311,21 @@ def timeline(conn: sqlite3.Connection, day: str | None = None,
         b["segments"].append(
             {"id": r["id"], "start_at": r["start_at"], "speaker": label, "text": r["text"]}
         )
-    for cid, b in blocks.items():
-        if cid is not None:
-            grouped: dict = {}
-            for e in conn.execute(
-                "SELECT kind, predicate, object_text, source_segment_ids FROM kg_edges "
-                "WHERE conversation_id=? AND valid=1 ORDER BY kind",
-                (cid,),
-            ).fetchall():
-                grouped.setdefault(e["kind"], []).append({
-                    "predicate": e["predicate"],
-                    "object_text": e["object_text"],
-                    "segment_ids": json.loads(e["source_segment_ids"] or "[]"),
-                })
-            b["extractions"] = grouped
+    # Batch-fetch the day's extracted knowledge for all conversations at once.
+    conv_ids = [c for c in order if c is not None]
+    if conv_ids:
+        ph = ",".join("?" * len(conv_ids))
+        for e in conn.execute(
+            f"SELECT conversation_id, kind, predicate, object_text, source_segment_ids "
+            f"FROM kg_edges WHERE conversation_id IN ({ph}) AND valid=1 ORDER BY kind",
+            conv_ids,
+        ).fetchall():
+            blocks[e["conversation_id"]]["extractions"].setdefault(e["kind"], []).append({
+                "predicate": e["predicate"],
+                "object_text": e["object_text"],
+                "segment_ids": json.loads(e["source_segment_ids"] or "[]"),
+            })
+    for b in blocks.values():
         b["participants"] = sorted(b["participants"])
     return [blocks[c] for c in order]
 
@@ -562,23 +572,33 @@ def list_projects(conn: sqlite3.Connection, settings: Settings | None = None) ->
         GROUP BY n.id
         """
     ).fetchall()
+    # Batch the per-project counts (avoid N+1): goals linked to any node, and
+    # action_item edges grouped by the node on either endpoint.
+    goal_counts: dict[int, int] = {
+        r["ref_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT ref_id, COUNT(*) AS n FROM goal_links WHERE kind='node' GROUP BY ref_id"
+        ).fetchall()
+    }
+    item_counts: dict[int, int] = {}
+    for r in conn.execute(
+        "SELECT node, COUNT(*) AS n FROM ("
+        "  SELECT src_node_id AS node FROM kg_edges WHERE valid=1 AND kind='action_item'"
+        "  UNION ALL"
+        "  SELECT dst_node_id AS node FROM kg_edges "
+        "  WHERE valid=1 AND kind='action_item' AND dst_node_id IS NOT NULL"
+        ") GROUP BY node"
+    ).fetchall():
+        item_counts[r["node"]] = r["n"]
     out = []
     for r in rows:
-        linked_goals = conn.execute(
-            "SELECT COUNT(*) AS n FROM goal_links WHERE kind='node' AND ref_id=?", (r["id"],)
-        ).fetchone()["n"]
-        open_items = conn.execute(
-            "SELECT COUNT(*) AS n FROM kg_edges WHERE valid=1 AND kind='action_item' "
-            "AND (src_node_id=? OR dst_node_id=?)",
-            (r["id"], r["id"]),
-        ).fetchone()["n"]
         out.append({
             "node_id": r["id"],
             "label": r["display_label"] or r["name"],
             "edges": r["edges"],
             "conversations": r["conversations"],
-            "linked_goals": linked_goals,
-            "open_action_items": open_items,
+            "linked_goals": goal_counts.get(r["id"], 0),
+            "open_action_items": item_counts.get(r["id"], 0),
             "first_seen": r["first_seen"],
             "last_seen": r["last_seen"],
         })

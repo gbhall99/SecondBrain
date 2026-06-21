@@ -102,8 +102,21 @@ def test_upgrade_from_old_db(tmp_path):
     apply_base_schema(c)
     tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
-    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_speaker_quality"
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_perf_indexes"
     c.close()
+
+
+def test_perf_indexes_present(conn):
+    names = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    }
+    assert {
+        "idx_goal_links_kind_ref",
+        "idx_kg_edges_src_kind_valid",
+        "idx_kg_edges_dst_kind_valid",
+        "idx_segments_speaker_conf",
+    } <= names
 
 
 def test_apply_base_schema_is_idempotent(conn):
@@ -112,7 +125,7 @@ def test_apply_base_schema_is_idempotent(conn):
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0006_speaker_quality"
+    assert ver == "0007_perf_indexes"
 
 
 def test_pause_state_roundtrip(conn):
