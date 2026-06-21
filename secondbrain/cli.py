@@ -265,8 +265,12 @@ def drain(max_jobs: int = typer.Option(None, help="Max jobs to process.")) -> No
 
 
 @app.command()
-def sweep() -> None:
+def sweep(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
     """Delete expired raw audio per the retention policy."""
+    if not yes:
+        typer.confirm("This permanently deletes expired raw-audio files. Continue?", abort=True)
     settings = get_settings()
     with db_session(settings=settings) as conn:
         n = retention.sweep_expired_audio(conn, settings)
