@@ -29,6 +29,64 @@ def test_sweep_deletes_expired_transcribed_audio(conn, settings, tmp_path):
     assert models.get_audio_file(conn, af_id)["status"] == "deleted"
 
 
+def test_sweep_force_expires_orphan_deferred_chunk(conn, settings, tmp_path):
+    """A diarization-deferred chunk (NULL deadline) stuck past the grace is swept."""
+    settings.consent.raw_audio_retention_hours = 168
+    audio = tmp_path / "orphan.flac"
+    audio.write_bytes(b"\x00")
+    af_id = models.insert_audio_file(
+        conn,
+        AudioFile(
+            path=str(audio),
+            started_at="2000-01-01T00:00:00.000Z",  # long past the retention+grace cutoff
+            sample_rate=16000,
+            status="transcribed",
+            retention_delete_after=None,  # deferred, never finalized
+        ),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 1
+    assert not audio.exists()
+    assert models.get_audio_file(conn, af_id)["status"] == "deleted"
+
+
+def test_sweep_keeps_recent_deferred_chunk(conn, settings, tmp_path):
+    """A recently-deferred chunk (NULL deadline) is kept until diarization finalizes."""
+    settings.consent.raw_audio_retention_hours = 168
+    audio = tmp_path / "recent.flac"
+    audio.write_bytes(b"\x00")
+    models.insert_audio_file(
+        conn,
+        AudioFile(
+            path=str(audio),
+            started_at=models.utcnow_iso(),  # just captured
+            sample_rate=16000,
+            status="transcribed",
+            retention_delete_after=None,
+        ),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 0
+    assert audio.exists()
+
+
+def test_sweep_keeps_deferred_chunk_when_retention_forever(conn, settings, tmp_path):
+    """NULL deadline + keep-forever retention means keep, even for old chunks."""
+    settings.consent.raw_audio_retention_hours = -1
+    audio = tmp_path / "keep.flac"
+    audio.write_bytes(b"\x00")
+    models.insert_audio_file(
+        conn,
+        AudioFile(
+            path=str(audio),
+            started_at="2000-01-01T00:00:00.000Z",
+            sample_rate=16000,
+            status="transcribed",
+            retention_delete_after=None,
+        ),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 0
+    assert audio.exists()
+
+
 def test_sweep_keeps_unexpired_audio(conn, settings, tmp_path):
     audio = tmp_path / "fresh.flac"
     audio.write_bytes(b"\x00")

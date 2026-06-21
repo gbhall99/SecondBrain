@@ -162,12 +162,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/speakers/{speaker_id}/samples")
     def api_samples(speaker_id: int):
         with db() as conn:
-            return {"samples": service.speaker_samples(conn, speaker_id)}
+            if service.is_opted_out(conn, speaker_id, settings):
+                raise HTTPException(403, "speaker opted out")
+            return {"samples": service.speaker_samples(conn, speaker_id, settings=settings)}
 
     @app.get("/api/speakers/{speaker_id}/clip/{observation_id}")
     def api_clip(speaker_id: int, observation_id: int):
         with db() as conn:
-            samples = service.speaker_samples(conn, speaker_id, n=50)
+            if service.is_opted_out(conn, speaker_id, settings):
+                raise HTTPException(403, "speaker opted out")
+            samples = service.speaker_samples(conn, speaker_id, n=50, settings=settings)
         sample = next((s for s in samples if s["id"] == observation_id), None)
         if sample is None:
             raise HTTPException(404, "observation not found")

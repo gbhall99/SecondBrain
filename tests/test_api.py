@@ -71,6 +71,14 @@ def test_project_endpoints(client, conn):
     assert client.get("/api/project/999").status_code == 404
 
 
+def test_opted_out_speaker_audio_blocked(client, conn):
+    conn.execute(
+        "INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (8, 'X', 'known', 0, 1)"
+    )
+    assert client.get("/api/speakers/8/samples").status_code == 403
+    assert client.get("/api/speakers/8/clip/1").status_code == 403
+
+
 def test_timeline_endpoints(client):
     r = client.get("/api/timeline/2026-06-16")
     assert r.status_code == 200

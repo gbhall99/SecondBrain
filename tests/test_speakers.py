@@ -2,9 +2,20 @@ from pathlib import Path
 
 from secondbrain.pipeline import conversation
 from secondbrain.pipeline.diarize import MockDiarizer, deterministic_embedding
+from secondbrain.query import service
 from secondbrain.speaker import attribution, cluster, enroll, registry
 from secondbrain.storage import models
 from secondbrain.storage.models import AudioFile, Segment
+
+
+def test_speaker_samples_blocked_for_opted_out(conn, settings):
+    """Opted-out speakers' raw audio must never be served (privacy)."""
+    conn.execute(
+        "INSERT INTO speakers (id, name, kind, is_owner, opted_out) VALUES (5, 'X', 'known', 0, 1)"
+    )
+    assert service.is_opted_out(conn, 5, settings) is True
+    assert service.speaker_samples(conn, 5, settings=settings) == []
+
 
 # --- matching + centroids ----------------------------------------------------
 
