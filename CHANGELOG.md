@@ -150,3 +150,19 @@ up their prerequisites so first run is turnkey:
   local override, so fresh clones stay capture-only and green.
 - DEPLOY.md documents the diarization → extraction → proactive chain (a HF token is
   required for the knowledge graph to populate).
+
+## Deploy hardening pass
+Fixes found by re-auditing the install.sh AI block, plus guardrails:
+- **Ollama start/pull race fixed:** wait (up to ~30s) for the server to accept
+  connections before `ollama pull`; clean `brew services` vs `ollama serve` start
+  (no more backgrounding the whole `||` list); idempotent — skips the HF-token
+  prompt when one is already set.
+- **Tested token write:** new `sb config set-hf-token` (backed by
+  `secondbrain/config_edit.py`, `json`-escaped, re-parseable) replaces the fragile
+  inline string substitution in install.sh.
+- **Tests:** `config_edit` (placeholder present/absent/append, special chars,
+  file round-trip) and a check that `config.local.toml.example` is valid TOML →
+  valid `Settings` with the AI flags on.
+- **CI:** added a `shellcheck` job for `deploy/*.sh`.
+- DEPLOY.md: explicit microphone-check (TCC) caveat + an on-device verification
+  checklist, since the macOS-only paths can't be exercised in CI.

@@ -85,46 +85,53 @@ else
     fi
   fi
   if command -v ollama >/dev/null 2>&1; then
-    # Start it as a background service (persists across reboots via brew) so the
+    # Start Ollama as a background service (persists across reboots via brew) so the
     # daemon's extraction jobs can reach it.
     if command -v brew >/dev/null 2>&1; then
-      brew services start ollama >/dev/null 2>&1 || ollama serve >/dev/null 2>&1 &
-    else
-      ollama serve >/dev/null 2>&1 &
+      brew services start ollama >/dev/null 2>&1 || true
     fi
-    say "Pulling Ollama model ${AI_MODEL} (one-time download)"
-    ollama pull "${AI_MODEL}" || warn "Model pull failed — run \`ollama pull ${AI_MODEL}\` later."
+    if ! ollama list >/dev/null 2>&1; then
+      nohup ollama serve >/dev/null 2>&1 &
+    fi
+    # Wait (up to ~30s) for the server to accept connections before pulling, so the
+    # first-run pull doesn't race the server start.
+    ready=0
+    for _ in $(seq 1 30); do
+      if ollama list >/dev/null 2>&1; then ready=1; break; fi
+      sleep 1
+    done
+    if [[ "${ready}" == "1" ]]; then
+      say "Pulling Ollama model ${AI_MODEL} (one-time download)"
+      ollama pull "${AI_MODEL}" || warn "Model pull failed — run \`ollama pull ${AI_MODEL}\` later."
+    else
+      warn "Ollama did not become ready — run \`ollama serve\`, then \`ollama pull ${AI_MODEL}\`."
+    fi
   fi
 
   # HuggingFace token: required for diarization (gated pyannote models), which in
-  # turn feeds the knowledge graph. Prompt only when interactive.
-  if [[ -t 0 ]]; then
-    say "Diarization needs a HuggingFace token (accept terms on "
-    say "  https://huggingface.co/pyannote/speaker-diarization-3.1 first)."
-    printf '    Paste your HF read token (or press Enter to skip): '
-    read -rs HF_TOKEN_INPUT || HF_TOKEN_INPUT=""
-    printf '\n'
+  # turn feeds the knowledge graph. Skip if already set; prompt only when interactive.
+  if [[ -f config.local.toml ]] \
+     && grep -Eq '^[[:space:]]*hf_token[[:space:]]*=' config.local.toml \
+     && ! grep -Eq '^[[:space:]]*hf_token[[:space:]]*=[[:space:]]*""[[:space:]]*$' config.local.toml; then
+    say "HuggingFace token already set in config.local.toml — skipping prompt."
   else
-    HF_TOKEN_INPUT="${HF_TOKEN:-}"
-  fi
-  if [[ -n "${HF_TOKEN_INPUT}" ]]; then
-    # Safe single replacement of the placeholder line in config.local.toml.
-    HF_TOKEN_INPUT="${HF_TOKEN_INPUT}" "${PYTHON_BIN}" - <<'PY'
-import os, pathlib
-p = pathlib.Path("config.local.toml")
-text = p.read_text()
-tok = os.environ["HF_TOKEN_INPUT"]
-if 'hf_token = ""' in text:
-    p.write_text(text.replace('hf_token = ""', f'hf_token = "{tok}"', 1))
-    print("    wrote hf_token to config.local.toml")
-else:
-    print("    note: could not find hf_token placeholder; set it manually")
-PY
-    say "Downloading diarization models (sb speaker setup)…"
-    sb speaker setup || warn "sb speaker setup failed — check the token + that you accepted the model terms."
-  else
-    warn "No HF token provided — diarization and the knowledge graph stay idle until you set"
-    warn "[diarization].hf_token in config.local.toml (then run \`sb speaker setup\`)."
+    if [[ -t 0 ]]; then
+      say "Diarization needs a HuggingFace token (accept terms at"
+      say "  https://huggingface.co/pyannote/speaker-diarization-3.1 first)."
+      printf '    Paste your HF read token (or press Enter to skip): '
+      read -rs HF_TOKEN_INPUT || HF_TOKEN_INPUT=""
+      printf '\n'
+    else
+      HF_TOKEN_INPUT="${HF_TOKEN:-}"
+    fi
+    if [[ -n "${HF_TOKEN_INPUT:-}" ]]; then
+      sb config set-hf-token "${HF_TOKEN_INPUT}"   # safe, tested TOML edit
+      say "Downloading diarization models (sb speaker setup)…"
+      sb speaker setup || warn "sb speaker setup failed — check the token + accepted model terms."
+    else
+      warn "No HF token provided — diarization and the knowledge graph stay idle until you set"
+      warn "[diarization].hf_token in config.local.toml (then run \`sb speaker setup\`)."
+    fi
   fi
 fi
 
