@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the SecondBrain web UI / API (`sb serve`).
+
+  1. Edit the paths below (REPLACE __REPO__ and __PYTHON__), or let `sb deploy
+     launchd` fill them in for you.
+  2. Copy to ~/Library/LaunchAgents/com.secondbrain.web.plist
+  3. launchctl load ~/Library/LaunchAgents/com.secondbrain.web.plist
+
+  Serves the dashboard on 127.0.0.1:8765 by default (loopback-only). To reach it
+  from another device, prefer `tailscale serve https / 127.0.0.1:8765` rather than
+  binding to a non-loopback host (the server fail-closes on that without auth).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.secondbrain.web</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>-m</string>
+        <string>secondbrain</string>
+        <string>serve</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/web.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/web.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
