@@ -7,6 +7,7 @@ consent/disk pre-checks) are separated from the sounddevice loop so they're unit
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -16,6 +17,8 @@ from secondbrain.config import Settings, get_settings
 from secondbrain.pipeline.worker import enqueue_transcription
 from secondbrain.storage import retention, state
 from secondbrain.storage.models import AudioFile, insert_audio_file, iso_from_dt, utcnow_iso
+
+log = logging.getLogger(__name__)
 
 
 def chunk_filename(started_at: datetime) -> str:
@@ -87,37 +90,50 @@ class Recorder:
         device = resolve_device(cfg.input_device)
         frames_per_chunk = cfg.sample_rate * cfg.chunk_seconds
 
-        with sd.InputStream(
-            samplerate=cfg.sample_rate,
-            channels=cfg.channels,
-            device=device,
-            dtype="float32",
-        ) as stream:
-            while not self._stop.is_set():
-                ok, _ = should_record(self.settings, self.conn)
-                if not ok:
-                    self._stop.wait(1.0)
-                    continue
+        # Outer retry: a transient device error (mic unplugged, CoreAudio glitch)
+        # must not kill capture permanently — back off and reopen the stream.
+        backoff = 1.0
+        max_backoff = 60.0
+        while not self._stop.is_set():
+            try:
+                with sd.InputStream(
+                    samplerate=cfg.sample_rate,
+                    channels=cfg.channels,
+                    device=device,
+                    dtype="float32",
+                ) as stream:
+                    backoff = 1.0  # reset after a clean open
+                    while not self._stop.is_set():
+                        ok, _ = should_record(self.settings, self.conn)
+                        if not ok:
+                            self._stop.wait(1.0)
+                            continue
 
-                started = datetime.now(UTC)
-                buf = np.empty((frames_per_chunk, cfg.channels), dtype="float32")
-                filled = 0
-                while filled < frames_per_chunk and not self._stop.is_set():
-                    block, _ = stream.read(min(cfg.sample_rate, frames_per_chunk - filled))
-                    n = len(block)
-                    buf[filled : filled + n] = block
-                    filled += n
-                if filled == 0:
-                    continue
+                        started = datetime.now(UTC)
+                        buf = np.empty((frames_per_chunk, cfg.channels), dtype="float32")
+                        filled = 0
+                        while filled < frames_per_chunk and not self._stop.is_set():
+                            block, _ = stream.read(min(cfg.sample_rate, frames_per_chunk - filled))
+                            n = len(block)
+                            buf[filled : filled + n] = block
+                            filled += n
+                        if filled == 0:
+                            continue
 
-                path = self.settings.audio_raw_dir / chunk_filename(started)
-                sf.write(str(path), buf[:filled], cfg.sample_rate, format="FLAC")
-                duration = filled / cfg.sample_rate
-                register_chunk(
-                    self.conn,
-                    path,
-                    iso_from_dt(started),
-                    utcnow_iso(),
-                    duration,
-                    self.settings,
-                )
+                        path = self.settings.audio_raw_dir / chunk_filename(started)
+                        sf.write(str(path), buf[:filled], cfg.sample_rate, format="FLAC")
+                        duration = filled / cfg.sample_rate
+                        register_chunk(
+                            self.conn,
+                            path,
+                            iso_from_dt(started),
+                            utcnow_iso(),
+                            duration,
+                            self.settings,
+                        )
+            except Exception:  # noqa: BLE001 - transient audio/device error: back off + reopen
+                if self._stop.is_set():
+                    break
+                log.warning("capture stream error; reopening in %.0fs", backoff, exc_info=True)
+                self._stop.wait(backoff)
+                backoff = min(max_backoff, backoff * 2.0)
