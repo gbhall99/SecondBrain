@@ -55,6 +55,22 @@ def test_relationships_endpoints(client, conn):
     assert client.get("/relationships").status_code == 200  # page renders
 
 
+def test_project_endpoints(client, conn):
+    conn.execute("INSERT INTO kg_nodes (id, type, name) VALUES (10, 'project', 'Atlas')")
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, kind, object_text, valid) "
+        "VALUES (20, 10, 'fact', 'on track', 1)"
+    )
+    r = client.get("/api/projects")
+    assert r.status_code == 200
+    assert any(p["label"] == "Atlas" for p in r.json()["projects"])
+    assert client.get("/projects").status_code == 200  # list page renders
+    d = client.get("/api/project/10")
+    assert d.status_code == 200 and d.json()["label"] == "Atlas"
+    assert client.get("/project/10").status_code == 200  # dossier page renders
+    assert client.get("/api/project/999").status_code == 404
+
+
 def test_timeline_endpoints(client):
     r = client.get("/api/timeline/2026-06-16")
     assert r.status_code == 200
@@ -82,7 +98,7 @@ def test_index_page_renders(client):
     assert r.status_code == 200
     assert "SecondBrain" in r.text
     # unified dashboard: shared nav links present
-    for href in ('href="/timeline"', 'href="/relationships"', 'href="/speakers"'):
+    for href in ('href="/timeline"', 'href="/relationships"', 'href="/projects"', 'href="/speakers"'):
         assert href in r.text
 
 

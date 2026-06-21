@@ -147,6 +147,9 @@ def corpus_stats(conn: sqlite3.Connection) -> dict:
         "speakers": _count("SELECT COUNT(*) AS n FROM speakers WHERE merged_into IS NULL"),
         "kg_nodes": _count("SELECT COUNT(*) AS n FROM kg_nodes WHERE merged_into IS NULL"),
         "kg_edges": _count("SELECT COUNT(*) AS n FROM kg_edges WHERE valid=1"),
+        "projects": _count(
+            "SELECT COUNT(*) AS n FROM kg_nodes WHERE type='project' AND merged_into IS NULL"
+        ),
         "goals": _count("SELECT COUNT(*) AS n FROM goals"),
         "goals_active": _count("SELECT COUNT(*) AS n FROM goals WHERE status='active'"),
         "tasks": _count("SELECT COUNT(*) AS n FROM tasks"),
@@ -455,6 +458,198 @@ def person_dossier(
         ).fetchall()
     ]
     return dossier
+
+
+# --- project intelligence (Phase 9) ------------------------------------------
+
+
+def _resolve_node_id(conn: sqlite3.Connection, node_id: int) -> int | None:
+    """Follow the merged_into chain to the surviving node (or None if missing)."""
+    nid = node_id
+    for _ in range(16):
+        row = conn.execute("SELECT id, merged_into FROM kg_nodes WHERE id=?", (nid,)).fetchone()
+        if row is None:
+            return None
+        if row["merged_into"] is None:
+            return int(row["id"])
+        nid = row["merged_into"]
+    return nid
+
+
+def _project_people(conn, nid: int, settings: Settings, limit: int = 12) -> list[dict]:
+    """People (person nodes) on the other end of edges touching this project."""
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    rows = conn.execute(
+        """
+        SELECT n.id AS node_id, n.name, n.display_label, n.speaker_id,
+               COUNT(*) AS edges
+        FROM kg_edges e
+        JOIN kg_nodes n
+          ON n.id = CASE WHEN e.src_node_id=? THEN e.dst_node_id ELSE e.src_node_id END
+        WHERE e.valid=1 AND (e.src_node_id=? OR e.dst_node_id=?)
+          AND n.type='person' AND n.merged_into IS NULL
+        GROUP BY n.id ORDER BY edges DESC
+        """,
+        (nid, nid, nid),
+    ).fetchall()
+    out = []
+    for r in rows:
+        sid = r["speaker_id"]
+        if sid is not None and registry.resolve_speaker_id(conn, sid) in opted:
+            continue
+        out.append({
+            "node_id": r["node_id"],
+            "speaker_id": r["speaker_id"],
+            "label": r["display_label"] or r["name"],
+            "edges": r["edges"],
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _segment_quotes(conn, seg_ids: set[int], settings: Settings, limit: int = 8) -> list[dict]:
+    """Recent non-redacted quotes from the given cited segments (opt-out aware)."""
+    if not seg_ids:
+        return []
+    opted = registry.opted_out_speaker_ids(conn, settings)
+    ph = ",".join("?" * len(seg_ids))
+    rows = conn.execute(
+        f"SELECT id, start_at, text, speaker_id FROM transcript_segments "
+        f"WHERE id IN ({ph}) AND text != ? ORDER BY start_at DESC, id DESC",
+        (*seg_ids, registry.REDACTED_TEXT),
+    ).fetchall()
+    out = []
+    for r in rows:
+        sid = r["speaker_id"]
+        if sid is not None and registry.resolve_speaker_id(conn, sid) in opted:
+            continue
+        out.append({"segment_id": r["id"], "start_at": r["start_at"], "text": r["text"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def list_projects(conn: sqlite3.Connection, settings: Settings | None = None) -> list[dict]:
+    """Projects (kg nodes) ranked by activity — conversations then edge volume."""
+    settings = settings or get_settings()
+    rows = conn.execute(
+        """
+        SELECT n.id, n.name, n.display_label, n.first_seen, n.last_seen,
+               COUNT(DISTINCT e.id) AS edges,
+               COUNT(DISTINCT e.conversation_id) AS conversations
+        FROM kg_nodes n
+        LEFT JOIN kg_edges e
+          ON (e.src_node_id=n.id OR e.dst_node_id=n.id) AND e.valid=1
+        WHERE n.type='project' AND n.merged_into IS NULL
+        GROUP BY n.id
+        """
+    ).fetchall()
+    out = []
+    for r in rows:
+        linked_goals = conn.execute(
+            "SELECT COUNT(*) AS n FROM goal_links WHERE kind='node' AND ref_id=?", (r["id"],)
+        ).fetchone()["n"]
+        open_items = conn.execute(
+            "SELECT COUNT(*) AS n FROM kg_edges WHERE valid=1 AND kind='action_item' "
+            "AND (src_node_id=? OR dst_node_id=?)",
+            (r["id"], r["id"]),
+        ).fetchone()["n"]
+        out.append({
+            "node_id": r["id"],
+            "label": r["display_label"] or r["name"],
+            "edges": r["edges"],
+            "conversations": r["conversations"],
+            "linked_goals": linked_goals,
+            "open_action_items": open_items,
+            "first_seen": r["first_seen"],
+            "last_seen": r["last_seen"],
+        })
+    out.sort(key=lambda x: (x["conversations"], x["edges"]), reverse=True)
+    return out
+
+
+def project_dossier(
+    conn: sqlite3.Connection, node_id: int, settings: Settings | None = None, *, quotes: int = 8
+) -> dict | None:
+    """Everything known about a project: identity, activity, linked goals, people,
+    decisions, facts, open commitments, and recent quotes."""
+    settings = settings or get_settings()
+    nid = _resolve_node_id(conn, node_id)
+    if nid is None:
+        return None
+    node = conn.execute(
+        "SELECT id, type, name, display_label, first_seen, last_seen FROM kg_nodes WHERE id=?",
+        (nid,),
+    ).fetchone()
+    if node is None or node["type"] != "project":
+        return None
+
+    edges = conn.execute(
+        "SELECT id, src_node_id, dst_node_id, predicate, kind, object_text, due_date, "
+        "confidence, conversation_id, source_segment_ids, last_seen FROM kg_edges "
+        "WHERE valid=1 AND (src_node_id=? OR dst_node_id=?)",
+        (nid, nid),
+    ).fetchall()
+
+    facts: list[dict] = []
+    decisions: list[dict] = []
+    action_items: list[dict] = []
+    convos: set[int] = set()
+    seg_ids: set[int] = set()
+    for e in edges:
+        if e["conversation_id"] is not None:
+            convos.add(e["conversation_id"])
+        seg_ids.update(json.loads(e["source_segment_ids"] or "[]"))
+        item = {
+            "predicate": e["predicate"],
+            "object_text": e["object_text"],
+            "due_date": e["due_date"],
+            "confidence": e["confidence"],
+            "segment_ids": json.loads(e["source_segment_ids"] or "[]"),
+        }
+        if e["kind"] == "fact":
+            facts.append(item)
+        elif e["kind"] == "decision":
+            decisions.append(item)
+        elif e["kind"] == "action_item":
+            action_items.append(item)
+    facts.sort(key=lambda x: x["confidence"] or 0, reverse=True)
+    action_items.sort(key=lambda x: x["due_date"] or "9999")
+
+    goals = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT g.id, g.title, g.status, g.priority, gl.relation FROM goal_links gl "
+            "JOIN goals g ON g.id=gl.goal_id WHERE gl.kind='node' AND gl.ref_id=? "
+            "ORDER BY g.priority, g.id",
+            (nid,),
+        ).fetchall()
+    ]
+
+    return {
+        "node_id": nid,
+        "label": node["display_label"] or node["name"],
+        "type": node["type"],
+        "aliases": [
+            r["alias"]
+            for r in conn.execute(
+                "SELECT alias FROM kg_aliases WHERE node_id=?", (nid,)
+            ).fetchall()
+        ],
+        "activity": {
+            "edges": len(edges),
+            "conversations": len(convos),
+            "first_seen": node["first_seen"],
+            "last_seen": node["last_seen"],
+        },
+        "linked_goals": goals,
+        "people": _project_people(conn, nid, settings),
+        "decisions": decisions,
+        "facts": facts,
+        "open_commitments": action_items,
+        "recent_quotes": _segment_quotes(conn, seg_ids, settings, limit=quotes),
+    }
 
 
 def name_speaker(conn: sqlite3.Connection, speaker_id: int, name: str,
