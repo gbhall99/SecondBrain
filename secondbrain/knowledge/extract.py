@@ -200,6 +200,10 @@ def run_extraction(
             mc = _min_conf(seg_by_id, seg_ids)
             return "mention" if (mc is not None and mc < low) else base
 
+        def clean_segs(seg_ids: list[int]) -> list[int]:
+            # Drop citations the LLM may have hallucinated (not real segment ids).
+            return [i for i in seg_ids if i in seg_by_id]
+
         # 2. facts
         for f in result.facts:
             src = ref(f.subject_ref)
@@ -210,7 +214,7 @@ def run_extraction(
                 conn, src_node_id=src, dst_node_id=ref(f.object_ref), predicate=f.predicate,
                 kind=kind_for("fact", f.source_segment_ids), object_text=f.object_text,
                 confidence=f.confidence, extraction_id=ext_id, conversation_id=conversation_id,
-                source_segment_ids=f.source_segment_ids, when=when,
+                source_segment_ids=clean_segs(f.source_segment_ids), when=when,
             )
 
         # 3. action items
@@ -220,7 +224,8 @@ def run_extraction(
                 conn, src_node_id=src, dst_node_id=ref(a.owed_to_ref), predicate="action_item",
                 kind=kind_for("action_item", a.source_segment_ids), object_text=a.description,
                 due_date=a.due_date, confidence=a.confidence, extraction_id=ext_id,
-                conversation_id=conversation_id, source_segment_ids=a.source_segment_ids, when=when,
+                conversation_id=conversation_id, when=when,
+                source_segment_ids=clean_segs(a.source_segment_ids),
             )
             edges_written += 1
 
@@ -235,8 +240,8 @@ def run_extraction(
                     conn, src_node_id=src, dst_node_id=None, predicate=kind,
                     kind=kind_for(kind, it.source_segment_ids) if kind == "decision" else kind,
                     object_text=it.summary, confidence=it.confidence, extraction_id=ext_id,
-                    conversation_id=conversation_id, source_segment_ids=it.source_segment_ids,
-                    when=when,
+                    conversation_id=conversation_id, when=when,
+                    source_segment_ids=clean_segs(it.source_segment_ids),
                 )
                 edges_written += 1
 

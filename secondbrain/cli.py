@@ -198,8 +198,16 @@ def search(
 def ask(question: str = typer.Argument(..., help="Question to answer from your data.")) -> None:
     """Ask your second brain a question (grounded in your captured knowledge)."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
-        result = service.ask(conn, question, settings)
+    try:
+        with db_session(settings=settings) as conn:
+            result = service.ask(conn, question, settings)
+    except Exception as exc:  # noqa: BLE001 - friendly hint instead of a traceback
+        typer.echo(
+            f"Could not answer ({exc}).\n"
+            "The knowledge graph needs the local LLM: is Ollama running "
+            "(`ollama serve`) with the model pulled, and [llm].backend = \"ollama\"?"
+        )
+        raise typer.Exit(1) from exc
     typer.echo(result["answer"].strip() + "\n")
     if result["citations"]:
         typer.echo("Sources:")

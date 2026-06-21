@@ -79,6 +79,20 @@ def test_low_confidence_attribution_downgrades_to_mention(conn, settings):
     assert kinds == ["mention"]  # not asserted as a hard fact
 
 
+def test_hallucinated_citations_dropped(conn, settings):
+    owner = registry.get_or_create_owner(conn, "Me")
+    conv, seg_ids = _diarized_conversation(conn, [("real line", owner, 0.95)])
+    payload = {
+        "entities": [],
+        "facts": [{"subject_ref": -1, "predicate": "likes", "object_text": "coffee",
+                   "source_segment_ids": [seg_ids[0], 99999], "confidence": 0.9}],
+        "action_items": [], "decisions": [], "ideas": [],
+    }
+    extract.run_extraction(conn, conv, llm=MockLLM(responses=[json.dumps(payload)]), settings=settings)
+    fact = conn.execute("SELECT source_segment_ids FROM kg_edges WHERE kind='fact'").fetchone()
+    assert json.loads(fact["source_segment_ids"]) == [seg_ids[0]]  # fake id 99999 dropped
+
+
 def test_redacted_and_optout_segments_excluded(conn, settings):
     settings.consent.speaker_opt_out = ["Private"]
     private = _named_speaker(conn, "Private")
