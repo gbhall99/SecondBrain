@@ -18,6 +18,7 @@ from secondbrain.knowledge.schema import OWNER_REF, ExtractionResult, extraction
 from secondbrain.llm.client import LLM, get_llm
 from secondbrain.llm.jsonout import parse_json
 from secondbrain.speaker import registry
+from secondbrain.storage.db import transaction
 from secondbrain.storage.models import utcnow_iso
 
 JOB_EXTRACT = "extract_knowledge"
@@ -139,6 +140,103 @@ def _min_conf(segments_by_id: dict[int, dict], seg_ids: list[int]) -> float | No
     return min(confs) if confs else None
 
 
+def _write_chunk(
+    conn: sqlite3.Connection,
+    conversation_id: int,
+    chunk: list[dict],
+    chunk_index: int,
+    result: ExtractionResult,
+    resp,
+    when: str,
+    seg_by_id: dict[int, dict],
+    low: float,
+    settings: Settings,
+    llm: LLM,
+) -> int:
+    """Persist one chunk's extraction (record + entities + edges) and return the
+    edge count. Meant to run inside the caller's transaction for atomicity."""
+    written = 0
+    ext_id = graph.record_extraction(
+        conn,
+        conversation_id=conversation_id,
+        model=resp.model,
+        backend=resp.backend,
+        chunk_index=chunk_index,
+        segment_id_low=chunk[0]["id"],
+        segment_id_high=chunk[-1]["id"],
+        raw_json=resp.text,
+    )
+
+    # 1. entities → node ids
+    node_ids: list[int] = []
+    for ent in result.entities:
+        node_ids.append(
+            resolve.resolve_entity(
+                conn, ent, extraction_id=ext_id, when=when, llm=llm, settings=settings,
+                speaker_hint=_speaker_hint(conn, ent.name) if ent.type == "person" else None,
+            )
+        )
+
+    def ref(idx, _nodes=node_ids, _ext=ext_id, _when=when) -> int | None:
+        if idx is None:
+            return None
+        if idx == OWNER_REF:
+            return _owner_node(conn, _ext, _when)
+        if 0 <= idx < len(_nodes):
+            return _nodes[idx]
+        return None
+
+    def kind_for(base: str, seg_ids: list[int]) -> str:
+        mc = _min_conf(seg_by_id, seg_ids)
+        return "mention" if (mc is not None and mc < low) else base
+
+    def clean_segs(seg_ids: list[int]) -> list[int]:
+        # Drop citations the LLM may have hallucinated (not real segment ids).
+        return [i for i in seg_ids if i in seg_by_id]
+
+    # 2. facts
+    for f in result.facts:
+        src = ref(f.subject_ref)
+        if src is None:
+            continue
+        written += 1
+        graph.upsert_edge(
+            conn, src_node_id=src, dst_node_id=ref(f.object_ref), predicate=f.predicate,
+            kind=kind_for("fact", f.source_segment_ids), object_text=f.object_text,
+            confidence=f.confidence, extraction_id=ext_id, conversation_id=conversation_id,
+            source_segment_ids=clean_segs(f.source_segment_ids), when=when,
+        )
+
+    # 3. action items
+    for a in result.action_items:
+        src = ref(a.owed_by_ref) or _owner_node(conn, ext_id, when)
+        graph.upsert_edge(
+            conn, src_node_id=src, dst_node_id=ref(a.owed_to_ref), predicate="action_item",
+            kind=kind_for("action_item", a.source_segment_ids), object_text=a.description,
+            due_date=a.due_date, confidence=a.confidence, extraction_id=ext_id,
+            conversation_id=conversation_id, when=when,
+            source_segment_ids=clean_segs(a.source_segment_ids),
+        )
+        written += 1
+
+    # 4. decisions + ideas
+    for kind, items in (("decision", result.decisions), ("idea", result.ideas)):
+        for it in items:
+            parts = [ref(p) for p in it.participant_refs]
+            src = next((p for p in parts if p is not None), None)
+            if src is None:
+                src = _owner_node(conn, ext_id, when)
+            graph.upsert_edge(
+                conn, src_node_id=src, dst_node_id=None, predicate=kind,
+                kind=kind_for(kind, it.source_segment_ids) if kind == "decision" else kind,
+                object_text=it.summary, confidence=it.confidence, extraction_id=ext_id,
+                conversation_id=conversation_id, when=when,
+                source_segment_ids=clean_segs(it.source_segment_ids),
+            )
+            written += 1
+    return written
+
+
 def run_extraction(
     conn: sqlite3.Connection,
     conversation_id: int,
@@ -166,84 +264,13 @@ def run_extraction(
             system=_SYSTEM, prompt=_render(chunk), schema=extraction_json_schema()
         )
         result = ExtractionResult.model_validate(parse_json(resp.text))
-        ext_id = graph.record_extraction(
-            conn,
-            conversation_id=conversation_id,
-            model=resp.model,
-            backend=resp.backend,
-            chunk_index=chunk_index,
-            segment_id_low=chunk[0]["id"],
-            segment_id_high=chunk[-1]["id"],
-            raw_json=resp.text,
-        )
-
-        # 1. entities → node ids
-        node_ids: list[int] = []
-        for ent in result.entities:
-            node_ids.append(
-                resolve.resolve_entity(
-                    conn, ent, extraction_id=ext_id, when=when, llm=llm, settings=settings,
-                    speaker_hint=_speaker_hint(conn, ent.name) if ent.type == "person" else None,
-                )
+        # The slow llm.complete already ran above (outside the transaction); the
+        # per-chunk DB writes below are atomic so a crash can't leave a half-chunk.
+        with transaction(conn):
+            edges_written += _write_chunk(
+                conn, conversation_id, chunk, chunk_index, result, resp, when,
+                seg_by_id, low, settings, llm,
             )
-
-        def ref(idx, _nodes=node_ids, _ext=ext_id, _when=when) -> int | None:
-            if idx is None:
-                return None
-            if idx == OWNER_REF:
-                return _owner_node(conn, _ext, _when)
-            if 0 <= idx < len(_nodes):
-                return _nodes[idx]
-            return None
-
-        def kind_for(base: str, seg_ids: list[int]) -> str:
-            mc = _min_conf(seg_by_id, seg_ids)
-            return "mention" if (mc is not None and mc < low) else base
-
-        def clean_segs(seg_ids: list[int]) -> list[int]:
-            # Drop citations the LLM may have hallucinated (not real segment ids).
-            return [i for i in seg_ids if i in seg_by_id]
-
-        # 2. facts
-        for f in result.facts:
-            src = ref(f.subject_ref)
-            if src is None:
-                continue
-            edges_written += 1
-            graph.upsert_edge(
-                conn, src_node_id=src, dst_node_id=ref(f.object_ref), predicate=f.predicate,
-                kind=kind_for("fact", f.source_segment_ids), object_text=f.object_text,
-                confidence=f.confidence, extraction_id=ext_id, conversation_id=conversation_id,
-                source_segment_ids=clean_segs(f.source_segment_ids), when=when,
-            )
-
-        # 3. action items
-        for a in result.action_items:
-            src = ref(a.owed_by_ref) or _owner_node(conn, ext_id, when)
-            graph.upsert_edge(
-                conn, src_node_id=src, dst_node_id=ref(a.owed_to_ref), predicate="action_item",
-                kind=kind_for("action_item", a.source_segment_ids), object_text=a.description,
-                due_date=a.due_date, confidence=a.confidence, extraction_id=ext_id,
-                conversation_id=conversation_id, when=when,
-                source_segment_ids=clean_segs(a.source_segment_ids),
-            )
-            edges_written += 1
-
-        # 4. decisions + ideas
-        for kind, items in (("decision", result.decisions), ("idea", result.ideas)):
-            for it in items:
-                parts = [ref(p) for p in it.participant_refs]
-                src = next((p for p in parts if p is not None), None)
-                if src is None:
-                    src = _owner_node(conn, ext_id, when)
-                graph.upsert_edge(
-                    conn, src_node_id=src, dst_node_id=None, predicate=kind,
-                    kind=kind_for(kind, it.source_segment_ids) if kind == "decision" else kind,
-                    object_text=it.summary, confidence=it.confidence, extraction_id=ext_id,
-                    conversation_id=conversation_id, when=when,
-                    source_segment_ids=clean_segs(it.source_segment_ids),
-                )
-                edges_written += 1
 
     conn.execute(
         "UPDATE conversations SET knowledge_status='extracted' WHERE id=?", (conversation_id,)
