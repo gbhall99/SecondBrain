@@ -63,9 +63,11 @@ def accept_day(conn: sqlite3.Connection, date: str | None = None) -> dict | None
     if plan is None:
         return None
     for tid in plan["task_ids"]:
+        # Don't clobber an in-progress task back to 'scheduled'; just set the day.
         conn.execute(
-            "UPDATE tasks SET scheduled_for=?, status='scheduled', updated_at=? "
-            "WHERE id=? AND status NOT IN ('done','dropped')",
+            "UPDATE tasks SET scheduled_for=?, "
+            "status=CASE WHEN status='in_progress' THEN status ELSE 'scheduled' END, "
+            "updated_at=? WHERE id=? AND status NOT IN ('done','dropped')",
             (date, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%fZ"), tid),
         )
     conn.execute("UPDATE day_plans SET status='accepted' WHERE date=?", (date,))

@@ -7,6 +7,8 @@ import sqlite3
 from secondbrain.storage.models import utcnow_iso
 
 ACTIVE_STATUSES = ("backlog", "next", "scheduled", "in_progress", "blocked")
+# Statuses eligible for day planning — 'blocked' is explicitly held back by the user.
+SCHEDULABLE_STATUSES = ("backlog", "next", "scheduled", "in_progress")
 DONE_STATUSES = ("done", "dropped")
 
 
@@ -112,10 +114,10 @@ def is_ready(conn: sqlite3.Connection, task_id: int) -> bool:
 
 
 def ready_tasks(conn: sqlite3.Connection) -> list[dict]:
-    """Open, unblocked tasks eligible for scheduling."""
+    """Open, unblocked tasks eligible for scheduling (excludes 'blocked')."""
     rows = conn.execute(
-        f"SELECT * FROM tasks WHERE status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
-        ACTIVE_STATUSES,
+        f"SELECT * FROM tasks WHERE status IN ({','.join('?' * len(SCHEDULABLE_STATUSES))})",
+        SCHEDULABLE_STATUSES,
     ).fetchall()
     return [dict(r) for r in rows if is_ready(conn, r["id"])]
 
