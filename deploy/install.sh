@@ -59,6 +59,7 @@ pip install -e ".[audio,ml,mac]" "${CONSTRAINTS[@]}"
 # --- 5. Initialise data dir + database -------------------------------------
 say "Initialising data directory and database"
 sb init
+sb repair || warn "repair reported an issue (see above)"  # self-heal; non-fatal
 
 # Seed a local override file from the template so the user edits a real file.
 # The template enables the AI features (diarization, LLM extraction, proactive);
@@ -152,14 +153,17 @@ cat <<'EOF'
        sb deploy launchd --load --include-menubar
      macOS will prompt for Microphone permission on first run.
 
-  4. Verify:
-       sb doctor          # checks mic, Ollama, migrations, disk…
+  4. Verify (and self-heal anything fixable):
+       sb doctor --fix    # repairs, then checks mic, Ollama, migrations, disk…
        open http://127.0.0.1:8765
+
+If anything ever looks off later, just re-run `./deploy/install.sh` (idempotent)
+or `sb repair` — both are safe and self-healing.
 
 AI features (diarization, knowledge graph, proactive brief) are enabled in
 config.local.toml; this script set up Ollama + the HF token where possible.
 Full guide: docs/DEPLOY.md
 EOF
 
-say "Running preflight (sb doctor)…"
-sb doctor || warn "Some checks failed — see docs/DEPLOY.md (this is expected before you set a mic)."
+say "Running preflight (sb doctor --fix)…"
+sb doctor --fix || warn "Some checks failed — see docs/DEPLOY.md (this is expected before you set a mic)."

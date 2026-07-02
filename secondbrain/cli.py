@@ -685,12 +685,48 @@ def decompose(goal_id: int, accept: bool = typer.Option(False, "--accept")) -> N
 
 
 @app.command()
-def doctor() -> None:
-    """Run health/preflight checks (config, disk, migrations, backends)."""
-    from secondbrain import health
+def repair() -> None:
+    """Self-heal: create missing dirs, upgrade the schema, seed config, re-queue
+    crashed jobs, checkpoint the WAL. Safe + idempotent (never deletes data)."""
+    from secondbrain import repair as repair_mod
 
     settings = get_settings()
+    settings.ensure_dirs()
     with db_session(settings=settings) as conn:
+        actions = repair_mod.repair(conn, settings)
+    fixed = 0
+    problems = 0
+    for a in actions:
+        if a.fixed:
+            fixed += 1
+            mark = "✓"
+        elif not a.ok:
+            problems += 1
+            mark = "✗"
+        else:
+            mark = "·"
+        typer.echo(f"  {mark} {a.name}: {a.detail}")
+    typer.echo(f"\n{fixed} issue(s) repaired." if fixed else "\nNothing to repair.")
+    if problems:
+        typer.echo(f"{problems} problem(s) need attention (see above).")
+        raise typer.Exit(1)
+
+
+@app.command()
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Auto-repair before checking (self-heal)."),
+) -> None:
+    """Run health/preflight checks (config, disk, migrations, backends)."""
+    from secondbrain import health
+    from secondbrain import repair as repair_mod
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    with db_session(settings=settings) as conn:
+        if fix:
+            for a in repair_mod.repair(conn, settings):
+                if a.fixed:
+                    typer.echo(f"  fixed {a.name}: {a.detail}")
         checks = health.run_checks(conn, settings)
     failed = 0
     for c in checks:

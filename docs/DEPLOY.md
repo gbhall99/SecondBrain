@@ -161,6 +161,12 @@ open http://127.0.0.1:8765
 > Microphone** even when the check passes.
 
 ## 7. Troubleshooting
+- **First stop — self-heal:** `sb repair` (or `sb doctor --fix`). It safely and
+  idempotently recreates missing data dirs, brings the schema to head, seeds
+  `config.local.toml`, re-queues jobs a crashed worker left mid-run, and
+  checkpoints the WAL. It never deletes data; genuine DB corruption is reported so
+  you can `sb restore` a backup. Re-running `./deploy/install.sh` is equally safe.
+  The daemon also runs this repair automatically every time it (re)starts.
 - **Logs:** `data/daemon.{out,err}.log`, `data/web.{out,err}.log`,
   `data/menubar.{out,err}.log`.
 - **Stuck pipeline:** `sb status` (queue depth), `sb queue` (inspect/reclaim),
