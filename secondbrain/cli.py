@@ -384,8 +384,15 @@ def speaker_enroll_owner(
     clips: int = typer.Option(3, help="Number of guided clips to record."),
     seconds: float = typer.Option(10.0, help="Seconds per clip."),
     from_files: list[str] = typer.Option(None, "--from", help="Use existing audio files instead."),
+    rerecord: bool = typer.Option(False, "--rerecord", help="Re-record even if saved clips exist."),
 ) -> None:
-    """Enroll your own voice (guided recording, or --from existing clips)."""
+    """Enroll your own voice.
+
+    Recordings are saved (``data/audio/processed/enroll_*.flac``) and REUSED on a
+    re-run, so if processing fails you never have to read the phrases again — just
+    re-run `sb speaker enroll-owner`. `--rerecord` forces fresh recordings;
+    `--from` uses your own files.
+    """
     from secondbrain.speaker.enroll import enroll_owner_from_files, record_clip
 
     settings = get_settings()
@@ -394,17 +401,24 @@ def speaker_enroll_owner(
     if from_files:
         paths = [Path(f) for f in from_files]
     else:
-        sentences = [
-            "The quick brown fox jumps over the lazy dog.",
-            "I usually start my mornings reviewing the day's priorities.",
-            "Recording a few sentences helps the system learn my voice.",
-        ]
-        for i in range(clips):
-            typer.echo(f"\nClip {i + 1}/{clips} — read aloud: \"{sentences[i % len(sentences)]}\"")
-            typer.confirm("Ready to record?", default=True)
-            p = settings.audio_processed_dir / f"enroll_{i}.flac"
-            record_clip(p, seconds, settings)
-            paths.append(p)
+        saved = sorted(settings.audio_processed_dir.glob("enroll_*.flac"))
+        if saved and not rerecord:
+            typer.echo(f"Reusing {len(saved)} saved recording(s) from a previous run "
+                       "(use --rerecord to record fresh).")
+            paths = saved
+        else:
+            sentences = [
+                "The quick brown fox jumps over the lazy dog.",
+                "I usually start my mornings reviewing the day's priorities.",
+                "Recording a few sentences helps the system learn my voice.",
+            ]
+            for i in range(clips):
+                typer.echo(f"\nClip {i + 1}/{clips} — read aloud: "
+                           f"\"{sentences[i % len(sentences)]}\"")
+                typer.confirm("Ready to record?", default=True)
+                p = settings.audio_processed_dir / f"enroll_{i}.flac"
+                record_clip(p, seconds, settings)
+                paths.append(p)
     with db_session(settings=settings) as conn:
         owner_id = enroll_owner_from_files(conn, paths, settings=settings, name=name)
     typer.echo(f"Enrolled owner '{name}' (speaker #{owner_id}) from {len(paths)} clip(s).")

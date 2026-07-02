@@ -35,7 +35,7 @@ ml = [
     "parakeet-mlx>=0.2; platform_system == 'Darwin'",
     "sqlite-vec>=0.1.6",
     "sentence-transformers>=2.7",
-    "pyannote.audio>=3.1",
+    "pyannote.audio>=3.1,<4",  # 4.x changed the pipeline output API (DiarizeOutput)
     "torch>=2.2",
 ]
 mac = [

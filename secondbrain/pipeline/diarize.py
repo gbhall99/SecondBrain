@@ -40,6 +40,20 @@ def _load_pipeline(pipeline_cls, model: str, token: str | None):
         return pipeline_cls.from_pretrained(model, use_auth_token=token)
 
 
+def _unpack_diarize(out):
+    """The 3.x pipeline returns ``(diarization, embeddings)`` when called with
+    ``return_embeddings=True``. pyannote.audio 4.x changed this (ignores the kwarg
+    and returns a single ``DiarizeOutput``), which we don't support yet — surface a
+    clear, actionable error instead of a cryptic unpack failure."""
+    if isinstance(out, tuple) and len(out) == 2:
+        return out
+    raise RuntimeError(
+        "Unsupported pyannote.audio pipeline output (got "
+        f"{type(out).__name__}). SecondBrain needs the 3.x diarization API — "
+        "install it with:  pip install 'pyannote.audio>=3.1,<4'"
+    )
+
+
 @dataclass
 class SpeakerTurn:
     start_s: float
@@ -166,7 +180,9 @@ class PyannoteDiarizer(Diarizer):
         import numpy as np  # lazy
 
         pipeline = self._ensure()
-        diarization, embeddings = pipeline(str(audio_path), return_embeddings=True)
+        diarization, embeddings = _unpack_diarize(
+            pipeline(str(audio_path), return_embeddings=True)
+        )
 
         # `embeddings` is an (n_local_speakers, dim) array aligned to the sorted
         # local labels of the annotation.

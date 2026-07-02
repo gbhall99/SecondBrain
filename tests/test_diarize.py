@@ -1,7 +1,26 @@
 from pathlib import Path
 
-from secondbrain.pipeline.diarize import MockDiarizer, _load_pipeline, deterministic_embedding
+import pytest
+
+from secondbrain.pipeline.diarize import (
+    MockDiarizer,
+    _load_pipeline,
+    _unpack_diarize,
+    deterministic_embedding,
+)
 from secondbrain.speaker.attribution import best_overlap
+
+
+def test_unpack_diarize_tuple_ok():
+    assert _unpack_diarize(("annotation", "embeddings")) == ("annotation", "embeddings")
+
+
+def test_unpack_diarize_rejects_pyannote4_output():
+    class DiarizeOutput:  # what pyannote.audio 4.x returns (not a 2-tuple)
+        pass
+
+    with pytest.raises(RuntimeError, match="pyannote.audio>=3.1,<4"):
+        _unpack_diarize(DiarizeOutput())
 
 
 def test_load_pipeline_supports_both_token_kwargs():
