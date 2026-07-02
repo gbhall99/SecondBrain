@@ -24,14 +24,34 @@ elif [[ "$(uname -m)" != "arm64" ]]; then
 fi
 
 # --- 2. Python venv ---------------------------------------------------------
+# SecondBrain needs Python >= 3.11. macOS ships an older system python3 (e.g.
+# 3.9), so pick a suitable interpreter rather than assuming `python3` is new enough.
+py_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' 2>/dev/null; }
+
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  warn "python3 not found. Install Python 3.11+ (e.g. \`brew install python@3.12\`) and re-run."
-  exit 1
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1 || ! py_ok "${PYTHON_BIN}"; then
+  found=""
+  for cand in python3.13 python3.12 python3.11; do
+    if command -v "${cand}" >/dev/null 2>&1 && py_ok "${cand}"; then found="${cand}"; break; fi
+  done
+  if [[ -n "${found}" ]]; then
+    PYTHON_BIN="${found}"
+  else
+    have="$(command -v "${PYTHON_BIN}" >/dev/null 2>&1 && "${PYTHON_BIN}" -V 2>&1 || echo 'none found')"
+    warn "SecondBrain needs Python 3.11+ (have: ${have})."
+    warn "Install it and re-run:  brew install python@3.12  &&  ./deploy/install.sh"
+    exit 1
+  fi
 fi
 PYVER="$(${PYTHON_BIN} -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 say "Using ${PYTHON_BIN} (Python ${PYVER})"
 
+# Recreate the venv if it's missing or was built with an unsuitable Python (self-heal
+# a stale .venv left by an earlier run on the system python).
+if [[ -d .venv ]] && ! py_ok .venv/bin/python; then
+  warn "Existing .venv uses an unsupported Python; recreating with ${PYTHON_BIN}."
+  rm -rf .venv
+fi
 if [[ ! -d .venv ]]; then
   say "Creating virtualenv at .venv"
   "${PYTHON_BIN}" -m venv .venv

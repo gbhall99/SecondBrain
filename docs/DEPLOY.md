@@ -11,7 +11,9 @@ LLM all run on the machine.
 ## 0. Prerequisites
 - Apple Silicon Mac (M-series) running macOS.
 - [Homebrew](https://brew.sh) (for PortAudio and, optionally, Ollama).
-- Python 3.11+ (`brew install python@3.12`).
+- Python 3.11+ (`brew install python@3.12`). The macOS **system** `python3` (3.9)
+  is too old — the installer auto-detects a `python3.11`/`3.12`/`3.13` on your PATH,
+  and tells you to `brew install python@3.12` if none is found.
 
 ## 1. One-command install
 ```bash
