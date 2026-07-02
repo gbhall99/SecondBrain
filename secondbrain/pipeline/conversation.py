@@ -41,7 +41,7 @@ def assign_chunk(
 
     conv = _open_conversation(conn)
     if conv is not None and _gap_exceeded(conn, conv, af["started_at"], settings):
-        close_conversation(conn, conv["id"])
+        close_conversation(conn, conv["id"], settings)
         conv = None
 
     if conv is None:
@@ -54,9 +54,13 @@ def assign_chunk(
         conv_id = int(conv["id"])
 
     conn.execute("UPDATE audio_files SET conversation_id=? WHERE id=?", (conv_id, audio_file_id))
+    # Use MIN/MAX so a retried (out-of-order) chunk widens the span correctly
+    # rather than rewriting ended_at backward or leaving started_at > ended_at.
     conn.execute(
-        "UPDATE conversations SET chunk_count = chunk_count + 1, ended_at=? WHERE id=?",
-        (af["ended_at"] or af["started_at"], conv_id),
+        "UPDATE conversations SET chunk_count = chunk_count + 1, "
+        "started_at = MIN(started_at, ?), "
+        "ended_at = MAX(COALESCE(ended_at, ''), ?) WHERE id=?",
+        (af["started_at"], af["ended_at"] or af["started_at"], conv_id),
     )
     return conv_id
 
@@ -73,14 +77,55 @@ def _gap_exceeded(
     return gap > timedelta(minutes=settings.conversation.max_gap_minutes)
 
 
-def close_conversation(conn: sqlite3.Connection, conversation_id: int) -> int | None:
-    """Mark a conversation closed and enqueue its diarization job."""
+def close_conversation(
+    conn: sqlite3.Connection, conversation_id: int, settings: Settings | None = None
+) -> int | None:
+    """Mark a conversation closed and enqueue its diarization job.
+
+    A sub-``min_conversation_seconds`` conversation (e.g. a short partial tail chunk
+    in an idle period) is closed WITHOUT a heavy diarize+extract job — it's marked
+    done and its raw audio gets a normal retention deadline. Returns the enqueued
+    job id, or None when diarization was skipped / the conversation was already closed.
+    """
+    settings = settings or get_settings()
+    conv = conn.execute(
+        "SELECT started_at, ended_at FROM conversations WHERE id=? AND status='open'",
+        (conversation_id,),
+    ).fetchone()
+    if conv is None:
+        return None  # already closed / unknown
+
+    dur = _duration_s(conv["started_at"], conv["ended_at"])
+    if dur is not None and dur < settings.conversation.min_conversation_seconds:
+        # Too short to be worth diarizing: mark done and finalize retention directly.
+        from secondbrain.storage import retention
+
+        conn.execute(
+            "UPDATE conversations SET status='diarized', knowledge_status='extracted' WHERE id=?",
+            (conversation_id,),
+        )
+        conn.execute(
+            "UPDATE audio_files SET retention_delete_after=? "
+            "WHERE conversation_id=? AND status='transcribed'",
+            (retention.compute_delete_after(settings), conversation_id),
+        )
+        return None
+
     conn.execute(
         "UPDATE conversations SET status='closed' WHERE id=? AND status='open'", (conversation_id,)
     )
     return q.enqueue(
         conn, JOB_DIARIZE, {"conversation_id": conversation_id}, dedupe_key="conversation_id"
     )
+
+
+def _duration_s(started_at: str | None, ended_at: str | None) -> float | None:
+    if not started_at or not ended_at:
+        return None
+    try:
+        return (parse_iso(ended_at) - parse_iso(started_at)).total_seconds()
+    except ValueError:
+        return None
 
 
 def close_stale_conversations(conn: sqlite3.Connection, settings: Settings | None = None) -> int:
@@ -101,6 +146,6 @@ def close_stale_conversations(conn: sqlite3.Connection, settings: Settings | Non
         except ValueError:
             continue
         if gap > timedelta(minutes=settings.conversation.max_gap_minutes):
-            close_conversation(conn, conv["id"])
+            close_conversation(conn, conv["id"], settings)
             closed += 1
     return closed
