@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Graph</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 820px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; cursor: pointer; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; }
+    input[type=text] { flex: 1; padding: .6rem; border: 1px solid #8884; border-radius: 8px; }
+    button { padding: .6rem 1rem; border-radius: 8px; border: 1px solid #8884;
+             cursor: pointer; background: #8882; }
+    .node { border-bottom: 1px solid #8883; padding: .5rem 0; }
+    .edge { padding: .25rem 0 .25rem 1rem; font-size: .92rem; }
+    .meta { color: #888; font-size: .8rem; }
+    .tag { font-size: .75rem; background: #8882; border-radius: 999px; padding: .1rem .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Knowledge graph</h1>
+  <p class="meta"><a href="/">transcripts</a> · <a href="/speakers">speakers</a> ·
+     <a href="/chat">ask</a></p>
+
+  <form onsubmit="searchNodes(event)">
+    <input type="text" id="q" placeholder="Search people, projects, topics…" autofocus />
+    <button type="submit">Search</button>
+  </form>
+
+  <div id="results"></div>
+  <div id="detail"></div>
+
+  <script>
+    async function searchNodes(e) {
+      e.preventDefault();
+      const q = document.getElementById('q').value.trim();
+      if (!q) return;
+      const r = await fetch('/api/graph/search?q=' + encodeURIComponent(q));
+      const d = await r.json();
+      document.getElementById('detail').innerHTML = '';
+      document.getElementById('results').innerHTML = d.nodes.length
+        ? d.nodes.map(n => `<div class="node">
+             <a onclick="openNode(${n.id})">${escapeHtml(n.name)}</a>
+             <span class="tag">${n.type}</span>
+             <span class="meta">· ${n.edge_count} links</span></div>`).join('')
+        : '<p class="meta">No matching entities.</p>';
+    }
+    async function openNode(id) {
+      const r = await fetch('/api/graph/node/' + id);
+      const d = await r.json();
+      document.getElementById('detail').innerHTML =
+        `<h2>${escapeHtml(d.node.name)} <span class="tag">${d.node.type}</span></h2>` +
+        (d.edges.length ? d.edges.map(e => `<div class="edge">• ${escapeHtml(e.src_name)}
+            <b>${escapeHtml(e.predicate || e.kind)}</b>
+            ${escapeHtml(e.dst_name || e.object_text || '')}
+            ${e.due_date ? '<span class="meta">(due ' + e.due_date + ')</span>' : ''}</div>`).join('')
+          : '<p class="meta">No facts yet.</p>');
+    }
+    function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+  </script>
+</body>
+</html>

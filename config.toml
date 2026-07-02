@@ -54,3 +54,108 @@ embedding_model = "bge-small"
 [api]
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
+
+[security]
+# Auth + at-rest encryption (Phase 5). Off by default. To reach the UI over
+# Tailscale, either run `tailscale serve` to 127.0.0.1, or set api.host to the
+# tannet IP AND require_auth=true (the server refuses a non-loopback bind without
+# auth). Set the password with `sb auth set-password`.
+require_auth = false
+username = "owner"
+session_max_age_days = 14
+# SQLCipher database encryption. Needs `pip install -e ".[secure]"` and a
+# passphrase — put it in config.local.toml or the SB_SECURITY__DB_PASSPHRASE env.
+encrypt_db = false
+db_passphrase = ""
+
+[logging]
+level = "INFO"
+
+[tasks]
+# Goal decomposition, tasks, and the daily plan (Phase 6). Off by default.
+enabled = false
+daily_capacity_minutes = 240
+urgent_days = 2
+important_value = 4
+# Opt-in per-task web research. Local graph-RAG research is always available;
+# web research only runs when this is true AND you explicitly request it.
+web_research_enabled = false
+web_search_url = ""            # user-supplied search endpoint (e.g. SearXNG JSON)
+autonomy = "propose"          # propose (you approve) | auto
+
+[proactive]
+# Proactive engine (Phase 4): goals, nightly morning brief + weekly review,
+# commitment tracking, connection discovery, and (opt-in) candid coaching.
+# Disabled by default; enable on the Mac once extraction is running.
+enabled = false
+event_triggers = false         # real-time nudges for urgent (same-day) commitments
+coaching_enabled = false       # candid, transcript-grounded team-member coaching
+digest_hour = 6                # local hour to generate the morning brief
+weekly_review_weekday = 0      # 0=Monday … 6=Sunday
+top_n = 5                      # max suggestions surfaced per day
+per_kind_cap = 2
+recent_days = 1
+lookback_days = 30
+connection_threshold = 0.78
+goal_link_threshold = 0.72
+due_soon_days = 3
+stale_goal_days = 14
+stale_days = 21
+confidence_floor = 0.4
+suppress_days = 30
+urgent_due_hours = 24
+
+[llm]
+# Local LLM for knowledge extraction + Q&A (Phase 3). Fully offline via Ollama.
+# Set backend = "ollama" and run `ollama serve` + pull the model on the Mac.
+backend = "mock"               # mock | ollama
+model = "llama3.1:8b-instruct"
+host = "http://127.0.0.1:11434"
+temperature = 0.0
+request_timeout_s = 120.0
+
+[extraction]
+# Knowledge graph + chat. Disabled by default; enable on the Mac once Ollama is up.
+enabled = false
+max_context_chars = 24000
+overlap_segments = 1
+entity_match_threshold = 0.82
+entity_review_threshold = 0.70
+chat_max_hops = 1
+chat_max_facts = 40
+chat_max_context_chars = 32000
+
+[conversation]
+# Ambient audio is continuous; we group consecutive chunks into "conversations"
+# before diarizing them as a whole. A silence/idle gap larger than this closes
+# the open conversation.
+max_gap_minutes = 5.0
+min_conversation_seconds = 5.0
+
+[diarization]
+# Speaker diarization + voice-profile learning (Phase 2). Fully local.
+# Disabled by default; enable on the Mac mini once set up (see `sb speaker setup`).
+enabled = false
+backend = "pyannote"           # pyannote | mock
+model = "pyannote/speaker-diarization-3.1"
+# pyannote 3.1 models are GATED on HuggingFace. One-time setup: accept the model
+# conditions while logged in, create a read token, and put it here in
+# config.local.toml (gitignored) or set HF_TOKEN / HUGGINGFACE_TOKEN. Leave blank
+# in this committed file.
+hf_token = ""
+embedding_dim = 256
+match_threshold = 0.70
+owner_match_threshold = 0.65
+centroid_update_threshold = 0.75
+cluster_distance_threshold = 0.30
+low_confidence_threshold = 0.5
+min_cluster_speech_s = 1.0
+# Phase 7 — voice-profile quality / self-correction
+exemplar_k = 3
+max_exemplars_per_speaker = 50
+reattribute_threshold = 0.80
+prune_min_confidence = 0.3
+overlap_flag = true
+segmentation_threshold = 0.5
+min_speakers = 0               # 0 = auto
+max_speakers = 0               # 0 = auto

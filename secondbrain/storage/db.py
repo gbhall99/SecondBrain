@@ -13,14 +13,66 @@ from secondbrain.storage.schema import apply_base_schema
 DbPath = Path | str | None
 
 
+def sqlcipher_available() -> bool:
+    """True if a SQLCipher Python driver is importable (the `secure` extra)."""
+    try:
+        import sqlcipher3  # type: ignore  # noqa: F401
+
+        return True
+    except ImportError:
+        try:
+            import pysqlcipher3.dbapi2  # type: ignore  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+
+def _sqlite_module(settings: Settings):
+    """Return the DBAPI module to use: SQLCipher when encryption is enabled,
+    else the stdlib sqlite3 (the CI/default path)."""
+    if not settings.security.encrypt_db:
+        return sqlite3
+    try:
+        import sqlcipher3.dbapi2 as mod  # type: ignore
+
+        return mod
+    except ImportError:
+        try:
+            import pysqlcipher3.dbapi2 as mod  # type: ignore
+
+            return mod
+        except ImportError as exc:
+            raise RuntimeError(
+                "security.encrypt_db is true but no SQLCipher driver is installed. "
+                "Install with: pip install -e '.[secure]'"
+            ) from exc
+
+
 def connect(db_path: DbPath = None, *, settings: Settings | None = None) -> sqlite3.Connection:
-    """Open a tuned SQLite connection (WAL, foreign keys, dict-like rows)."""
+    """Open a tuned SQLite connection (WAL, foreign keys, dict-like rows).
+
+    When ``security.encrypt_db`` is set, opens via SQLCipher and applies
+    ``PRAGMA key`` before any other statement.
+    """
     settings = settings or get_settings()
     path = Path(db_path) if db_path is not None else settings.db_path
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+    module = _sqlite_module(settings)
+    conn = module.connect(str(path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    if settings.security.encrypt_db:
+        passphrase = settings.security.db_passphrase
+        if not passphrase:
+            raise RuntimeError("security.encrypt_db is true but security.db_passphrase is empty")
+        try:
+            conn.execute("PRAGMA key = ?", (passphrase,))
+        except Exception:  # noqa: BLE001 - never surface the passphrase in a traceback
+            raise RuntimeError("SQLCipher key setup failed (check db_passphrase)") from None
+        # At-rest hygiene: v4 page format (encrypts the WAL too) + scrub freed pages.
+        conn.execute("PRAGMA cipher_compatibility = 4")
+        conn.execute("PRAGMA secure_delete = ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -45,6 +97,28 @@ def db_session(
         yield conn
     finally:
         conn.close()
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Group writes into one atomic unit (BEGIN IMMEDIATE / COMMIT / ROLLBACK).
+
+    Connections are opened in autocommit mode (``isolation_level=None``), so each
+    statement otherwise commits on its own; wrapping a multi-step write here makes
+    it all-or-nothing if an error or crash hits mid-sequence. Reentrant: if a
+    transaction is already active it yields without starting a nested one (SQLite
+    has none), so callers can wrap helpers that are also used standalone.
+    """
+    if conn.in_transaction:
+        yield conn
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:

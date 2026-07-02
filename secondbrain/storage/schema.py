@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0001_initial"
+SCHEMA_VERSION = "0007_perf_indexes"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -136,17 +136,399 @@ STATEMENTS: list[str] = [
 ]
 
 
+# --- Phase 2: diarization + speakers (migration 0002_speakers) ----------------
+# New tables/indices (idempotent CREATEs). Speaker embeddings are stored as
+# struct-packed float32 BLOBs (centroid on `speakers`, per-observation on
+# `speaker_observations`) and compared with cosine in Python — at single-user
+# scale this needs no sqlite-vec/ANN index and keeps the logic CI-testable.
+STATEMENTS_0002_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS conversations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at  TEXT,
+        ended_at    TEXT,
+        status      TEXT NOT NULL DEFAULT 'open',
+                    -- open | closed | diarizing | diarized | failed
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)",
+    """
+    CREATE TABLE IF NOT EXISTS speaker_observations (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        speaker_id      INTEGER REFERENCES speakers(id),
+        conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        audio_file_id   INTEGER REFERENCES audio_files(id) ON DELETE CASCADE,
+        start_offset_s  REAL,
+        end_offset_s    REAL,
+        start_at        TEXT,
+        confidence      REAL,
+        embedding       BLOB,            -- struct-packed float32 speaker embedding
+        created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_speaker_obs_speaker ON speaker_observations(speaker_id)",
+    "CREATE INDEX IF NOT EXISTS idx_segments_speaker ON transcript_segments(speaker_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audio_conversation ON audio_files(conversation_id)",
+]
+
+# Columns added to existing tables: (table, column_name, column_def). SQLite's
+# ADD COLUMN is not idempotent, so apply_base_schema guards via _safe_add_column;
+# the Alembic migration runs the raw ALTERs (clean DB at revision 0001).
+COLUMNS_0002: list[tuple[str, str, str]] = [
+    ("speakers", "kind", "TEXT NOT NULL DEFAULT 'unknown'"),  # owner|known|unknown
+    ("speakers", "display_label", "TEXT"),
+    ("speakers", "exemplar_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("speakers", "last_seen_at", "TEXT"),
+    ("speakers", "segment_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("speakers", "merged_into", "INTEGER"),
+    ("speakers", "centroid", "BLOB"),  # struct-packed float32 profile centroid
+    ("audio_files", "conversation_id", "INTEGER"),
+    ("transcript_segments", "speaker_confidence", "REAL"),
+]
+
+ALTERS_0002: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0002
+]
+
+
+# --- Phase 3: knowledge graph (migration 0003_knowledge) ----------------------
+STATEMENTS_0003_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_extractions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+        model           TEXT,
+        backend         TEXT,
+        chunk_index     INTEGER,
+        segment_id_low  INTEGER,
+        segment_id_high INTEGER,
+        raw_json        TEXT,
+        created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kg_nodes (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        type                 TEXT NOT NULL,   -- person|project|organization|topic|place
+        name                 TEXT NOT NULL,
+        normalized_name      TEXT,
+        display_label        TEXT,
+        speaker_id           INTEGER REFERENCES speakers(id),  -- Person ↔ voice link
+        embedding            BLOB,            -- struct-packed float32
+        confidence           REAL,
+        source_extraction_id INTEGER REFERENCES knowledge_extractions(id),
+        merged_into          INTEGER,
+        first_seen           TEXT,
+        last_seen            TEXT,
+        created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_nodes_type_name ON kg_nodes(type, normalized_name)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_nodes_speaker ON kg_nodes(speaker_id)",
+    """
+    CREATE TABLE IF NOT EXISTS kg_aliases (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id          INTEGER NOT NULL REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        alias            TEXT NOT NULL,
+        normalized_alias TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_aliases_norm ON kg_aliases(normalized_alias)",
+    """
+    CREATE TABLE IF NOT EXISTS kg_edges (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        src_node_id          INTEGER NOT NULL REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        dst_node_id          INTEGER REFERENCES kg_nodes(id) ON DELETE CASCADE,
+        predicate            TEXT,
+        kind                 TEXT NOT NULL,   -- fact|action_item|decision|idea|mention
+        object_text          TEXT,            -- literal object (date, free text)
+        due_date             TEXT,
+        confidence           REAL,
+        source_extraction_id INTEGER REFERENCES knowledge_extractions(id),
+        conversation_id      INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        source_segment_ids   TEXT,            -- JSON array of segment ids (citations)
+        superseded_by        INTEGER REFERENCES kg_edges(id),
+        valid                INTEGER NOT NULL DEFAULT 1,
+        first_seen           TEXT,
+        last_seen            TEXT,
+        created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_src ON kg_edges(src_node_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(dst_node_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_kind_valid ON kg_edges(kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_conversation ON kg_edges(conversation_id)",
+]
+
+COLUMNS_0003: list[tuple[str, str, str]] = [
+    ("conversations", "knowledge_status", "TEXT NOT NULL DEFAULT 'pending'"),
+]
+
+ALTERS_0003: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0003
+]
+
+
+# --- Phase 4: proactivity + goals (migration 0004_proactive) ------------------
+STATEMENTS_0004_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS goals (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        title            TEXT NOT NULL,
+        description      TEXT,
+        target_date      TEXT,
+        priority         INTEGER NOT NULL DEFAULT 2,   -- 1 high, 2 med, 3 low
+        status           TEXT NOT NULL DEFAULT 'active',  -- active|paused|done|dropped
+        embedding        BLOB,
+        last_progress_at TEXT,
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at       TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status)",
+    """
+    CREATE TABLE IF NOT EXISTS goal_links (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id    INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,           -- 'node' | 'edge'
+        ref_id     INTEGER NOT NULL,
+        relation   TEXT NOT NULL,           -- related|advances|contradicts
+        score      REAL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(goal_id, kind, ref_id, relation)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_goal_links_goal ON goal_links(goal_id)",
+    """
+    CREATE TABLE IF NOT EXISTS suggestions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        digest_date   TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        detail        TEXT,
+        payload       TEXT NOT NULL DEFAULT '{}',
+        citations     TEXT NOT NULL DEFAULT '[]',
+        importance    REAL NOT NULL DEFAULT 0,
+        confidence    REAL NOT NULL DEFAULT 0,
+        status        TEXT NOT NULL DEFAULT 'open',  -- open|dismissed|snoozed|done
+        snoozed_until TEXT,
+        goal_id       INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+        dedupe_hash   TEXT,
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_suggestions_date_status ON suggestions(digest_date, status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_suggestions_dedupe "
+    "ON suggestions(dedupe_hash, digest_date)",
+    """
+    CREATE TABLE IF NOT EXISTS suggestion_feedback (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        suggestion_id INTEGER REFERENCES suggestions(id) ON DELETE SET NULL,
+        dedupe_hash   TEXT,
+        kind          TEXT,
+        vote          TEXT,                  -- up|down
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_feedback_dedupe ON suggestion_feedback(dedupe_hash)",
+    """
+    CREATE TABLE IF NOT EXISTS digests (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        digest_date    TEXT NOT NULL,
+        kind           TEXT NOT NULL DEFAULT 'daily',  -- daily|weekly
+        summary_md     TEXT NOT NULL,
+        suggestion_ids TEXT NOT NULL DEFAULT '[]',
+        model          TEXT,
+        backend        TEXT,
+        created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(digest_date, kind)
+    )
+    """,
+]
+
+COLUMNS_0004: list[tuple[str, str, str]] = []  # all-new tables; kept for parity
+
+ALTERS_0004: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0004
+]
+
+# --- Phase 6: tasks + daily planning (migration 0005_tasks) -------------------
+STATEMENTS_0005_CREATE: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS tasks (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id          INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+        parent_task_id   INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+        title            TEXT NOT NULL,
+        detail           TEXT,
+        status           TEXT NOT NULL DEFAULT 'backlog',
+                         -- backlog|next|scheduled|in_progress|blocked|done|dropped
+        estimate_minutes INTEGER,
+        due_date         TEXT,
+        scheduled_for    TEXT,                 -- YYYY-MM-DD when planned into a day
+        effort           INTEGER NOT NULL DEFAULT 3,   -- 1..5
+        value            INTEGER NOT NULL DEFAULT 3,   -- 1..5
+        energy           TEXT,                 -- deep|quick|errand|call|…
+        source           TEXT NOT NULL DEFAULT 'manual',  -- manual|ai|conversation
+        source_edge_id   INTEGER REFERENCES kg_edges(id) ON DELETE SET NULL,
+        position         INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at       TEXT,
+        completed_at     TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(scheduled_for)",
+    """
+    CREATE TABLE IF NOT EXISTS task_deps (
+        task_id            INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        depends_on_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        PRIMARY KEY (task_id, depends_on_task_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_research (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        query       TEXT,
+        backend     TEXT,                 -- local|web|mock
+        summary_md  TEXT,
+        sources     TEXT NOT NULL DEFAULT '[]',   -- JSON array of {title,ref}
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_research_task ON task_research(task_id)",
+    """
+    CREATE TABLE IF NOT EXISTS day_plans (
+        date             TEXT PRIMARY KEY,
+        capacity_minutes INTEGER NOT NULL DEFAULT 240,
+        status           TEXT NOT NULL DEFAULT 'proposed',  -- proposed|accepted
+        task_ids         TEXT NOT NULL DEFAULT '[]',        -- JSON, ordered
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+]
+
+COLUMNS_0005: list[tuple[str, str, str]] = []
+
+ALTERS_0005: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0005
+]
+
+# --- Phase 7: speaker-quality / self-correction (migration 0006) --------------
+STATEMENTS_0006_CREATE: list[str] = []
+
+COLUMNS_0006: list[tuple[str, str, str]] = [
+    ("speaker_observations", "duration_s", "REAL"),
+    ("speaker_observations", "quality", "REAL"),
+    ("speaker_observations", "pruned", "INTEGER NOT NULL DEFAULT 0"),
+    ("speaker_observations", "source", "TEXT NOT NULL DEFAULT 'auto'"),
+    ("transcript_segments", "observation_id", "INTEGER"),
+    ("transcript_segments", "speaker_locked", "INTEGER NOT NULL DEFAULT 0"),
+    ("transcript_segments", "speaker_source", "TEXT"),
+]
+
+ALTERS_0006: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0006
+]
+
+
+# --- Phase 9: performance indexes (migration 0007) ----------------------------
+# Composite indexes for hot interactive read paths (project/person dossiers,
+# timeline, opt-out filtering at scale). All additive + IF NOT EXISTS.
+STATEMENTS_0007_CREATE: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_goal_links_kind_ref ON goal_links(kind, ref_id)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_src_kind_valid "
+    "ON kg_edges(src_node_id, kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_edges_dst_kind_valid "
+    "ON kg_edges(dst_node_id, kind, valid)",
+    "CREATE INDEX IF NOT EXISTS idx_segments_speaker_conf "
+    "ON transcript_segments(speaker_id, speaker_confidence)",
+]
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
+
+
+def _safe_add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def apply_phase2_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0002 additions idempotently (ADD COLUMNs then dependent creates)."""
+    for table, column, ddl in COLUMNS_0002:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0002_CREATE:  # some indices reference the new columns
+        conn.execute(stmt)
+
+
+def apply_phase3_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0003 additions idempotently (ADD COLUMNs then creates)."""
+    for table, column, ddl in COLUMNS_0003:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0003_CREATE:
+        conn.execute(stmt)
+
+
+def apply_phase4_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0004 additions idempotently (all-new tables)."""
+    for table, column, ddl in COLUMNS_0004:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0004_CREATE:
+        conn.execute(stmt)
+
+
+def apply_phase5_schema(conn: sqlite3.Connection) -> None:
+    """Phase 5 added no tables (auth lives in app_state); kept for symmetry."""
+
+
+def apply_phase6_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0005 additions idempotently (all-new task tables)."""
+    for table, column, ddl in COLUMNS_0005:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0005_CREATE:
+        conn.execute(stmt)
+
+
+def apply_phase7_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0006 additions idempotently (columns on existing tables)."""
+    for table, column, ddl in COLUMNS_0006:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0006_CREATE:
+        conn.execute(stmt)
+
+
+def apply_phase9_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0007 additions idempotently (performance indexes only)."""
+    for stmt in STATEMENTS_0007_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
     Used directly by tests and ``init_db``. Production deployments may instead run
-    ``alembic upgrade head`` (the initial migration runs the same STATEMENTS).
+    ``alembic upgrade head`` (the migrations run the same STATEMENTS).
     Both paths stamp ``alembic_version`` so they interoperate.
     """
     for stmt in STATEMENTS:
         conn.execute(stmt)
+    apply_phase2_schema(conn)
+    apply_phase3_schema(conn)
+    apply_phase4_schema(conn)
+    apply_phase6_schema(conn)
+    apply_phase7_schema(conn)
+    apply_phase9_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:
         conn.execute("INSERT INTO alembic_version(version_num) VALUES (?)", (SCHEMA_VERSION,))
+    else:
+        conn.execute("UPDATE alembic_version SET version_num=?", (SCHEMA_VERSION,))
     conn.commit()

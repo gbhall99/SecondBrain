@@ -1,0 +1,188 @@
+"""Health checks: `sb doctor` preflight + the /health endpoint.
+
+Every check is best-effort and degradable — a failing dependency yields an
+``ok=False`` Check, never an exception — so this is safe to call anywhere and
+testable with mocked backends.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+
+from secondbrain.config import Settings, get_settings
+from secondbrain.storage import retention, state
+from secondbrain.storage.schema import SCHEMA_VERSION
+
+
+@dataclass
+class Check:
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+def _migration(conn: sqlite3.Connection) -> Check:
+    try:
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        ver = row["version_num"] if row else None
+        return Check("migrations", ver == SCHEMA_VERSION, f"{ver} (head {SCHEMA_VERSION})")
+    except sqlite3.Error as exc:
+        return Check("migrations", False, str(exc))
+
+
+def _disk(settings: Settings) -> Check:
+    try:
+        free = round(retention.free_disk_gb(settings.data_path), 2)
+        return Check("disk", retention.disk_ok(settings), f"{free} GB free")
+    except OSError as exc:
+        return Check("disk", False, str(exc))
+
+
+def _counts(conn: sqlite3.Connection) -> Check:
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM transcript_segments").fetchone()["n"]
+        spk = conn.execute("SELECT COUNT(*) AS n FROM speakers").fetchone()["n"]
+        return Check("database", True, f"{n} segments, {spk} speakers")
+    except sqlite3.Error as exc:
+        return Check("database", False, str(exc))
+
+
+def _llm(settings: Settings) -> Check:
+    if settings.llm.backend != "ollama":
+        return Check("llm", True, f"backend={settings.llm.backend}")
+    try:
+        import httpx
+
+        r = httpx.get(f"{settings.llm.host}/api/tags", timeout=2.0)
+        return Check("llm", r.status_code == 200, f"ollama {r.status_code}")
+    except Exception as exc:  # noqa: BLE001 - reachability is best-effort
+        return Check("llm", False, f"ollama unreachable: {exc}")
+
+
+def _encryption(settings: Settings) -> Check:
+    if not settings.security.encrypt_db:
+        return Check("encryption", True, "disabled (FileVault recommended)")
+    from secondbrain.storage import db
+
+    has_driver = db.sqlcipher_available()
+    has_pass = bool(settings.security.db_passphrase)
+    return Check("encryption", has_driver and has_pass,
+                 f"sqlcipher={'ok' if has_driver else 'missing'}, "
+                 f"passphrase={'set' if has_pass else 'missing'}")
+
+
+def _backups(settings: Settings) -> Check:
+    """Encourage backups; warn only if existing backups have gone stale (>30d)."""
+    from datetime import UTC, datetime
+
+    from secondbrain.storage import backup
+
+    snaps = backup.list_backups(settings)
+    if not snaps:
+        return Check("backups", True, "none yet — run `sb backup`")
+    newest = snaps[0]
+    try:
+        age_days = (datetime.now(UTC) - datetime.fromisoformat(newest["modified"])).days
+    except ValueError:
+        return Check("backups", True, f"{len(snaps)} snapshot(s)")
+    ok = age_days <= 30
+    return Check("backups", ok, f"{len(snaps)} snapshot(s), newest {age_days}d ago")
+
+
+def _secrets() -> Check:
+    """Warn if a secret was placed in the version-controlled config.toml."""
+    from secondbrain.config import committed_secrets
+
+    leaked = committed_secrets()
+    if leaked:
+        return Check(
+            "secrets", False,
+            "in committed config.toml: " + ", ".join(leaked)
+            + " (move to config.local.toml or env)",
+        )
+    return Check("secrets", True, "no secrets in committed config.toml")
+
+
+def _recording(conn: sqlite3.Connection, settings: Settings) -> Check:
+    paused = state.is_paused(conn, default=settings.consent.paused)
+    on = settings.consent.recording_enabled and not paused
+    return Check("recording", True, "on" if on else "paused/off")
+
+
+def _microphone(settings: Settings) -> Check:
+    """Best-effort capture readiness: is there a usable input device?
+
+    Surfaces the silent-failure case where the daemon's capture loop crash-loops
+    because no mic is available or macOS Microphone (TCC) permission was denied.
+    Degradable: never raises; on dev/CI without the audio extra it passes.
+    """
+    try:
+        from secondbrain.capture.devices import list_input_devices, resolve_device
+    except ImportError:
+        return Check("microphone", True, "audio extra not installed")
+    try:
+        devices = list_input_devices()
+    except Exception as exc:  # noqa: BLE001 - PortAudio/CoreAudio best-effort
+        return Check("microphone", True, f"could not enumerate devices: {exc}")
+    if not devices:
+        return Check(
+            "microphone", False,
+            "no input devices — check System Settings → Privacy & Security → Microphone",
+        )
+    name = settings.capture.input_device
+    if name and resolve_device(name) is None:
+        return Check("microphone", False, f"device {name!r} not found (run `sb devices`)")
+    detail = f"{len(devices)} input device(s)" + (f", using {name!r}" if name else ", default")
+    return Check("microphone", True, detail)
+
+
+def _daemon(conn: sqlite3.Connection) -> Check:
+    """Report whether the daemon's loops are alive (via their heartbeats)."""
+    from datetime import UTC, datetime
+
+    from secondbrain.storage.models import parse_iso
+
+    beats = {
+        name: state.get_state(conn, f"heartbeat:{name}") for name in ("worker", "maintenance")
+    }
+    if not any(beats.values()):
+        return Check("daemon", True, "no heartbeat yet (daemon may not be running)")
+    now = datetime.now(UTC)
+    stale = []
+    for name, ts in beats.items():
+        if ts is None:
+            stale.append(f"{name}:missing")
+            continue
+        try:
+            age = (now - parse_iso(ts)).total_seconds()
+        except ValueError:
+            continue
+        if age > 7200:  # > 2h since last heartbeat → likely dead loop
+            stale.append(f"{name}:{int(age)}s")
+    return Check("daemon", not stale, "ok" if not stale else "stale " + ", ".join(stale))
+
+
+def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> list[Check]:
+    settings = settings or get_settings()
+    return [
+        _migration(conn),
+        _disk(settings),
+        _counts(conn),
+        _llm(settings),
+        _encryption(settings),
+        _secrets(),
+        _backups(settings),
+        _microphone(settings),
+        _recording(conn, settings),
+        _daemon(conn),
+    ]
+
+
+def summary(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
+    checks = run_checks(conn, settings)
+    return {
+        "status": "ok" if all(c.ok for c in checks) else "degraded",
+        "version": SCHEMA_VERSION,
+        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+    }

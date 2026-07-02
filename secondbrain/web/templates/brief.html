@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Morning brief</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 820px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.55; }
+    a { color: inherit; }
+    .meta { color: #888; font-size: .85rem; }
+    #summary { white-space: pre-wrap; border: 1px solid #8884; border-radius: 10px;
+               padding: 1rem; margin: 1rem 0; }
+    .sug { border-bottom: 1px solid #8883; padding: .6rem 0; }
+    .sug .k { font-size: .7rem; background: #8882; border-radius: 999px; padding: .1rem .5rem; }
+    .acts button { font-size: .8rem; padding: .25rem .5rem; margin-right: .3rem; }
+    button { border-radius: 8px; border: 1px solid #8884; cursor: pointer; background: #8882; }
+  </style>
+</head>
+<body>
+  <h1>Morning brief</h1>
+  <p class="meta"><a href="/">transcripts</a> · <a href="/goals">goals</a> ·
+     <a href="/chat">ask</a> · <a href="/graph">graph</a>
+     · <button onclick="regen()">Regenerate</button></p>
+
+  <div id="summary">{{ (digest.summary_md if digest else "No brief yet — click Regenerate.") }}</div>
+
+  <h2>Items ({{ suggestions|length }})</h2>
+  {% for s in suggestions %}
+    <div class="sug" id="sug-{{ s.id }}">
+      <span class="k">{{ s.kind }}</span> <strong>{{ s.title }}</strong>
+      <div class="meta">{{ s.detail }} · importance {{ '%.2f'|format(s.importance) }}</div>
+      <div class="acts">
+        <button onclick="act({{ s.id }}, 'done')">Done</button>
+        <button onclick="act({{ s.id }}, 'dismiss')">Dismiss</button>
+        <button onclick="act({{ s.id }}, 'snooze')">Snooze kind</button>
+        <button onclick="act({{ s.id }}, 'up')">👍</button>
+        <button onclick="act({{ s.id }}, 'down')">👎</button>
+      </div>
+    </div>
+  {% endfor %}
+
+  <script>
+    async function act(id, action) {
+      await fetch(`/api/suggestions/${id}/action`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action})
+      });
+      if (action !== 'up' && action !== 'down') document.getElementById('sug-' + id).remove();
+    }
+    async function regen() {
+      await fetch('/api/digest/generate', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kind: 'daily', force: true})
+      });
+      location.reload();
+    }
+  </script>
+</body>
+</html>

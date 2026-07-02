@@ -38,6 +38,96 @@ def test_fts_trigger_handles_delete(conn):
     assert rows == []
 
 
+def test_phase2_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"conversations", "speaker_observations"} <= tables
+    speaker_cols = {r["name"] for r in conn.execute("PRAGMA table_info(speakers)").fetchall()}
+    assert {"kind", "centroid", "merged_into", "segment_count"} <= speaker_cols
+    seg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(transcript_segments)").fetchall()}
+    assert "speaker_confidence" in seg_cols
+    af_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audio_files)").fetchall()}
+    assert "conversation_id" in af_cols
+
+
+def test_phase3_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"kg_nodes", "kg_aliases", "kg_edges", "knowledge_extractions"} <= tables
+    conv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+    assert "knowledge_status" in conv_cols
+
+
+def test_phase4_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"goals", "goal_links", "suggestions", "suggestion_feedback", "digests"} <= tables
+
+
+def test_phase6_schema_present(conn):
+    tables = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert {"tasks", "task_deps", "task_research", "day_plans"} <= tables
+
+
+def test_phase7_columns_present(conn):
+    obs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(speaker_observations)").fetchall()}
+    assert {"duration_s", "quality", "pruned", "source"} <= obs_cols
+    seg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(transcript_segments)").fetchall()}
+    assert {"observation_id", "speaker_locked", "speaker_source"} <= seg_cols
+
+
+def test_upgrade_from_old_db(tmp_path):
+    """Simulate an OLD (phase-1-only) DB upgrading to current via apply_base_schema."""
+
+    from secondbrain.storage.db import connect
+    from secondbrain.storage.schema import STATEMENTS, apply_base_schema
+
+    db = tmp_path / "old.db"
+    c = connect(db)
+    for stmt in STATEMENTS:  # only the phase-1 tables
+        c.execute(stmt)
+    c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+    c.execute("INSERT INTO alembic_version VALUES ('0001_initial')")
+    c.commit()
+    # upgrade to current
+    apply_base_schema(c)
+    tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_perf_indexes"
+    c.close()
+
+
+def test_perf_indexes_present(conn):
+    names = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    }
+    assert {
+        "idx_goal_links_kind_ref",
+        "idx_kg_edges_src_kind_valid",
+        "idx_kg_edges_dst_kind_valid",
+        "idx_segments_speaker_conf",
+    } <= names
+
+
+def test_apply_base_schema_is_idempotent(conn):
+    # second application must not raise on the non-idempotent ADD COLUMNs
+    from secondbrain.storage.schema import apply_base_schema
+
+    apply_base_schema(conn)
+    ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
+    assert ver == "0007_perf_indexes"
+
+
 def test_pause_state_roundtrip(conn):
     assert state.is_paused(conn, default=False) is False
     state.set_paused(conn, True)

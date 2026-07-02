@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the SecondBrain menu bar app (recording indicator + pause).
+
+  1. Edit the paths below (REPLACE __REPO__ and __PYTHON__), or let
+     `sb deploy launchd` (with the include-menubar flag) fill them in for you.
+  2. Copy to ~/Library/LaunchAgents/com.secondbrain.menubar.plist
+  3. launchctl load ~/Library/LaunchAgents/com.secondbrain.menubar.plist
+
+  Requires the `mac` extra (rumps): `pip install -e ".[mac]"`. Unlike the daemon
+  and web agents, the menu bar app needs a logged-in GUI (Aqua) session, so it is
+  NOT marked as a Background ProcessType — load it as your user, while logged in.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.secondbrain.menubar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>-m</string>
+        <string>secondbrain.menubar.app</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/menubar.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/menubar.err.log</string>
+</dict>
+</plist>

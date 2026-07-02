@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Sign in</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 360px;
+           margin: 12vh auto; padding: 1.5rem; }
+    form { display: grid; gap: .7rem; }
+    input { padding: .6rem; border: 1px solid #8884; border-radius: 8px; font: inherit; }
+    button { padding: .6rem; border-radius: 8px; border: 1px solid #8884; cursor: pointer;
+             background: #8882; }
+    .err { color: #d33; font-size: .9rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <h1>SecondBrain</h1>
+  <form onsubmit="login(event)">
+    <input type="text" id="username" placeholder="Username" autocomplete="username" autofocus />
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    async function login(e) {
+      e.preventDefault();
+      const r = await fetch('/login', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: username.value, password: password.value})
+      });
+      if (r.ok) { location.href = '/'; }
+      else { document.getElementById('err').textContent = 'Invalid credentials'; }
+    }
+  </script>
+</body>
+</html>

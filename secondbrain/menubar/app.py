@@ -32,6 +32,7 @@ def run() -> None:
                 self.status_item,
                 None,
                 self.toggle_item,
+                rumps.MenuItem("Today's brief", callback=self.on_brief),
                 rumps.MenuItem("Open dashboard", callback=self.on_open),
             ]
 
@@ -45,9 +46,11 @@ def run() -> None:
             recording = st["recording"]
             self.title = REC_ON if recording else REC_OFF
             self.toggle_item.title = "Pause recording" if recording else "Resume recording"
+            briefs = st.get("digest_count_today", 0)
             self.status_item.title = (
                 f"Today: {st['segments_today']} · Queue: "
                 f"{st['jobs'].get('pending', 0)} · {st['disk_free_gb']} GB free"
+                + (f" · {briefs} briefs" if briefs else "")
             )
 
         def on_toggle(self, _):
@@ -58,6 +61,9 @@ def run() -> None:
 
         def on_open(self, _):
             webbrowser.open(f"http://{settings.api.host}:{settings.api.port}/")
+
+        def on_brief(self, _):
+            webbrowser.open(f"http://{settings.api.host}:{settings.api.port}/brief")
 
     SecondBrainBar().run()
 

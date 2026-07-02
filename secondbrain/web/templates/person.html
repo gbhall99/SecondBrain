@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}SecondBrain — {{ d.label }}{% endblock %}
+{% block style %}
+    .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat { min-width: 7rem; }
+    .stat b { display: block; font-size: 1.3rem; }
+    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #aaa; }
+{% endblock %}
+{% block content %}
+  <h1>{{ d.label }}{% if d.is_owner %} <span class="meta">(you)</span>{% endif %}</h1>
+  <p class="meta">{{ d.kind }}
+    {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}
+    {% if d.opted_out %}· <strong>opted out</strong> (content hidden){% endif %}
+  </p>
+
+  <div class="card grid">
+    <div class="stat"><b>{{ d.interactions.conversations }}</b>conversations</div>
+    <div class="stat"><b>{{ d.interactions.segments }}</b>segments</div>
+    <div class="stat"><b>{{ d.interactions.talk_minutes }}</b>talk minutes</div>
+    <div class="stat"><b>{{ d.profile.exemplar_count }}</b>voice exemplars</div>
+  </div>
+  <p class="meta">First seen {{ d.interactions.first_seen or "—" }} ·
+     last seen {{ d.interactions.last_seen or "—" }}
+     {% if not d.profile.voice_profile %}· no voice profile yet{% endif %}</p>
+
+  {% if d.facts %}
+  <h2>Known facts</h2>
+  {% for f in d.facts %}
+    <div class="card">{{ f.predicate or "—" }}: {{ f.object_text }}
+      <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}%)</span></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.commitments.owed_by or d.commitments.owed_to %}
+  <h2>Commitments</h2>
+  {% for c in d.commitments.owed_by %}
+    <div class="card">⬆ owes: {{ c.object_text }}{% if c.due_date %}
+      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
+  {% endfor %}
+  {% for c in d.commitments.owed_to %}
+    <div class="card">⬇ owed to them: {{ c.object_text }}{% if c.due_date %}
+      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.connections %}
+  <h2>Connections</h2>
+  <p>{% for c in d.connections %}<a class="pill" href="/person/{{ c.speaker_id }}">{{ c.label }}
+     ({{ c.shared_conversations }})</a>{% endfor %}</p>
+  {% endif %}
+
+  {% if d.recent_quotes %}
+  <h2>Recent quotes</h2>
+  {% for q in d.recent_quotes %}
+    <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
+  {% endfor %}
+  {% endif %}
+{% endblock %}

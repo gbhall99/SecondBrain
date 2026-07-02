@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}SecondBrain — Timeline {{ day }}{% endblock %}
+{% block style %}
+    .conv { border-left: 3px solid #8886; padding: .2rem 0 .2rem 1rem; margin: 1rem 0; }
+    .seg { margin: .15rem 0; }
+    .seg .who { font-weight: 600; }
+    .extractions { background: #8881; border-radius: 8px; padding: .5rem .8rem; margin: .5rem 0; }
+    .kind { text-transform: capitalize; color: #888; font-size: .8rem; }
+{% endblock %}
+{% block content %}
+  <h1>Timeline · {{ day }}</h1>
+  {% if not blocks %}<p class="meta">Nothing recorded for this day.</p>{% endif %}
+  {% for b in blocks %}
+  <div class="conv">
+    <p class="meta">{{ (b.started_at or '')[11:19] }} · {{ b.participants | join(", ") }}</p>
+    {% if b.extractions %}
+    <div class="extractions">
+      {% for kind, items in b.extractions.items() %}
+        <div><span class="kind">{{ kind }}</span>
+          {% for it in items %}<div>• {{ it.object_text or it.predicate }}</div>{% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% for s in b.segments %}
+      <div class="seg"><span class="who">{{ s.speaker }}</span>
+        <span class="meta">{{ (s.start_at or '')[11:19] }}</span> — {{ s.text }}</div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+{% endblock %}

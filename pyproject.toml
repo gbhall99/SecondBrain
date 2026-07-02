@@ -34,9 +34,15 @@ ml = [
     "mlx-whisper>=0.4; platform_system == 'Darwin'",
     "parakeet-mlx>=0.2; platform_system == 'Darwin'",
     "sqlite-vec>=0.1.6",
+    "sentence-transformers>=2.7",
+    "pyannote.audio>=3.1",
+    "torch>=2.2",
 ]
 mac = [
     "rumps>=0.4.0; platform_system == 'Darwin'",
+]
+secure = [
+    "sqlcipher3-binary>=0.5",  # SQLCipher driver for at-rest DB encryption
 ]
 dev = [
     "pytest>=8.0",
@@ -55,9 +61,15 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "PIE", "RET"]
 ignore = ["B008"]  # typer/fastapi use function calls in defaults by design
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]  # long assert/setup lines are fine in tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: real-backend tests (Ollama/pyannote/MLX); opt-in via SB_SLOW=1, nightly CI only",
+]

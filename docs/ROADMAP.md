@@ -15,41 +15,103 @@ guardrails) and three interfaces (CLI, local web UI, menu bar).
 
 **Outcome:** a private, searchable record of everything said in your day.
 
-## Phase 2 — Diarization & speaker identity
-- `pyannote.audio` 3.1 diarization; align transcript words ↔ speaker turns
-  (populate `transcript_segments.speaker_id`).
-- Owner voice enrollment; speaker-embedding store (sqlite-vec).
-- Auto-match recurring voices; nightly clustering of unknown speakers; a UI
-  labeling queue ("who is this?") with retroactive relabeling.
-- Enforce the per-speaker opt-out from `[consent].speaker_opt_out`.
+## ✅ Phase 2 — Diarization & speaker identity (shipped)
+- `pyannote.audio` 3.1 **conversation-level** diarization; align speaker turns
+  onto transcript segments by max overlap (populate `transcript_segments.speaker_id`
+  + `speaker_confidence`).
+- Owner enrollment (guided recording **and** label-from-history); speaker
+  embeddings stored as BLOBs, matched with cosine to a global registry.
+- Auto-match recurring voices above a threshold; nightly clustering of unknown
+  speakers; a web "Who is this?" labeling queue with sample-clip playback and
+  retroactive relabeling; `sb speaker` CLI.
+- Enforce per-speaker opt-out (redaction) from `[consent].speaker_opt_out`.
+- Raw-audio retention deferred until a conversation is diarized.
 
 **Outcome:** transcripts attributed to named people; voices learned over time.
 
-## Phase 3 — Knowledge extraction & graph (local LLM)
-- Conversation segmentation (group the continuous stream into discrete convos).
-- Local LLM (Ollama / MLX, e.g. Qwen) structured extraction: people, facts about
-  people, projects, ideas, decisions, action items.
-- Entity resolution + graph upsert with **provenance + confidence** into SQLite,
-  plus an embedded graph projection (e.g. LadybugDB) for multi-hop queries.
-- Graph-RAG chat: `sb ask "what did Dana say about Atlas?"` with citations.
+## ✅ Phase 3 — Knowledge extraction & graph (local LLM) (shipped)
+- Per-conversation extraction (after diarization) via a local LLM (**Ollama**,
+  schema-constrained JSON), behind an interface with a deterministic mock for CI.
+- Structured extraction: people, projects, orgs, topics, facts about people,
+  action items/commitments, decisions, ideas — each with `source_segment_ids`
+  provenance + confidence; low-confidence speaker attributions are downgraded to
+  'mention' (never asserted as hard facts).
+- Entity resolution (normalized-name + embedding cosine + LLM disambiguation,
+  reusing the speaker-registry helpers); Person nodes linked to `speakers`.
+- **Pure-SQLite** graph (`kg_nodes`/`kg_aliases`/`kg_edges`) with provenance and
+  **fact versioning** (superseded, not overwritten); merge mirrors speaker merge.
+- Graph-RAG chat: `sb ask` + web `/chat` answer **grounded with citations**, and
+  may add clearly-labeled general knowledge ("grounded + general"); web `/graph`
+  browser. Opted-out/redacted speech never enters the graph.
 
 **Outcome:** the actual "second brain" — ask grounded questions; browse your world.
 
-## Phase 4 — Proactivity & goals
-- Goals as first-class entities; goal-aware assistance.
-- Nightly digest (local LLM): connection/interlink discovery, commitment
-  tracking (yours and others'), goal alignment, gentle team-member coaching.
-- Importance ranking + feedback loop for noise control (one curated brief, not a
-  stream of pings).
+## ✅ Phase 4 — Proactivity & goals (shipped)
+- Goals subsystem (CRUD + auto-linking to the graph by embedding/keyword);
+  goal-aware engine.
+- Deterministic detectors (commitments both directions, connections, goal
+  alignment, staleness) + opt-in **candid** LLM coaching; the LLM only synthesizes
+  the brief prose.
+- Nightly **morning brief** + **weekly review**; sparse real-time nudges for
+  urgent commitments.
+- Noise control: importance ranking, daily/per-kind caps, confidence floor,
+  snooze-a-kind, thumbs up/down with local per-kind weighting, cross-day dedupe.
+- Surfaces: web `/brief` + `/goals`, menu-bar digest count, `sb digest`/`sb goals`.
 
 **Outcome:** a morning brief and proactive nudges that make you more effective.
 
-## Phase 5 — Hardening & remote access
-- Better overlap handling; profile-quality improvements; backup/export.
-- **Tailscale-secured** remote access to the local web UI as the
-  privacy-preserving "from anywhere" path. (Native Telegram chat would route data
-  through Telegram's cloud, breaking the local-only guarantee — explicit opt-in
-  only.)
+## ✅ Phase 5 — Hardening: secure remote access, encryption, health (shipped)
+- **Auth**: username/password with a stdlib HMAC-signed session cookie; loopback
+  exempt; OFF by default. `sb auth set-password`.
+- **Safe binding**: the server refuses a non-loopback bind without auth (fail
+  closed). **Tailscale-secured** remote access is the "from anywhere" path
+  (`tailscale serve` to 127.0.0.1, or tailnet bind + require_auth).
+- **Encryption at rest**: optional SQLCipher (`[secure]` extra + passphrase);
+  otherwise rely on FileVault.
+- **Health/observability**: `GET /health` + `sb doctor` (migrations, disk,
+  backends, encryption, recording) + structured logging.
+
+**Outcome:** safe to run daily and reach securely from anywhere.
+
+## ✅ Phase 6 — Goals as an advanced to-do list (shipped)
+- AI **goal decomposition** into a milestones→tasks tree (propose → you approve).
+- **Tasks** with estimates/effort/value/energy, dependencies + readiness, and
+  one-tap **promotion of conversation action items** into tasks.
+- **Prioritisation matrix**: Eisenhower quadrants + a weighted score; a daily
+  **planner** fits ready tasks into your capacity → a Today plan you accept.
+- **Task research**: local graph-RAG by default; **opt-in web research** (gated).
+- Surfaces: `/tasks` web board, `sb task` / `sb plan` / `sb decompose`.
+
+**Outcome:** goals become a prioritised, AI-supported, day-by-day action system.
+
+## ✅ Phase 7 — Diarization & voice-profile quality (shipped)
+- **Exemplar-aware matching**: best of {centroid, k-nearest stored exemplars};
+  centroid fallback preserves prior behaviour.
+- **Exemplar management**: capped, low-quality pruning + centroid recompute.
+- **Re-attribution**: on-demand + nightly relabel of unknown/low-confidence,
+  non-locked segments that now clear a HIGH bar (never overwrites confirmed labels).
+- **Correction loop**: fix a line's speaker (web `/day` or CLI) → locks it + adds
+  a confirmed exemplar that teaches the profile.
+- **Confidence**: top-1/top-2 margin signal; overlapped segments flagged
+  low-confidence; pyannote overlap params exposed as Mac-side config.
+- Surfaces: `/day` inline fix-speaker, `sb speaker reassign/reattribute/recompute/
+  prune/quality`.
+
+**Outcome:** speaker accuracy that learns and self-corrects over time.
+
+## Shipped since
+- Backup/export (Markdown + JSON) and data "forget" (purge a person/day/range,
+  VACUUM) — see CHANGELOG.
+- **People & Memory Intelligence** (Phase 8): person dossiers, relationships,
+  memory timeline, unified dashboard.
+- **Project Intelligence** (Phase 9): project dossiers + ranked project list,
+  mirroring the people surfaces.
+- **Mac deploy automation:** one-command `install.sh`, all three launchd agents,
+  and `sb deploy` — see [DEPLOY.md](DEPLOY.md).
+
+## Later — still open
+- Calendar time-blocking (push scheduled tasks to Google Calendar).
+- Deeper overlap separation (Mac/ML, beyond config knobs).
 
 ## Cross-cutting principles
 - **Local-first / offline** at every phase.

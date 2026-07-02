@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SecondBrain — Tasks</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
+           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
+    a { color: inherit; }
+    .meta { color: #888; font-size: .85rem; }
+    .task { border-bottom: 1px solid #8883; padding: .5rem 0; }
+    .done { text-decoration: line-through; color: #888; }
+    button { padding: .35rem .7rem; border-radius: 8px; border: 1px solid #8884;
+             cursor: pointer; background: #8882; font-size: .85rem; }
+    input { padding: .5rem; border: 1px solid #8884; border-radius: 8px; font: inherit; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <h1>Tasks</h1>
+  <p class="meta"><a href="/">transcripts</a> · <a href="/goals">goals</a> ·
+     <a href="/brief">brief</a></p>
+
+  <h2>Today
+    <button onclick="planAction('propose')">Propose plan</button>
+    <button onclick="planAction('accept')">Accept</button>
+  </h2>
+  {% if today and today.tasks %}
+    {% for t in today.tasks %}
+      {% if t %}
+      <div class="task">
+        <strong class="{{ 'done' if t.status in ['done','dropped'] else '' }}">{{ t.title }}</strong>
+        <span class="meta">· {{ t.estimate_minutes or '–' }}m · v{{ t.value }}/e{{ t.effort }}</span>
+        <button onclick="done({{ t.id }})">Done</button>
+        <button onclick="research({{ t.id }})">Research</button>
+      </div>
+      {% endif %}
+    {% endfor %}
+  {% else %}<p class="meta">No plan yet — click "Propose plan".</p>{% endif %}
+
+  <h2>All tasks</h2>
+  <form onsubmit="addTask(event)">
+    <input type="text" id="title" placeholder="New task…" required />
+    <button type="submit">Add</button>
+  </form>
+  {% for t in backlog %}
+    <div class="task" id="task-{{ t.id }}">
+      <span class="{{ 'done' if t.status in ['done','dropped'] else '' }}">{{ t.title }}</span>
+      <span class="meta">· {{ t.status }}{% if t.due_date %} · due {{ t.due_date }}{% endif %}</span>
+      <button onclick="done({{ t.id }})">Done</button>
+    </div>
+  {% endfor %}
+
+  <script>
+    async function addTask(e) {
+      e.preventDefault();
+      await fetch('/api/tasks', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({title: title.value})});
+      location.reload();
+    }
+    async function done(id) {
+      await fetch(`/api/tasks/${id}/status`, {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({status:'done'})});
+      location.reload();
+    }
+    async function planAction(action) {
+      await fetch('/api/plan/today', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
+      location.reload();
+    }
+    async function research(id) {
+      const r = await fetch(`/api/tasks/${id}/research`, {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({web:false})});
+      const d = await r.json();
+      alert((d.notes[0] && d.notes[0].summary_md) || 'No result');
+    }
+  </script>
+</body>
+</html>

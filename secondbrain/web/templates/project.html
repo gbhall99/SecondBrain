@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}SecondBrain — {{ d.label }}{% endblock %}
+{% block style %}
+    .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat { min-width: 7rem; }
+    .stat b { display: block; font-size: 1.3rem; }
+    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #aaa; }
+{% endblock %}
+{% block content %}
+  <h1>{{ d.label }}</h1>
+  <p class="meta">project
+    {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}</p>
+
+  <div class="card grid">
+    <div class="stat"><b>{{ d.activity.conversations }}</b>conversations</div>
+    <div class="stat"><b>{{ d.activity.edges }}</b>mentions</div>
+    <div class="stat"><b>{{ d.people | length }}</b>people</div>
+    <div class="stat"><b>{{ d.linked_goals | length }}</b>goals</div>
+  </div>
+  <p class="meta">First seen {{ d.activity.first_seen or "—" }} ·
+     last seen {{ d.activity.last_seen or "—" }}</p>
+
+  {% if d.linked_goals %}
+  <h2>Linked goals</h2>
+  {% for g in d.linked_goals %}
+    <div class="card"><a href="/goals">{{ g.title }}</a>
+      <span class="meta">({{ g.status }}, {{ g.relation }})</span></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.people %}
+  <h2>People</h2>
+  <p>{% for c in d.people %}<a class="pill"
+      href="{{ '/person/' ~ c.speaker_id if c.speaker_id else '#' }}">{{ c.label }}
+     ({{ c.edges }})</a>{% endfor %}</p>
+  {% endif %}
+
+  {% if d.decisions %}
+  <h2>Decisions</h2>
+  {% for x in d.decisions %}<div class="card">{{ x.object_text }}</div>{% endfor %}
+  {% endif %}
+
+  {% if d.open_commitments %}
+  <h2>Open commitments</h2>
+  {% for c in d.open_commitments %}
+    <div class="card">{{ c.object_text }}{% if c.due_date %}
+      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.facts %}
+  <h2>Known facts</h2>
+  {% for f in d.facts %}
+    <div class="card">{{ f.predicate or "—" }}: {{ f.object_text }}
+      <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}%)</span></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if d.recent_quotes %}
+  <h2>Recent mentions</h2>
+  {% for q in d.recent_quotes %}
+    <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
+  {% endfor %}
+  {% endif %}
+{% endblock %}
