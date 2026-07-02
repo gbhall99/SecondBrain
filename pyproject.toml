@@ -34,7 +34,13 @@ ml = [
     "mlx-whisper>=0.4; platform_system == 'Darwin'",
     "parakeet-mlx>=0.2; platform_system == 'Darwin'",
     "sqlite-vec>=0.1.6",
-    "sentence-transformers>=2.7",
+    # <5: sentence-transformers 5.x unconditionally imports torchcodec (for
+    # multimodal audio/video) whose native lib is fragile against torch 2.8
+    # (fails: "Symbol not found: _aoti_torch_aten_full", and it wants ffmpeg 4-7
+    # while Homebrew ships 8). We only need text embeddings (bge-small), so cap
+    # below 5 to drop the torchcodec dependency entirely. Nothing else needs
+    # transformers>=5.
+    "sentence-transformers>=2.7,<5",
     "pyannote.audio>=3.1,<4",  # 4.x changed the pipeline output API (DiarizeOutput)
     # torchaudio 2.9 dropped the classic I/O backend (torchaudio.info /
     # list_audio_backends / AudioMetaData) for torchcodec; pyannote.audio 3.x
