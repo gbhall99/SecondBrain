@@ -30,6 +30,47 @@ def test_new_entity_created_when_no_match(conn, settings):
     assert conn.execute("SELECT name FROM kg_nodes WHERE id=?", (got,)).fetchone()["name"] == "Totally New Person"
 
 
+def _speaker(conn, name):
+    return int(conn.execute(
+        "INSERT INTO speakers (name, kind) VALUES (?, 'known')", (name,)
+    ).lastrowid)
+
+
+def test_same_name_different_speaker_stays_distinct(conn, settings):
+    """Two different people named the same must NOT merge into one node."""
+    s1, s2 = _speaker(conn, "Alex R"), _speaker(conn, "Alex T")
+    when = "2026-06-16T09:00:00.000Z"
+    n1 = resolve.resolve_entity(conn, _ent("Alex"), extraction_id=None, when=when,
+                                settings=settings, speaker_hint=s1)
+    n2 = resolve.resolve_entity(conn, _ent("Alex"), extraction_id=None, when=when,
+                                settings=settings, speaker_hint=s2)
+    assert n1 != n2
+    assert graph.get_node(conn, n1)["speaker_id"] == s1
+    assert graph.get_node(conn, n2)["speaker_id"] == s2
+
+
+def test_same_speaker_same_name_merges(conn, settings):
+    s1 = _speaker(conn, "Dana")
+    when = "2026-06-16T09:00:00.000Z"
+    a = resolve.resolve_entity(conn, _ent("Dana"), extraction_id=None, when=when,
+                               settings=settings, speaker_hint=s1)
+    b = resolve.resolve_entity(conn, _ent("Dana"), extraction_id=None, when=when,
+                               settings=settings, speaker_hint=s1)
+    assert a == b  # same speaker → same node
+
+
+def test_name_match_binds_unbound_node_to_speaker(conn, settings):
+    # A person node created without a speaker binding should be adopted (not
+    # duplicated) when the same name later arrives with a speaker hint.
+    when = "2026-06-16T09:00:00.000Z"
+    n0 = resolve.resolve_entity(conn, _ent("Sam"), extraction_id=None, when=when, settings=settings)
+    assert graph.get_node(conn, n0)["speaker_id"] is None
+    s = _speaker(conn, "Sam")
+    n1 = resolve.resolve_entity(conn, _ent("Sam"), extraction_id=None, when=when,
+                                settings=settings, speaker_hint=s)
+    assert n1 == n0 and graph.get_node(conn, n1)["speaker_id"] == s
+
+
 def test_embedding_auto_link(conn, settings, monkeypatch):
     from secondbrain.search import semantic
 

@@ -46,6 +46,16 @@ def _name_match(conn: sqlite3.Connection, node_type: str, norm: str) -> int | No
     return int(row["id"]) if row else None
 
 
+def _person_for_speaker(conn: sqlite3.Connection, speaker_id: int) -> int | None:
+    """The person node already bound to this global speaker, if any."""
+    row = conn.execute(
+        "SELECT id FROM kg_nodes WHERE type='person' AND merged_into IS NULL "
+        "AND speaker_id=? ORDER BY id LIMIT 1",
+        (speaker_id,),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def _llm_same(llm: LLM, node_type: str, a: str, b: str) -> bool:
     schema = {"type": "object", "properties": {"same": {"type": "boolean"}}, "required": ["same"]}
     try:
@@ -73,37 +83,56 @@ def resolve_entity(
     settings = settings or get_settings()
     norm = graph.normalize_name(ent.name)
 
-    node_id = _name_match(conn, ent.type, norm)
-    if node_id is None:
-        emb = embed_name(ent.name, settings)
-        if emb is not None:
-            best_id, best_sim = None, -1.0
-            for cand in graph.candidates(conn, ent.type):
-                cvec = registry.deserialize_embedding(cand["embedding"])
-                if not cvec:
-                    continue
-                sim = registry.cosine(emb, cvec)
-                if sim > best_sim:
-                    best_id, best_sim = int(cand["id"]), sim
-            d = settings.extraction
-            if best_id is not None and best_sim >= d.entity_match_threshold or (
-                best_id is not None
-                and best_sim >= d.entity_review_threshold
-                and llm is not None
-                and _llm_same(llm, ent.type, ent.name, graph.get_node(conn, best_id)["name"])
-            ):
-                node_id = best_id
+    if ent.type == "person" and speaker_hint is not None:
+        # Speaker identity is authoritative — never merge two different speakers by
+        # name/embedding. Match the node already bound to this speaker; else a
+        # name match that is speaker-compatible (unbound, or same speaker); else a
+        # new node bound to this speaker.
+        node_id = _person_for_speaker(conn, speaker_hint)
+        if node_id is None:
+            nm = _name_match(conn, ent.type, norm)
+            if nm is not None:
+                cand_spk = graph.get_node(conn, nm)["speaker_id"]
+                if cand_spk is None or int(cand_spk) == speaker_hint:
+                    node_id = nm
         if node_id is None:
             node_id = graph.create_node(
-                conn,
-                type=ent.type,
-                name=ent.name,
-                embedding=emb,
-                confidence=ent.confidence,
-                extraction_id=extraction_id,
-                speaker_id=speaker_hint if ent.type == "person" else None,
-                when=when,
+                conn, type="person", name=ent.name, embedding=embed_name(ent.name, settings),
+                confidence=ent.confidence, extraction_id=extraction_id,
+                speaker_id=speaker_hint, when=when,
             )
+    else:
+        node_id = _name_match(conn, ent.type, norm)
+        if node_id is None:
+            emb = embed_name(ent.name, settings)
+            if emb is not None:
+                best_id, best_sim = None, -1.0
+                for cand in graph.candidates(conn, ent.type):
+                    cvec = registry.deserialize_embedding(cand["embedding"])
+                    if not cvec:
+                        continue
+                    sim = registry.cosine(emb, cvec)
+                    if sim > best_sim:
+                        best_id, best_sim = int(cand["id"]), sim
+                d = settings.extraction
+                if best_id is not None and best_sim >= d.entity_match_threshold or (
+                    best_id is not None
+                    and best_sim >= d.entity_review_threshold
+                    and llm is not None
+                    and _llm_same(llm, ent.type, ent.name, graph.get_node(conn, best_id)["name"])
+                ):
+                    node_id = best_id
+            if node_id is None:
+                node_id = graph.create_node(
+                    conn,
+                    type=ent.type,
+                    name=ent.name,
+                    embedding=emb,
+                    confidence=ent.confidence,
+                    extraction_id=extraction_id,
+                    speaker_id=None,
+                    when=when,
+                )
 
     # existing node: record alias + freshness, bind speaker if Person
     graph.add_alias(conn, node_id, ent.name)
