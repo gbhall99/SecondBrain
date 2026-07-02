@@ -7,6 +7,7 @@ from secondbrain.pipeline.diarize import (
     _load_pipeline,
     _shim_hf_hub_use_auth_token,
     _shim_torchaudio_metadata,
+    _trusted_torch_load,
     _unpack_diarize,
     deterministic_embedding,
 )
@@ -112,6 +113,35 @@ def test_shim_hf_hub_is_idempotent(monkeypatch):
     _shim_hf_hub_use_auth_token()
 
     assert fake_hf.hf_hub_download is wrapped_once
+
+
+def test_trusted_torch_load_defaults_weights_only_false_and_restores(monkeypatch):
+    # PyTorch 2.6 defaults torch.load(weights_only=True), which rejects pyannote
+    # checkpoints. The context manager must default it to False inside its scope
+    # and restore the original torch.load afterwards.
+    import sys
+    import types
+
+    seen = {}
+
+    def fake_load(*args, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return "ckpt"
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.load = fake_load
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    original = fake_torch.load
+
+    with _trusted_torch_load():
+        fake_torch.load("model.ckpt")
+        assert seen.get("weights_only") is False
+        # An explicit weights_only must be respected, not overridden.
+        fake_torch.load("model.ckpt", weights_only=True)
+        assert seen.get("weights_only") is True
+
+    assert fake_torch.load is original  # restored on exit
 
 
 def test_deterministic_embedding_is_stable_and_normalized():

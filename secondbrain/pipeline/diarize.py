@@ -9,6 +9,7 @@ registry can resolve local clusters to global identities.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
@@ -116,6 +117,36 @@ def _shim_hf_hub_use_auth_token() -> None:
 
     _wrapped._sb_auth_shim = True
     hf.hf_hub_download = _wrapped
+
+
+@contextlib.contextmanager
+def _trusted_torch_load():
+    """Load pyannote 3.x checkpoints under PyTorch >= 2.6's stricter defaults.
+
+    PyTorch 2.6 flipped ``torch.load``'s ``weights_only`` default to ``True``,
+    which refuses to unpickle globals embedded in pyannote's checkpoints (e.g.
+    ``torch.torch_version.TorchVersion``, omegaconf containers), raising
+    ``UnpicklingError: Weights only load failed``.
+
+    These models come from the gated, user-authorized pyannote HuggingFace repos
+    (segmentation-3.0, speaker-diarization-3.1, wespeaker embeddings) — a trusted
+    source — so temporarily restore ``weights_only=False`` for the duration of
+    the pipeline load rather than allowlisting each global one at a time. Scoped
+    with a context manager so no other ``torch.load`` in the process is affected.
+    """
+    import torch
+
+    original = torch.load
+
+    def _patched(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original(*args, **kwargs)
+
+    torch.load = _patched
+    try:
+        yield
+    finally:
+        torch.load = original
 
 
 @dataclass
@@ -238,7 +269,8 @@ class PyannoteDiarizer(Diarizer):
             _shim_hf_hub_use_auth_token()  # pyannote 3.x passes the removed use_auth_token kwarg
             from pyannote.audio import Pipeline  # lazy: heavy, gated models
 
-            self._pipeline = _load_pipeline(Pipeline, self.model, self._token())
+            with _trusted_torch_load():  # pyannote checkpoints need weights_only=False on torch>=2.6
+                self._pipeline = _load_pipeline(Pipeline, self.model, self._token())
             if torch.backends.mps.is_available():
                 self._pipeline.to(torch.device("mps"))
         return self._pipeline
