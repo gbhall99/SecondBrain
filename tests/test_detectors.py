@@ -36,6 +36,40 @@ def test_commitment_owed_and_overdue(conn, settings):
     assert kinds == ["commitment_overdue", "commitment_owed"]
 
 
+def test_owner_own_overdue_commitment_surfaces(conn, settings):
+    owner = _owner_node(conn)
+    dana = _person(conn, "Dana")
+    yesterday = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
+    # The OWNER owes Dana, and it's overdue — must surface, not silently drop.
+    graph.upsert_edge(conn, src_node_id=owner, dst_node_id=dana, predicate="action_item",
+                      kind="action_item", object_text="send deck", due_date=yesterday,
+                      confidence=0.9, source_segment_ids=[1])
+    out = detectors.detect_commitments(conn, settings, owner_id=owner, now=NOW)
+    over = [s for s in out if s.kind == "commitment_overdue"]
+    assert len(over) == 1 and over[0].title.startswith("You still owe")
+
+
+def test_goal_alignment_honors_recency_window(conn, settings):
+    gid = conn.execute(
+        "INSERT INTO goals (title, status) VALUES ('Improve onboarding','active')"
+    ).lastrowid
+    three_days_ago = (NOW - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%fZ")
+    edge = graph.upsert_edge(conn, src_node_id=_owner_node(conn), dst_node_id=None,
+                             predicate="idea", kind="idea", object_text="onboarding flow",
+                             source_segment_ids=[3], when=three_days_ago)
+    conn.execute(
+        "INSERT INTO goal_links (goal_id, kind, ref_id, relation, score) "
+        "VALUES (?, 'edge', ?, 'related', 0.9)", (gid, edge),
+    )
+    # Default recent_days=1: a 3-day-old edge is outside the window.
+    settings.proactive.recent_days = 1
+    assert not detectors.detect_goal_alignment(conn, settings, owner_id=None, now=NOW)
+    # Weekly widening (recent_days=7): now within the window.
+    settings.proactive.recent_days = 7
+    out = detectors.detect_goal_alignment(conn, settings, owner_id=None, now=NOW)
+    assert any(s.kind == "goal_alignment" and s.goal_id == gid for s in out)
+
+
 def test_connection_detected_by_keyword(conn, settings):
     recent = graph.create_node(conn, type="topic", name="caching strategy", embedding=None,
                                confidence=0.9, extraction_id=None,
