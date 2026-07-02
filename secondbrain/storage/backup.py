@@ -29,7 +29,9 @@ def backup_database(settings: Settings | None = None, dest: Path | None = None) 
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = connect(settings=settings)
     try:
-        out = sqlite3.connect(str(dest))
+        # Open the destination with the same driver + key as the live DB, so an
+        # encrypted DB produces an encrypted snapshot (not a silent plaintext leak).
+        out = connect(dest, settings=settings)
         try:
             src.backup(out)
         finally:
@@ -87,20 +89,19 @@ class RestoreError(Exception):
     """Raised when a restore source isn't a usable SecondBrain database."""
 
 
-def _is_secondbrain_db(path: Path) -> bool:
-    """A readable SQLite DB carrying the core SecondBrain tables."""
+def _is_secondbrain_db(path: Path, settings: Settings) -> bool:
+    """A readable SecondBrain DB. Opened with the configured driver + key, so an
+    encrypted snapshot validates (and a wrong key / plaintext file is rejected)."""
     try:
-        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    except sqlite3.Error:
+        c = connect(path, settings=settings)
+    except Exception:  # noqa: BLE001 - unreadable / wrong key / not a DB
         return False
     try:
         names = {
             r[0]
-            for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-    except sqlite3.DatabaseError:
+    except Exception:  # noqa: BLE001 - SQLCipher raises on a bad key here
         return False
     finally:
         c.close()
@@ -123,7 +124,7 @@ def restore_database(
     src = Path(src)
     if not src.exists():
         raise RestoreError(f"restore source not found: {src}")
-    if not _is_secondbrain_db(src):
+    if not _is_secondbrain_db(src, settings):
         raise RestoreError(f"not a SecondBrain database: {src}")
 
     db_path = settings.db_path
@@ -139,9 +140,11 @@ def restore_database(
         p = Path(str(db_path) + suffix)
         p.unlink(missing_ok=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(str(src))
+    # Both sides via the configured driver + key, so an encrypted snapshot restores
+    # to an encrypted live DB (and never writes an unreadable plaintext file).
+    source = connect(src, settings=settings)
     try:
-        out = sqlite3.connect(str(db_path))
+        out = connect(db_path, settings=settings)
         try:
             source.backup(out)
         finally:
@@ -159,11 +162,13 @@ def _non_opted_segments(
 ) -> list[dict]:
     opted = registry.opted_out_speaker_ids(conn, settings)
     where, params = [], []
+    # Undated segments (NULL start_at) can't be placed in a date window; retain them
+    # so a filtered export doesn't silently drop data the unfiltered path keeps.
     if since:
-        where.append("substr(ts.start_at, 1, 10) >= ?")
+        where.append("(ts.start_at IS NULL OR substr(ts.start_at, 1, 10) >= ?)")
         params.append(since)
     if until:
-        where.append("substr(ts.start_at, 1, 10) <= ?")
+        where.append("(ts.start_at IS NULL OR substr(ts.start_at, 1, 10) <= ?)")
         params.append(until)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(

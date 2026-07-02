@@ -200,6 +200,73 @@ def test_export_markdown_since_only(conn, settings, tmp_path):
     assert "new" in md and "old" not in md
 
 
+def test_export_date_range_retains_undated_segments(conn, settings, tmp_path):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (1, 'Me', 'owner', 1)")
+    conn.execute(
+        "INSERT INTO audio_files (id, path, started_at, sample_rate, status) "
+        "VALUES (1, '/tmp/a.flac', '2026-06-10T09:00:00.000Z', 16000, 'transcribed')"
+    )
+    conn.execute("INSERT INTO transcripts (id, audio_file_id, backend) VALUES (1, 1, 'mock')")
+    # one dated (in range), one dated (out of range), one undated (NULL start_at)
+    conn.execute(
+        "INSERT INTO transcript_segments "
+        "(id, transcript_id, audio_file_id, start_offset_s, end_offset_s, start_at, text, speaker_id)"
+        " VALUES (1, 1, 1, 0, 1, '2026-06-15T09:00:00.000Z', 'dated in range', 1)"
+    )
+    conn.execute(
+        "INSERT INTO transcript_segments "
+        "(id, transcript_id, audio_file_id, start_offset_s, end_offset_s, start_at, text, speaker_id)"
+        " VALUES (2, 1, 1, 0, 1, '2026-06-01T09:00:00.000Z', 'dated out of range', 1)"
+    )
+    conn.execute(
+        "INSERT INTO transcript_segments "
+        "(id, transcript_id, audio_file_id, start_offset_s, end_offset_s, start_at, text, speaker_id)"
+        " VALUES (3, 1, 1, 0, 1, NULL, 'undated', 1)"
+    )
+    texts = [
+        s["text"]
+        for s in json.loads(
+            backup.export_json(conn, tmp_path, settings, since="2026-06-12", until="2026-06-18")
+            .read_text()
+        )["segments"]
+    ]
+    assert "dated in range" in texts
+    assert "dated out of range" not in texts
+    assert "undated" in texts  # NULL start_at retained, not silently dropped
+
+
+def test_encrypted_backup_restore_round_trip(tmp_path):
+    from secondbrain.storage import db as dbmod
+
+    if not dbmod.sqlcipher_available():
+        pytest.skip("SQLCipher driver not installed (the [secure] extra)")
+    from secondbrain.config import Settings
+    from secondbrain.storage.db import init_db
+
+    s = Settings(
+        paths={"data_dir": str(tmp_path / "data")},
+        security={"encrypt_db": True, "db_passphrase": "correct horse"},
+        transcription={"backend": "mock"}, vad={"enabled": False},
+        search={"semantic_enabled": False},
+    )
+    s.ensure_dirs()
+    c = init_db(settings=s)
+    c.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (1, 'Me', 'owner', 1)")
+    c.commit()
+    c.close()
+    snap = backup.backup_database(settings=s, dest=tmp_path / "enc-snap.db")
+    # the snapshot must itself be encrypted (unreadable as plaintext sqlite)
+    plain = sqlite3.connect(str(snap))
+    with pytest.raises(sqlite3.DatabaseError):
+        plain.execute("SELECT name FROM sqlite_master").fetchall()
+    plain.close()
+    # and it restores cleanly
+    backup.restore_database(settings=s, src=snap)
+    c2 = init_db(settings=s)
+    assert c2.execute("SELECT COUNT(*) FROM speakers").fetchone()[0] == 1
+    c2.close()
+
+
 def test_restore_replaces_live_db_and_backs_up_current(conn, settings, tmp_path):
     _seed(conn)
     snap = service.backup_database(settings=settings, dest=tmp_path / "snap.db")
