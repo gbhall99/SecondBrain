@@ -278,10 +278,15 @@ class PyannoteDiarizer(Diarizer):
     def diarize(self, audio_path: Path) -> DiarizationResult:
         import numpy as np  # lazy
 
-        pipeline = self._ensure()
-        diarization, embeddings = _unpack_diarize(
-            pipeline(str(audio_path), return_embeddings=True)
-        )
+        # pyannote loads the embedding model (wespeaker) lazily on the first
+        # inference call, not just at construction, so the weights_only=False
+        # shim has to cover the pipeline call too (torch>=2.6). Nesting with the
+        # block in _ensure() is harmless.
+        with _trusted_torch_load():
+            pipeline = self._ensure()
+            diarization, embeddings = _unpack_diarize(
+                pipeline(str(audio_path), return_embeddings=True)
+            )
 
         # `embeddings` is an (n_local_speakers, dim) array aligned to the sorted
         # local labels of the annotation.
