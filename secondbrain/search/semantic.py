@@ -7,12 +7,15 @@ callers fall back to full-text search only. No data ever leaves the machine.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import struct
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.storage.db import try_load_sqlite_vec
 from secondbrain.storage.models import SearchHit
+
+log = logging.getLogger(__name__)
 
 _EMBED_DIM = 384  # bge-small / all-MiniLM family
 
@@ -39,15 +42,27 @@ class Embedder:
 
 
 _embedder: Embedder | None = None
+_embedder_unavailable_logged = False
 
 
 def _get_embedder(settings: Settings) -> Embedder | None:
-    global _embedder
+    global _embedder, _embedder_unavailable_logged
     if not settings.search.semantic_enabled:
         return None
     try:
         import sentence_transformers  # noqa: F401
-    except ImportError:
+    except Exception:  # noqa: BLE001 - optional backend: a broken native dep
+        # (e.g. torchcodec failing to load its shared libs) raises RuntimeError/
+        # OSError at import, not just ImportError. Semantic search is optional
+        # (full-text still works), so degrade quietly and log once rather than
+        # spamming a traceback for every processed chunk.
+        if not _embedder_unavailable_logged:
+            log.warning(
+                "semantic search unavailable (embedding backend failed to load); "
+                "using full-text search only",
+                exc_info=True,
+            )
+            _embedder_unavailable_logged = True
         return None
     if _embedder is None:
         _embedder = Embedder(settings.search.embedding_model)
