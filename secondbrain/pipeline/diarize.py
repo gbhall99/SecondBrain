@@ -19,6 +19,27 @@ from pathlib import Path
 from secondbrain.config import Settings, get_settings
 
 
+def _load_pipeline(pipeline_cls, model: str, token: str | None):
+    """Load a pyannote Pipeline across API versions.
+
+    pyannote.audio renamed the auth argument ``use_auth_token`` → ``token`` in
+    newer releases, so pin the right keyword from the actual signature (falling
+    back to a retry) instead of hard-coding one and crashing on the other.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(pipeline_cls.from_pretrained).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "use_auth_token" in params and "token" not in params:
+        return pipeline_cls.from_pretrained(model, use_auth_token=token)
+    try:
+        return pipeline_cls.from_pretrained(model, token=token)
+    except TypeError:
+        return pipeline_cls.from_pretrained(model, use_auth_token=token)
+
+
 @dataclass
 class SpeakerTurn:
     start_s: float
@@ -136,7 +157,7 @@ class PyannoteDiarizer(Diarizer):
             import torch  # lazy
             from pyannote.audio import Pipeline  # lazy: heavy, gated models
 
-            self._pipeline = Pipeline.from_pretrained(self.model, use_auth_token=self._token())
+            self._pipeline = _load_pipeline(Pipeline, self.model, self._token())
             if torch.backends.mps.is_available():
                 self._pipeline.to(torch.device("mps"))
         return self._pipeline

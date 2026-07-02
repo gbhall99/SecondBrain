@@ -1,7 +1,24 @@
 from pathlib import Path
 
-from secondbrain.pipeline.diarize import MockDiarizer, deterministic_embedding
+from secondbrain.pipeline.diarize import MockDiarizer, _load_pipeline, deterministic_embedding
 from secondbrain.speaker.attribution import best_overlap
+
+
+def test_load_pipeline_supports_both_token_kwargs():
+    # Newer pyannote: from_pretrained(model, *, token=...)
+    class NewPipeline:
+        @classmethod
+        def from_pretrained(cls, model, *, token=None):
+            return ("new", model, token)
+
+    # Older pyannote: from_pretrained(model, *, use_auth_token=...)
+    class OldPipeline:
+        @classmethod
+        def from_pretrained(cls, model, *, use_auth_token=None):
+            return ("old", model, use_auth_token)
+
+    assert _load_pipeline(NewPipeline, "m", "tok") == ("new", "m", "tok")
+    assert _load_pipeline(OldPipeline, "m", "tok") == ("old", "m", "tok")
 
 
 def test_deterministic_embedding_is_stable_and_normalized():
