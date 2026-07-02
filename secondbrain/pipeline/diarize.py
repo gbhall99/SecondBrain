@@ -54,6 +54,37 @@ def _unpack_diarize(out):
     )
 
 
+def _shim_torchaudio_metadata() -> None:
+    """Make pyannote.audio 3.x importable on torchaudio >= 2.9.
+
+    pyannote's ``core/io.py`` references ``torchaudio.AudioMetaData`` at import
+    time (an eagerly-evaluated return-type annotation). torchaudio removed that
+    class in 2.9+, so ``from pyannote.audio import Pipeline`` raises
+    ``AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'``.
+
+    On our diarization/enrollment path the class is only used as an annotation
+    (``torchaudio.info()`` returns its own metadata object), so a lightweight
+    stand-in is enough to let the import succeed. No-op when torchaudio still
+    ships the real class.
+    """
+    import torchaudio
+
+    if hasattr(torchaudio, "AudioMetaData"):
+        return
+
+    from dataclasses import dataclass as _dataclass
+
+    @_dataclass
+    class AudioMetaData:  # minimal stand-in matching torchaudio.info() fields
+        sample_rate: int = 0
+        num_frames: int = 0
+        num_channels: int = 0
+        bits_per_sample: int = 0
+        encoding: str = "UNKNOWN"
+
+    torchaudio.AudioMetaData = AudioMetaData
+
+
 @dataclass
 class SpeakerTurn:
     start_s: float
@@ -169,6 +200,8 @@ class PyannoteDiarizer(Diarizer):
             # Keep model cache inside the project data dir for a self-contained setup.
             os.environ.setdefault("HF_HOME", str(self.settings.models_dir))
             import torch  # lazy
+
+            _shim_torchaudio_metadata()  # pyannote 3.x needs torchaudio.AudioMetaData
             from pyannote.audio import Pipeline  # lazy: heavy, gated models
 
             self._pipeline = _load_pipeline(Pipeline, self.model, self._token())

@@ -5,6 +5,7 @@ import pytest
 from secondbrain.pipeline.diarize import (
     MockDiarizer,
     _load_pipeline,
+    _shim_torchaudio_metadata,
     _unpack_diarize,
     deterministic_embedding,
 )
@@ -38,6 +39,38 @@ def test_load_pipeline_supports_both_token_kwargs():
 
     assert _load_pipeline(NewPipeline, "m", "tok") == ("new", "m", "tok")
     assert _load_pipeline(OldPipeline, "m", "tok") == ("old", "m", "tok")
+
+
+def test_shim_torchaudio_metadata_adds_missing_attr(monkeypatch):
+    # torchaudio >= 2.9 dropped AudioMetaData, which pyannote.audio 3.x references
+    # at import time. The shim must define a stand-in so the import succeeds.
+    import sys
+    import types
+
+    fake = types.ModuleType("torchaudio")  # no AudioMetaData attribute
+    monkeypatch.setitem(sys.modules, "torchaudio", fake)
+    assert not hasattr(fake, "AudioMetaData")
+
+    _shim_torchaudio_metadata()
+
+    assert hasattr(fake, "AudioMetaData")
+    md = fake.AudioMetaData(sample_rate=16000, num_frames=100, num_channels=1)
+    assert md.sample_rate == 16000 and md.num_channels == 1
+
+
+def test_shim_torchaudio_metadata_noop_when_present(monkeypatch):
+    # When torchaudio still ships the class, the shim must leave it untouched.
+    import sys
+    import types
+
+    fake = types.ModuleType("torchaudio")
+    sentinel = object()
+    fake.AudioMetaData = sentinel
+    monkeypatch.setitem(sys.modules, "torchaudio", fake)
+
+    _shim_torchaudio_metadata()
+
+    assert fake.AudioMetaData is sentinel
 
 
 def test_deterministic_embedding_is_stable_and_normalized():

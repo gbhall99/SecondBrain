@@ -69,6 +69,19 @@ if ! "${PYTHON_BIN}" -c 'import ctypes.util,sys; sys.exit(0 if ctypes.util.find_
   fi
 fi
 
+# --- 3b. ffmpeg (audio decoding for the transcription pipeline) -------------
+# The transcribe step decodes FLAC via ffmpeg; without it every transcribe job
+# fails with "FFmpeg is not installed or not in your PATH." and no transcript is
+# produced.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    say "Installing ffmpeg via Homebrew"
+    brew install ffmpeg
+  else
+    warn "ffmpeg not found and Homebrew is unavailable. Install ffmpeg (brew install ffmpeg), then re-run."
+  fi
+fi
+
 # --- 4. Python dependencies -------------------------------------------------
 say "Installing SecondBrain (.[audio,ml,mac])"
 CONSTRAINTS=()
