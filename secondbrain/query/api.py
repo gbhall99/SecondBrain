@@ -39,6 +39,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def db():
         return db_session(settings=settings)
 
+    def _harden(response):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    def _authed(request: Request) -> bool:
+        """Whether the caller may see privileged detail (mirrors the auth gate)."""
+        if not settings.security.require_auth:
+            return True
+        host = request.client.host if request.client else None
+        if auth.is_loopback(host):
+            return True
+        return auth.verify_cookie(request.cookies.get(auth.COOKIE_NAME, ""), secret) is not None
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         if settings.security.require_auth:
@@ -48,17 +62,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cookie = request.cookies.get(auth.COOKIE_NAME, "")
                 if auth.verify_cookie(cookie, secret) is None:
                     if path.startswith("/api/"):
-                        return JSONResponse({"detail": "authentication required"}, status_code=401)
-                    return RedirectResponse("/login", status_code=303)
-        response = await call_next(request)
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        return response
+                        return _harden(
+                            JSONResponse({"detail": "authentication required"}, status_code=401)
+                        )
+                    return _harden(RedirectResponse("/login", status_code=303))
+        return _harden(await call_next(request))
 
     @app.get("/health")
-    def health_endpoint():
+    def health_endpoint(request: Request):
         with db() as conn:
-            return health.summary(conn, settings)
+            full = health.summary(conn, settings)
+        # /health is exempt from auth (for liveness probes), so redact the verbose
+        # detail (secret names, device names, encryption posture) for unauth callers.
+        if _authed(request):
+            return full
+        return {"status": full["status"], "version": full["version"]}
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):

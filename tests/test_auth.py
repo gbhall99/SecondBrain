@@ -26,6 +26,17 @@ def test_loopback_and_exempt():
     assert not auth.is_loopback("100.64.0.1")
     assert auth.is_exempt("/health") and auth.is_exempt("/static/x.css")
     assert not auth.is_exempt("/api/status")
+    # Boundary: a bare-prefix collision must NOT be exempt (auth-bypass foot-gun).
+    assert not auth.is_exempt("/loginfo")
+    assert not auth.is_exempt("/healthz")
+    assert auth.is_exempt("/login")  # exact still exempt
+
+
+def test_rate_limiter_does_not_retain_empty_entries():
+    auth._login_failures.clear()
+    assert auth.login_allowed("9.9.9.9") is True
+    # A caller with no failures must not leave a dangling key behind.
+    assert "9.9.9.9" not in auth._login_failures
 
 
 def test_set_password_and_authenticate(conn):
@@ -59,3 +70,24 @@ def test_api_open_when_auth_disabled(conn, settings):
     # default require_auth=False → no login needed (existing behaviour)
     client = TestClient(create_app(settings))
     assert client.get("/api/status").status_code == 200
+
+
+def test_health_redacts_detail_for_unauthenticated_remote(conn, settings):
+    settings.security.require_auth = True
+    auth.set_password(conn, "owner", "pw")
+    client = TestClient(create_app(settings))  # non-loopback, no cookie
+    body = client.get("/health").json()
+    assert set(body) == {"status", "version"}  # no 'checks' (secret/device leak)
+    # After login, full detail is returned.
+    client.post("/login", json={"username": "owner", "password": "pw"})
+    assert "checks" in client.get("/health").json()
+
+
+def test_security_headers_on_401(conn, settings):
+    settings.security.require_auth = True
+    auth.set_password(conn, "owner", "pw")
+    client = TestClient(create_app(settings))
+    r = client.get("/api/status")  # 401, an early-return path
+    assert r.status_code == 401
+    assert r.headers.get("X-Frame-Options") == "DENY"
+    assert r.headers.get("X-Content-Type-Options") == "nosniff"
