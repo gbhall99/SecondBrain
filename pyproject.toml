@@ -36,7 +36,13 @@ ml = [
     "sqlite-vec>=0.1.6",
     "sentence-transformers>=2.7",
     "pyannote.audio>=3.1,<4",  # 4.x changed the pipeline output API (DiarizeOutput)
-    "torch>=2.2",
+    # torchaudio 2.9 dropped the classic I/O backend (torchaudio.info /
+    # list_audio_backends / AudioMetaData) for torchcodec; pyannote.audio 3.x
+    # still requires it, so cap both below 2.9. torch here is only used by
+    # pyannote, silero-vad and sentence-transformers (MLX transcription is
+    # separate), all of which are fine on <2.9.
+    "torch>=2.2,<2.9",
+    "torchaudio>=2.2,<2.9",
 ]
 mac = [
     "rumps>=0.4.0; platform_system == 'Darwin'",
