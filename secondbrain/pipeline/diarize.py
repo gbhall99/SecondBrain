@@ -85,6 +85,39 @@ def _shim_torchaudio_metadata() -> None:
     torchaudio.AudioMetaData = AudioMetaData
 
 
+def _shim_hf_hub_use_auth_token() -> None:
+    """Let pyannote.audio 3.x download gated models on huggingface_hub >= 1.0.
+
+    pyannote 3.x calls ``huggingface_hub.hf_hub_download(use_auth_token=...)``
+    throughout (models, pipeline configs), but huggingface_hub 1.0 removed that
+    argument (renamed to ``token``), so downloads raise
+    ``TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'``.
+
+    We can't simply pin ``huggingface_hub<1.0`` because ``transformers>=5``
+    (pulled in by the MLX/embedding stack) requires ``>=1.5``. Instead, wrap the
+    single download entry point that every pyannote/speechbrain call funnels
+    through and translate the deprecated kwarg. Idempotent; must run before
+    ``from pyannote.audio import ...`` so pyannote binds the wrapped function.
+    """
+    import huggingface_hub as hf
+
+    fn = getattr(hf, "hf_hub_download", None)
+    if fn is None or getattr(fn, "_sb_auth_shim", False):
+        return
+
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        if "use_auth_token" in kwargs:
+            token = kwargs.pop("use_auth_token")
+            kwargs.setdefault("token", token)
+        return fn(*args, **kwargs)
+
+    _wrapped._sb_auth_shim = True
+    hf.hf_hub_download = _wrapped
+
+
 @dataclass
 class SpeakerTurn:
     start_s: float
@@ -202,6 +235,7 @@ class PyannoteDiarizer(Diarizer):
             import torch  # lazy
 
             _shim_torchaudio_metadata()  # pyannote 3.x needs torchaudio.AudioMetaData
+            _shim_hf_hub_use_auth_token()  # pyannote 3.x passes the removed use_auth_token kwarg
             from pyannote.audio import Pipeline  # lazy: heavy, gated models
 
             self._pipeline = _load_pipeline(Pipeline, self.model, self._token())

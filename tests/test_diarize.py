@@ -5,6 +5,7 @@ import pytest
 from secondbrain.pipeline.diarize import (
     MockDiarizer,
     _load_pipeline,
+    _shim_hf_hub_use_auth_token,
     _shim_torchaudio_metadata,
     _unpack_diarize,
     deterministic_embedding,
@@ -71,6 +72,46 @@ def test_shim_torchaudio_metadata_noop_when_present(monkeypatch):
     _shim_torchaudio_metadata()
 
     assert fake.AudioMetaData is sentinel
+
+
+def test_shim_hf_hub_translates_use_auth_token(monkeypatch):
+    # pyannote 3.x passes hf_hub_download(use_auth_token=...), removed in
+    # huggingface_hub 1.0; the shim must translate it to the new 'token' kwarg.
+    import sys
+    import types
+
+    seen = {}
+
+    def fake_download(*args, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return "cached/path"
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    _shim_hf_hub_use_auth_token()
+    fake_hf.hf_hub_download(repo_id="x", use_auth_token="tok")
+
+    assert "use_auth_token" not in seen
+    assert seen.get("token") == "tok"
+
+
+def test_shim_hf_hub_is_idempotent(monkeypatch):
+    # Applying the shim twice must not double-wrap the download function.
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = lambda *a, **k: "p"
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    _shim_hf_hub_use_auth_token()
+    wrapped_once = fake_hf.hf_hub_download
+    _shim_hf_hub_use_auth_token()
+
+    assert fake_hf.hf_hub_download is wrapped_once
 
 
 def test_deterministic_embedding_is_stable_and_normalized():
