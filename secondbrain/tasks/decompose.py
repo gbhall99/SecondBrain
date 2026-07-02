@@ -67,12 +67,22 @@ def accept_plan(conn: sqlite3.Connection, goal_id: int, plan: dict) -> list[int]
             conn, title=ms.title, goal_id=goal_id, detail=ms.detail, source="ai"
         )
         created.append(parent)
+        prev: int | None = None
+        child_ids: list[int] = []
         for t in ms.tasks:
-            created.append(
-                store.create_task(
-                    conn, title=t.title, goal_id=goal_id, parent_task_id=parent,
-                    detail=t.detail, estimate_minutes=t.estimate_minutes, effort=t.effort,
-                    value=t.value, energy=t.energy, source="ai",
-                )
+            tid = store.create_task(
+                conn, title=t.title, goal_id=goal_id, parent_task_id=parent,
+                detail=t.detail, estimate_minutes=t.estimate_minutes, effort=t.effort,
+                value=t.value, energy=t.energy, source="ai",
             )
+            created.append(tid)
+            child_ids.append(tid)
+            # Chain steps so the planner runs them in order (step N after step N-1).
+            if prev is not None:
+                store.add_dependency(conn, tid, prev)
+            prev = tid
+        # The milestone container isn't itself work — hold it back until its
+        # sub-tasks are done (so it's never proposed as a schedulable item).
+        for cid in child_ids:
+            store.add_dependency(conn, parent, cid)
     return created
