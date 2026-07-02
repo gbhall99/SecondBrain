@@ -153,6 +153,19 @@ class Daemon:
     def start(self) -> None:
         self.settings.ensure_dirs()
         init_db(settings=self.settings).close()  # create schema once up front
+        # Self-heal on (re)start: reclaim crashed jobs, checkpoint WAL, fix dirs/schema.
+        try:
+            from secondbrain import repair
+            from secondbrain.storage.db import db_session
+
+            with db_session(settings=self.settings) as conn:
+                for a in repair.repair(conn, self.settings):
+                    if a.fixed:
+                        log.info("self-heal: %s — %s", a.name, a.detail)
+                    elif not a.ok:
+                        log.warning("self-heal: %s — %s", a.name, a.detail)
+        except Exception:  # noqa: BLE001 - repair is best-effort; never block startup
+            log.warning("self-heal step failed", exc_info=True)
         for target in (self._capture_loop, self._worker_loop, self._maintenance_loop):
             t = threading.Thread(target=target, name=target.__name__, daemon=True)
             t.start()
