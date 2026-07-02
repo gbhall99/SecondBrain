@@ -115,7 +115,9 @@ def is_loopback(host: str | None) -> bool:
 
 
 def is_exempt(path: str) -> bool:
-    return any(path == p or path.startswith((p + "/", p)) for p in EXEMPT_PREFIXES)
+    # Exact match or a proper sub-path only — the bare prefix must NOT match, or a
+    # future route like /loginfo would silently bypass auth.
+    return any(path == p or path.startswith(p + "/") for p in EXEMPT_PREFIXES)
 
 
 def env_password() -> str | None:
@@ -133,7 +135,10 @@ _login_failures: dict[str, list[float]] = {}
 def login_allowed(ip: str) -> bool:
     now = time.time()
     fails = [t for t in _login_failures.get(ip, []) if now - t < _WINDOW_SECONDS]
-    _login_failures[ip] = fails
+    if fails:
+        _login_failures[ip] = fails
+    else:
+        _login_failures.pop(ip, None)  # don't retain empty entries (unbounded growth)
     return len(fails) < _MAX_FAILURES
 
 
