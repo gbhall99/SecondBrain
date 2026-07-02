@@ -89,14 +89,28 @@ def detect_commitments(
         due = _as_date(e["due_date"])
         conf = e["confidence"] if e["confidence"] is not None else 0.5
         desc = e["object_text"] or "(unspecified)"
-        if src == owner_id and due is not None and today <= due <= soon:
-            out.append(Suggestion(
-                kind="commitment_owed",
-                title=f"You owe: {desc}",
-                detail=f"Due {e['due_date']}" + (f" to {e['dst_name']}" if e["dst_name"] else ""),
-                confidence=conf, citations=_cites(e["source_segment_ids"]),
-                payload={"key": {"edge": e["id"]}, "due_date": e["due_date"]},
-            ))
+        if src == owner_id:
+            if due is not None and today <= due <= soon:
+                out.append(Suggestion(
+                    kind="commitment_owed",
+                    title=f"You owe: {desc}",
+                    detail=f"Due {e['due_date']}"
+                    + (f" to {e['dst_name']}" if e["dst_name"] else ""),
+                    confidence=conf, citations=_cites(e["source_segment_ids"]),
+                    payload={"key": {"edge": e["id"]}, "due_date": e["due_date"]},
+                ))
+            elif (due is not None and due < today) or (
+                due is None and (_as_date(e["last_seen"]) or today) < stale_before
+            ):
+                # Your own commitment is overdue / has gone stale with no due date.
+                det = f"Overdue ({e['due_date']})" if due is not None else "No progress in a while"
+                out.append(Suggestion(
+                    kind="commitment_overdue",
+                    title=f"You still owe: {desc}",
+                    detail=det + (f" (to {e['dst_name']})" if e["dst_name"] else ""),
+                    confidence=conf, citations=_cites(e["source_segment_ids"]),
+                    payload={"key": {"edge": e["id"]}, "due_date": e["due_date"]},
+                ))
         elif dst == owner_id:
             overdue = due is not None and due < today
             stale = due is None and (_as_date(e["last_seen"]) or today) < stale_before
@@ -160,17 +174,19 @@ def _keyword(a: str | None, b: str | None) -> float:
 
 
 def detect_goal_alignment(conn, settings: Settings, *, owner_id, now: datetime) -> list[Suggestion]:
-    today = now.strftime("%Y-%m-%d")
+    # Look back over the configured recency window (widened for the weekly review),
+    # not just the exact run-day, so the weekly "goal progress" reflects the week.
+    cutoff = (now - timedelta(days=settings.proactive.recent_days)).strftime("%Y-%m-%d")
     out: list[Suggestion] = []
     for g in conn.execute("SELECT * FROM goals WHERE status='active'").fetchall():
-        # advancing: a 'related' linked edge that was last seen today
+        # advancing: a 'related' linked edge last seen within the recency window
         rows = conn.execute(
             """
             SELECT e.id, e.kind, e.object_text, e.source_segment_ids
             FROM goal_links gl JOIN kg_edges e ON e.id = gl.ref_id
-            WHERE gl.goal_id=? AND gl.kind='edge' AND e.valid=1 AND substr(e.last_seen,1,10)=?
+            WHERE gl.goal_id=? AND gl.kind='edge' AND e.valid=1 AND substr(e.last_seen,1,10)>=?
             """,
-            (g["id"], today),
+            (g["id"], cutoff),
         ).fetchall()
         for e in rows:
             out.append(Suggestion(
@@ -184,9 +200,9 @@ def detect_goal_alignment(conn, settings: Settings, *, owner_id, now: datetime) 
         sup = conn.execute(
             """
             SELECT e.id, e.object_text FROM goal_links gl JOIN kg_edges e ON e.id = gl.ref_id
-            WHERE gl.goal_id=? AND gl.kind='edge' AND e.valid=0 AND substr(e.last_seen,1,10)=?
+            WHERE gl.goal_id=? AND gl.kind='edge' AND e.valid=0 AND substr(e.last_seen,1,10)>=?
             """,
-            (g["id"], today),
+            (g["id"], cutoff),
         ).fetchall()
         for e in sup:
             out.append(Suggestion(
