@@ -139,7 +139,11 @@ def _trusted_torch_load():
     original = torch.load
 
     def _patched(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
+        # Force weights_only=False for these trusted checkpoints. pyannote loads
+        # via lightning_fabric's cloud_io._load, which passes weights_only=None
+        # *explicitly*, so setdefault would leave None in place (torch>=2.6 then
+        # treats None as True and rejects the file). Override outright.
+        kwargs["weights_only"] = False
         return original(*args, **kwargs)
 
     torch.load = _patched

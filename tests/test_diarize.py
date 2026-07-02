@@ -137,9 +137,12 @@ def test_trusted_torch_load_defaults_weights_only_false_and_restores(monkeypatch
     with _trusted_torch_load():
         fake_torch.load("model.ckpt")
         assert seen.get("weights_only") is False
-        # An explicit weights_only must be respected, not overridden.
+        # Must override an explicit True/None too: pyannote's loader passes
+        # weights_only=None explicitly, which torch>=2.6 treats as True.
         fake_torch.load("model.ckpt", weights_only=True)
-        assert seen.get("weights_only") is True
+        assert seen.get("weights_only") is False
+        fake_torch.load("model.ckpt", weights_only=None)
+        assert seen.get("weights_only") is False
 
     assert fake_torch.load is original  # restored on exit
 
