@@ -27,6 +27,17 @@
     <key>WorkingDirectory</key>
     <string>__REPO__</string>
 
+    <!-- launchd starts agents with a minimal PATH that excludes Homebrew, so the
+         daemon can't find ffmpeg (transcription decodes FLAC via ffmpeg) and every
+         transcribe job fails with "FFmpeg is not installed or not in your PATH."
+         Include the Homebrew bin dirs for Apple Silicon (/opt/homebrew) and
+         Intel (/usr/local). -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

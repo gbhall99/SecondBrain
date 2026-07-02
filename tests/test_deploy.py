@@ -22,6 +22,9 @@ def test_templates_render_with_no_placeholders_and_valid_xml():
         parsed = plistlib.loads(rendered.encode())  # raises if malformed
         assert parsed["ProgramArguments"][0] == "/Users/me/SecondBrain/.venv/bin/python"
         assert parsed["WorkingDirectory"] == "/Users/me/SecondBrain"
+        # launchd's minimal PATH omits Homebrew; agents must add it back so tools
+        # like ffmpeg resolve (otherwise transcription fails under launchd).
+        assert "/opt/homebrew/bin" in parsed["EnvironmentVariables"]["PATH"]
 
 
 def test_install_writes_daemon_and_web_by_default(tmp_path):
