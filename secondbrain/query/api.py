@@ -1008,7 +1008,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/segments/{segment_id}/speaker")
     def api_reassign_segment(
         segment_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
-        speaker_id: int = Body(..., embed=True),
+        speaker_id: int = Body(..., embed=True, ge=1, le=_SQLITE_MAX_INT),
     ):
         with db() as conn:
             seg = service.get_segment(conn, segment_id)
