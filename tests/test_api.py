@@ -1503,6 +1503,23 @@ def test_int_params_beyond_sqlite_range_are_rejected(client):
     html = client.get(f"/person/{too_big}", headers={"accept": "text/html"})
     assert html.status_code == 422
     assert "look right" in html.text  # friendly error page, not a traceback
+    # Projects, goals, tasks, suggestions and action edges take bare ids too;
+    # each must 422 on an overflowing id rather than 500 out of the driver.
+    # (Valid bodies are sent where required so the id guard is what trips.)
+    assert client.get(f"/api/project/{too_big}").status_code == 422
+    assert client.get(f"/project/{too_big}").status_code == 422
+    assert client.get(f"/api/goals/{too_big}").status_code == 422
+    assert client.delete(f"/api/goals/{too_big}").status_code == 422
+    assert client.get("/api/tasks", params={"goal_id": too_big}).status_code == 422
+    assert client.post(
+        f"/api/tasks/{too_big}/status", json={"status": "done"}
+    ).status_code == 422
+    assert client.get(f"/api/tasks/{too_big}/research").status_code == 422
+    assert client.post(
+        f"/api/suggestions/{too_big}/action", json={"action": "done"}
+    ).status_code == 422
+    assert client.post(f"/api/actions/{too_big}/promote").status_code == 422
+    assert client.post(f"/api/goals/{too_big}/decompose").status_code == 422
 
 
 def test_graph_search_escapes_like_wildcards(client, conn):

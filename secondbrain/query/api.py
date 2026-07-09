@@ -1151,7 +1151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"projects": service.list_projects(conn, settings)}
 
     @app.get("/api/project/{node_id}")
-    def api_project(node_id: int):
+    def api_project(node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         with db() as conn:
             d = service.project_dossier(conn, node_id, settings)
         if d is None:
@@ -1165,7 +1165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "projects.html", {"projects": projects})
 
     @app.get("/project/{node_id}", response_class=HTMLResponse)
-    def project_page(request: Request, node_id: int):
+    def project_page(request: Request, node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         with db() as conn:
             d = service.project_dossier(conn, node_id, settings)
         if d is None:
@@ -1546,7 +1546,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _SUGGESTION_ACTIONS = ("done", "dismiss", "snooze", "up", "down", "reopen")
 
     @app.post("/api/suggestions/{suggestion_id}/action")
-    def api_suggestion_action(suggestion_id: int, action: str = Body(..., embed=True)):
+    def api_suggestion_action(
+        suggestion_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        action: str = Body(..., embed=True),
+    ):
         if action not in _SUGGESTION_ACTIONS:
             raise HTTPException(
                 422, f"action must be one of: {', '.join(_SUGGESTION_ACTIONS)}"
@@ -1600,7 +1603,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"goals": service.list_goals(conn, status)}
 
     @app.get("/api/goals/{goal_id}")
-    def api_get_goal(goal_id: int):
+    def api_get_goal(goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         """One goal plus its knowledge-graph links (evidence for auto-linking)."""
         with db() as conn:
             return _goal_or_404(conn, goal_id)
@@ -1625,7 +1628,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.patch("/api/goals/{goal_id}")
     def api_update_goal(
-        goal_id: int,
+        goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         title: str = Body(None, max_length=500),
         description: str = Body(None, max_length=4000),
         target_date: str = Body(None),
@@ -1659,7 +1662,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"ok": True, "goal": _goal_or_404(conn, goal_id)["goal"]}
 
     @app.post("/api/goals/{goal_id}/status")
-    def api_goal_status(goal_id: int, status: str = Body(..., embed=True)):
+    def api_goal_status(
+        goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        status: str = Body(..., embed=True),
+    ):
         if status not in _GOAL_STATUSES:
             raise HTTPException(422, f"status must be one of: {', '.join(_GOAL_STATUSES)}")
         with db() as conn:
@@ -1668,7 +1674,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.delete("/api/goals/{goal_id}")
-    def api_delete_goal(goal_id: int):
+    def api_delete_goal(goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         with db() as conn:
             _goal_or_404(conn, goal_id)
             service.delete_goal(conn, goal_id)
@@ -1752,7 +1758,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/api/tasks")
-    def api_tasks(goal_id: int = Query(None), status: str = Query(None)):
+    def api_tasks(goal_id: int = Query(None, ge=1, le=_SQLITE_MAX_INT), status: str = Query(None)):
         if status is not None and status not in _TASK_STATUSES:
             raise HTTPException(422, f"status must be one of: {', '.join(_TASK_STATUSES)}")
         with db() as conn:
@@ -1761,7 +1767,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"tasks": service.annotate_task_priorities(conn, tasks, settings)}
 
     @app.post("/api/tasks")
-    def api_create_task(title: str = Body(..., max_length=500), goal_id: int = Body(None),
+    def api_create_task(title: str = Body(..., max_length=500),
+                        goal_id: int = Body(None, ge=1, le=_SQLITE_MAX_INT),
                         detail: str = Body(None, max_length=4000),
                         estimate_minutes: int = Body(None, ge=1, le=1440),
                         value: int = Body(3, ge=1, le=5),
@@ -1781,7 +1788,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.patch("/api/tasks/{task_id}")
     def api_update_task(
-        task_id: int,
+        task_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         title: str = Body(None, max_length=500),
         detail: str = Body(None, max_length=4000),
         estimate_minutes: int = Body(None, ge=0, le=1440),
@@ -1818,7 +1825,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "task": task}
 
     @app.post("/api/tasks/{task_id}/status")
-    def api_task_status(task_id: int, status: str = Body(..., embed=True)):
+    def api_task_status(
+        task_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        status: str = Body(..., embed=True),
+    ):
         if status not in _TASK_STATUSES:
             raise HTTPException(422, f"status must be one of: {', '.join(_TASK_STATUSES)}")
         with db() as conn:
@@ -1827,7 +1837,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/tasks/{task_id}/research")
-    def api_task_research(task_id: int, web: bool = Body(False, embed=True)):
+    def api_task_research(
+        task_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        web: bool = Body(False, embed=True),
+    ):
         with db() as conn:
             _task_or_404(conn, task_id)  # before the slow LLM call, not after
             try:
@@ -1848,7 +1861,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return int(ref[4:]) if ref.startswith("seg:") and ref[4:].isdigit() else None
 
     @app.get("/api/tasks/{task_id}/research")
-    def api_task_research_notes(task_id: int):
+    def api_task_research_notes(task_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         """Stored research notes for a task, newest first (the POST endpoint
         keeps its original response shape; this read view parses sources).
         Each seg:<id> source carries the local ``day`` it was heard on so the
@@ -1875,7 +1888,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"task_id": task_id, "notes": notes}
 
     @app.post("/api/actions/{edge_id}/promote")
-    def api_promote_action(edge_id: int):
+    def api_promote_action(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         """Turn a detected conversation action item into a backlog task
         (idempotent — promoting twice returns the same task)."""
         with db() as conn:
@@ -1888,7 +1901,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "task_id": tid, "title": task["title"] if task else None}
 
     @app.post("/api/actions/{edge_id}/dismiss")
-    def api_dismiss_action(edge_id: int):
+    def api_dismiss_action(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         """Drop a detected action item that isn't a real to-do (the extractor
         over-triggers on casual phrasing). The edge is marked invalid — never
         deleted — so it leaves the Tasks page for good; already-promoted tasks
@@ -1917,7 +1930,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_plan_action(
         action: str = Body("propose", embed=True),
         capacity_minutes: int = Body(None, embed=True, ge=15, le=1440),
-        task_id: int = Body(None, embed=True),
+        task_id: int = Body(None, embed=True, ge=1, le=_SQLITE_MAX_INT),
     ):
         if action not in ("propose", "accept", "remove_task"):
             raise HTTPException(422, "action must be 'propose', 'accept' or 'remove_task'")
@@ -1945,7 +1958,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                                       settings=settings))
 
     @app.post("/api/goals/{goal_id}/decompose")
-    def api_decompose(goal_id: int):
+    def api_decompose(goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
         """Ask the local model for a milestones→tasks plan. Proposes only —
         nothing is persisted until /plan/accept."""
         from secondbrain.llm.jsonout import LLMJSONError
@@ -1967,7 +1980,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(503, detail) from None
 
     @app.post("/api/goals/{goal_id}/plan/accept")
-    def api_accept_plan(goal_id: int, plan: dict = Body(...)):
+    def api_accept_plan(
+        goal_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        plan: dict = Body(...),
+    ):
         with db() as conn:
             _goal_or_404(conn, goal_id)
             try:
