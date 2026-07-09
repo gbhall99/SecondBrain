@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from secondbrain.config import Settings
 from secondbrain.proactive import detectors
@@ -61,6 +61,63 @@ def test_relationships_excludes_opted_out(conn, settings):
     conn.execute("UPDATE speakers SET opted_out=1 WHERE id=3")
     labels = [r["label"] for r in service.relationships(conn, settings)]
     assert "Sam" not in labels
+
+
+def test_relationships_between_people(conn, settings):
+    _seed(conn)  # Dana and Sam share conversation 1
+    rel = service.relationships(conn, settings)
+    dana = next(r for r in rel if r["label"] == "Dana")
+    sam = next(r for r in rel if r["label"] == "Sam")
+    assert [o["label"] for o in dana["often_with"]] == ["Sam"]
+    assert dana["often_with"][0]["speaker_id"] == 3
+    assert dana["often_with"][0]["shared"] == 1
+    assert [o["label"] for o in sam["often_with"]] == ["Dana"]
+
+
+def test_relationships_often_with_skips_opted_out(conn, settings):
+    _seed(conn)
+    conn.execute("UPDATE speakers SET opted_out=1 WHERE id=3")  # Sam opts out
+    rel = service.relationships(conn, settings)
+    dana = next(r for r in rel if r["label"] == "Dana")
+    assert dana["often_with"] == []  # opted-out people never surface, either side
+
+
+def test_relationships_recent_window_and_friendly_label(conn, settings):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (2, 'Dana', 'known', 0)")
+    now = datetime.now(UTC)
+    old_day = (now - timedelta(days=45)).strftime("%Y-%m-%d")
+    _audio(conn, 1, 1, old_day)
+    _seg(conn, 1, 1, old_day, 0, 2)
+    _audio(conn, 2, 2, now.strftime("%Y-%m-%d"))
+    conn.execute(
+        "INSERT INTO transcript_segments (id, transcript_id, audio_file_id, start_offset_s, "
+        "end_offset_s, start_at, text, speaker_id) VALUES (2, 2, 2, 0, 2, ?, 'hi', 2)",
+        (now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),),
+    )
+    rel = service.relationships(conn, settings)
+    dana = rel[0]
+    assert dana["conversations"] == 2
+    assert dana["conversations_30d"] == 1  # only the fresh conversation is in-window
+    assert dana["last_seen_label"] == "today"
+    assert dana["days_since_seen"] == 0
+
+
+def test_relationships_rank_prefers_recent(conn, settings):
+    # Al: 3 conversations ~100 days ago; Bea: 2 conversations yesterday.
+    # Recency-weighted ranking puts Bea first despite fewer total conversations.
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (2, 'Al', 'known', 0)")
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (3, 'Bea', 'known', 0)")
+    now = datetime.now(UTC)
+    old = (now - timedelta(days=100)).strftime("%Y-%m-%d")
+    fresh = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    for i in (1, 2, 3):
+        _audio(conn, i, i, old)
+        _seg(conn, i, i, old, 0, 2)
+    for i in (4, 5):
+        _audio(conn, i, i, fresh)
+        _seg(conn, i, i, fresh, 0, 3)
+    rel = service.relationships(conn, settings)
+    assert [r["label"] for r in rel] == ["Bea", "Al"]
 
 
 def test_stale_relationship_detector(conn):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from secondbrain.config import Settings, get_settings
@@ -37,6 +38,31 @@ class LLM(ABC):
         max_tokens: int | None = None,
     ) -> LLMResponse:
         ...
+
+    async def astream(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield the completion incrementally (used by the chat streaming API).
+
+        Default implementation for backends without native streaming: run the
+        blocking ``complete`` in a worker thread (so it can't stall the event
+        loop) and yield the whole answer as one chunk.
+        """
+        import anyio  # starlette/httpx dependency; imports cleanly everywhere
+
+        def _call() -> LLMResponse:
+            return self.complete(
+                system=system, prompt=prompt, temperature=temperature, max_tokens=max_tokens
+            )
+
+        resp = await anyio.to_thread.run_sync(_call)
+        if resp.text:
+            yield resp.text
 
 
 class MockLLM(LLM):
@@ -83,25 +109,45 @@ class OllamaLLM(LLM):
 
     backend_name = "ollama"
 
+    # num_ctx buckets: Ollama's default context window (often 2k-4k) silently
+    # truncates long prompts *from the start*, which would drop the system
+    # prompt (citation + general-knowledge labeling rules) exactly when the
+    # retrieval context is rich. We size the window to the request using a
+    # conservative ~3 chars/token estimate, in coarse buckets so the model
+    # isn't reloaded for every small variation in prompt size.
+    _CTX_BUCKETS = (8192, 16384, 32768)
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.model = settings.llm.model
 
-    def complete(self, *, system, prompt, schema=None, temperature=0.0, max_tokens=None):
-        import httpx  # already a dependency; imports cleanly on any OS
-
-        options: dict = {"temperature": temperature}
+    def _options(
+        self, system: str, prompt: str, temperature: float, max_tokens: int | None
+    ) -> dict:
+        need = (len(system) + len(prompt)) // 3 + (max_tokens or 2048) + 512
+        num_ctx = next((b for b in self._CTX_BUCKETS if b >= need), self._CTX_BUCKETS[-1])
+        options: dict = {"temperature": temperature, "num_ctx": num_ctx}
         if max_tokens:
             options["num_predict"] = max_tokens
-        payload = {
+        return options
+
+    def _payload(self, system: str, prompt: str, options: dict, *, stream: bool) -> dict:
+        return {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            "stream": False,
+            "stream": stream,
             "options": options,
         }
+
+    def complete(self, *, system, prompt, schema=None, temperature=0.0, max_tokens=None):
+        import httpx  # already a dependency; imports cleanly on any OS
+
+        payload = self._payload(
+            system, prompt, self._options(system, prompt, temperature, max_tokens), stream=False
+        )
         if schema is not None:
             payload["format"] = schema  # Ollama constrains generation to the schema
         resp = httpx.post(
@@ -117,6 +163,37 @@ class OllamaLLM(LLM):
             backend=self.backend_name,
             raw=data,
         )
+
+    async def astream(self, *, system, prompt, temperature=0.0, max_tokens=None):
+        """Token stream from Ollama (``stream: true``), yielded as text chunks.
+
+        The read timeout applies *between* chunks, so a long generation streams
+        for as long as tokens keep arriving; a stalled model still times out.
+        Cancelling the surrounding task closes the HTTP connection, which makes
+        Ollama abort the generation instead of finishing it for nobody.
+        """
+        import httpx
+
+        payload = self._payload(
+            system, prompt, self._options(system, prompt, temperature, max_tokens), stream=True
+        )
+        timeout = httpx.Timeout(self.settings.llm.request_timeout_s, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client, client.stream(
+            "POST", f"{self.settings.llm.host}/api/chat", json=payload
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue  # ignore malformed keep-alive noise
+                piece = (data.get("message") or {}).get("content") or ""
+                if piece:
+                    yield piece
+                if data.get("done"):
+                    return
 
 
 def get_llm(settings: Settings | None = None) -> LLM:

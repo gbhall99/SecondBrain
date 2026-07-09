@@ -1,27 +1,229 @@
 {% extends "base.html" %}
-{% block title %}SecondBrain — Relationships{% endblock %}
+{% block title %}Relationships · SecondBrain{% endblock %}
 {% block style %}
-    .stale { color: #c70; }
+    [hidden] { display: none !important; } /* flex containers must not defeat hidden */
+    .controls { display: flex; align-items: center; flex-wrap: wrap;
+                gap: .5rem .9rem; margin: .9rem 0 .7rem; }
+    .controls input[type="search"] { flex: 1 1 10rem; min-width: 0; max-width: 15rem;
+                                     padding: .4rem .6rem; font-size: .92rem; }
+    .checklabel { display: inline-flex; align-items: center; gap: .4rem;
+                  font-size: .92rem; color: var(--muted); cursor: pointer;
+                  white-space: nowrap; }
+    .checklabel:hover { color: var(--fg); }
+    #rel-count { margin-left: auto; }
+    td.num, th.h-num { text-align: right; font-variant-numeric: tabular-nums; }
+    th .sortbtn { background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+                  font: inherit; color: inherit; letter-spacing: inherit;
+                  text-transform: inherit; border-radius: 3px; }
+    th .sortbtn:hover { color: var(--fg); border: 0; }
+    th abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; }
+    th[aria-sort] .sortbtn { color: var(--fg); }
+    th .sortbtn::after { content: ""; display: inline-block; width: .75em; }
+    th[aria-sort="ascending"] .sortbtn::after { content: " ↑"; width: auto; }
+    th[aria-sort="descending"] .sortbtn::after { content: " ↓"; width: auto; }
+    .unnamed { font-size: .8rem; color: var(--muted); text-decoration: none;
+               border-bottom: 1px dotted var(--muted); margin-left: .3rem;
+               white-space: nowrap; }
+    .unnamed:hover { color: var(--fg); border-bottom-color: var(--fg); }
+    .stale-pill { display: inline-block; font-size: .72rem; font-weight: 600;
+                  line-height: 1.4; padding: 0 .45rem; margin-left: .3rem;
+                  border: 1px solid var(--warn); border-radius: 999px;
+                  color: var(--warn); letter-spacing: .02em; }
+    td.often { font-size: .88rem; }
+    .foot { margin-top: .55rem; }
 {% endblock %}
 {% block content %}
   <h1>Relationships</h1>
-  <p class="meta">Who you interact with, ranked. Opted-out people are excluded.</p>
-  {% if not relationships %}<p class="meta">No interactions recorded yet.</p>{% endif %}
-  {% if relationships %}
-  <table>
-    <tr><th>Person</th><th>Conversations</th><th>Talk min</th><th>Last seen</th></tr>
-    {% for r in relationships %}
-    <tr>
-      <td><a href="/person/{{ r.speaker_id }}">{{ r.label }}</a>
-        <span class="meta">{{ r.kind }}</span></td>
-      <td>{{ r.conversations }}</td>
-      <td>{{ r.talk_minutes }}</td>
-      <td class="{{ 'stale' if r.days_since_seen is not none and r.days_since_seen > 30 else '' }}">
-        {{ (r.last_seen or '')[:10] or '—' }}
-        {% if r.days_since_seen is not none %}<span class="meta">({{ r.days_since_seen }}d)</span>{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
+  <p class="meta">Who you talk with — and who they talk with. Opted-out people are excluded.</p>
+
+  {% if not relationships %}
+    <div class="empty"><strong>No interactions recorded yet</strong>
+      People appear here automatically once conversations are captured and voices are
+      diarized. Name detected voices on the <a href="/speakers">People page</a> so this
+      view shows real names instead of “Unknown #1”.</div>
+  {% else %}
+
+  <div class="controls">
+    <label class="visually-hidden" for="rel-filter">Filter people by name</label>
+    <input type="search" id="rel-filter" placeholder="Filter people…" autocomplete="off" />
+    {% if relationships | selectattr('kind', 'equalto', 'unknown') | list %}
+      <label class="checklabel"><input type="checkbox" id="rel-hide-unnamed" />
+        Hide unnamed speakers</label>
+    {% endif %}
+    <span class="meta" id="rel-count" aria-live="polite">{{ relationships|length }}
+      {{ 'person' if relationships|length == 1 else 'people' }}</span>
+  </div>
+
+  <div class="table-wrap" id="rel-wrap">
+  <table id="rel-table">
+    <caption class="visually-hidden">People ranked by interaction; use the column header
+      buttons to sort</caption>
+    <thead>
+      <tr>
+        <th scope="col"><button type="button" class="sortbtn" data-key="person"
+            data-type="text" title="Sort by name">Person</button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="conversations" data-type="num" title="Sort by conversations">
+            <abbr title="Distinct conversations, all time">Convos</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="recent" data-type="num" title="Sort by recent conversations">
+            <abbr title="Conversations in the last 30 days">30d</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="minutes" data-type="num" title="Sort by talk time">
+            <abbr title="Minutes they spoke, all time">Talk min</abbr></button></th>
+        <th scope="col"><button type="button" class="sortbtn" data-key="seen"
+            data-type="date" title="Sort by last seen">Last seen</button></th>
+        <th scope="col">Often with</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in relationships %}
+      <tr data-named="{{ 0 if r.kind == 'unknown' else 1 }}"
+          data-search="{{ (r.label ~ ' ' ~ (r.often_with | map(attribute='label') | join(' '))) | lower }}">
+        <td data-v="{{ r.label | lower }}">
+          <a href="/person/{{ r.speaker_id }}" title="Open {{ r.label }}’s page">{{ r.label }}</a>
+          {%- if r.kind == 'unknown' %}
+            <a class="unnamed" href="/speakers#spk-{{ r.speaker_id }}"
+               title="This voice hasn’t been named yet — put a name to it on the People page">unnamed</a>
+          {%- endif %}
+        </td>
+        <td class="num" data-v="{{ r.conversations }}">{{ r.conversations }}</td>
+        <td class="num" data-v="{{ r.conversations_30d }}">{{ r.conversations_30d }}</td>
+        <td class="num" data-v="{{ r.talk_minutes }}">{{ r.talk_minutes }}</td>
+        {% set stale = r.days_since_seen is not none and r.days_since_seen > 30 %}
+        <td class="num" data-v="{{ r.last_seen or '' }}">
+          {%- if r.last_seen -%}
+            <time datetime="{{ r.last_seen }}" title="{{ r.last_seen }}">{{ r.last_seen_label }}</time>
+          {%- else -%}
+            <span class="meta">—</span>
+          {%- endif -%}
+          {%- if stale %} <span class="stale-pill"
+              title="No interaction in over 30 days">stale</span>{% endif %}
+        </td>
+        <td class="often">
+          {%- if r.often_with -%}
+            {%- for o in r.often_with -%}
+              <a href="/person/{{ o.speaker_id }}"
+                 title="{{ o.shared }} shared conversation{{ '' if o.shared == 1 else 's' }}">{{ o.label }}</a>
+              {%- if not loop.last %}, {% endif %}
+            {%- endfor -%}
+          {%- else -%}
+            <span class="meta" title="Not heard in a conversation with anyone else yet">—</span>
+          {%- endif -%}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
   </table>
+  </div>
+
+  <div class="empty" id="rel-nomatch" hidden><strong>No one matches</strong>
+    Try a different name, or
+    <button type="button" class="linklike" id="rel-reset">show everyone</button>.</div>
+
+  <p class="meta foot">Ranked by conversations, weighted toward recent contact — click a
+    column header to re-sort. “Often with” links the people they share conversations
+    with; “stale” means no interaction in over 30 days.</p>
+
+  <script>
+    (function () {
+      'use strict';
+      var table = document.getElementById('rel-table');
+      if (!table || !table.tBodies.length) return;
+      var tbody = table.tBodies[0];
+      var rows = Array.prototype.slice.call(tbody.rows);
+      var wrap = document.getElementById('rel-wrap');
+      var filter = document.getElementById('rel-filter');
+      var hideUn = document.getElementById('rel-hide-unnamed');
+      var count = document.getElementById('rel-count');
+      var nomatch = document.getElementById('rel-nomatch');
+      var reset = document.getElementById('rel-reset');
+      var HIDE_KEY = 'sb-rel-hide-unnamed';
+
+      // Hover detail: the exact local moment, not the raw stored UTC string.
+      rows.forEach(function (tr) {
+        var t = tr.querySelector('time[datetime]');
+        if (!t) return;
+        var d = new Date(t.getAttribute('datetime'));
+        if (!isNaN(d)) t.title = d.toLocaleString();
+      });
+
+      function people(n) { return n + (n === 1 ? ' person' : ' people'); }
+
+      function apply() {
+        var q = (filter && filter.value || '').trim().toLowerCase();
+        var hideUnnamed = !!(hideUn && hideUn.checked);
+        var shown = 0;
+        rows.forEach(function (tr) {
+          var ok = !q || (tr.getAttribute('data-search') || '').indexOf(q) !== -1;
+          if (ok && hideUnnamed && tr.getAttribute('data-named') === '0') ok = false;
+          tr.hidden = !ok;
+          if (ok) shown++;
+        });
+        if (count) {
+          count.textContent = (shown === rows.length)
+            ? people(shown)
+            : people(shown) + ' of ' + rows.length;
+        }
+        if (nomatch) nomatch.hidden = shown !== 0;
+        if (wrap) wrap.hidden = shown === 0;
+      }
+
+      if (filter) filter.addEventListener('input', apply);
+      if (hideUn) {
+        try { hideUn.checked = localStorage.getItem(HIDE_KEY) === '1'; } catch (e) { /* private mode */ }
+        hideUn.addEventListener('change', function () {
+          try { localStorage.setItem(HIDE_KEY, hideUn.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+          apply();
+        });
+      }
+      if (reset) {
+        reset.addEventListener('click', function () {
+          if (filter) filter.value = '';
+          if (hideUn && hideUn.checked) {
+            hideUn.checked = false;
+            try { localStorage.setItem(HIDE_KEY, '0'); } catch (e) { /* ignore */ }
+          }
+          apply();
+          if (filter) filter.focus();
+        });
+      }
+      apply(); // applies the remembered "hide unnamed" preference
+
+      // --- column sorting (server order = recency-weighted rank) ------------
+      var current = { key: null, dir: 0 };
+
+      function cellValue(tr, idx, type) {
+        var td = tr.cells[idx];
+        var v = td ? td.getAttribute('data-v') : null;
+        if (v === null) v = td ? td.textContent : '';
+        if (type === 'num') { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
+        return v.trim().toLowerCase();
+      }
+
+      table.tHead.addEventListener('click', function (e) {
+        var btn = e.target.closest && e.target.closest('.sortbtn');
+        if (!btn) return;
+        var th = btn.closest('th');
+        var idx = th.cellIndex;
+        var type = btn.getAttribute('data-type');
+        var key = btn.getAttribute('data-key');
+        // Names sort A→Z first; counts and dates sort biggest/newest first.
+        var dir = (current.key === key) ? -current.dir : (type === 'text' ? 1 : -1);
+        current = { key: key, dir: dir };
+        rows.sort(function (a, b) {
+          var av = cellValue(a, idx, type), bv = cellValue(b, idx, type);
+          if (av < bv) return -dir;
+          if (av > bv) return dir;
+          return 0;
+        });
+        rows.forEach(function (tr) { tbody.appendChild(tr); });
+        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (h) {
+          h.removeAttribute('aria-sort');
+        });
+        th.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
+      });
+    })();
+  </script>
   {% endif %}
 {% endblock %}

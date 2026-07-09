@@ -21,6 +21,24 @@ JOB_PROACTIVE = "generate_digest"
 DAILY_RUN_KEY = "proactive_last_daily"
 WEEKLY_RUN_KEY = "proactive_last_weekly"
 
+
+class DigestInFlight(RuntimeError):
+    """Another digest generation for this kind is already running.
+
+    Raised instead of starting a second 1–2 minute LLM run that would race the
+    first on the same digest row (web regenerate vs. a reloaded tab, the
+    daemon's scheduled job, or the CLI). ``started_at`` is the UTC ISO stamp of
+    the in-flight run.
+    """
+
+    def __init__(self, kind: str, started_at: str):
+        self.kind = kind
+        self.started_at = started_at
+        super().__init__(
+            f"a {'weekly review' if kind == 'weekly' else 'daily brief'} "
+            f"is already being generated (started {started_at})"
+        )
+
 _DAILY_SYSTEM = (
     "Write a short, warm morning brief for the user, grouped into Commitments, "
     "Goals, Connections, and Coaching (omit empty groups). Use ONLY the provided "
@@ -80,39 +98,50 @@ def run_digest(
     date: str | None = None,
 ) -> dict | None:
     settings = settings or get_settings()
-    llm = llm or get_llm(settings)
     now = datetime.now(UTC)
-    digest_date = date or now.strftime("%Y-%m-%d")
+    # digest_date is a *local* calendar day: digest_hour is documented as a
+    # local hour, and the brief page labels "Today" from the local wall clock.
+    digest_date = date or datetime.now().astimezone().strftime("%Y-%m-%d")
 
-    work = settings
-    if kind == "weekly":
-        work = settings.model_copy(deep=True)
-        work.proactive.recent_days = max(7, settings.proactive.recent_days)
+    in_flight = store.generating_since(conn, kind)
+    if in_flight:
+        raise DigestInFlight(kind, in_flight)
+    store.mark_generating(conn, kind)
+    try:
+        llm = llm or get_llm(settings)
+        work = settings
+        if kind == "weekly":
+            work = settings.model_copy(deep=True)
+            work.proactive.recent_days = max(7, settings.proactive.recent_days)
 
-    owner_id = owner_node_id(conn)
+        owner_id = owner_node_id(conn)
 
-    # keep goal links fresh before alignment detection
-    from secondbrain.goals.link import relink_goal
+        # keep goal links fresh before alignment detection
+        from secondbrain.goals.link import relink_goal
 
-    for g in conn.execute("SELECT id FROM goals WHERE status='active'").fetchall():
-        relink_goal(conn, g["id"], work)
+        for g in conn.execute("SELECT id FROM goals WHERE status='active'").fetchall():
+            relink_goal(conn, g["id"], work)
 
-    suggestions: list[Suggestion] = []
-    for detect in DETECTORS:
-        suggestions.extend(detect(conn, work, owner_id=owner_id, now=now))
-    if settings.proactive.coaching_enabled:
-        suggestions.extend(_coaching(conn, work, llm, now))
+        suggestions: list[Suggestion] = []
+        for detect in DETECTORS:
+            suggestions.extend(detect(conn, work, owner_id=owner_id, now=now))
+        if settings.proactive.coaching_enabled:
+            suggestions.extend(_coaching(conn, work, llm, now))
 
-    ranked = ranking.rank(conn, suggestions, work, now=now)
-    ids = store.persist_suggestions(conn, digest_date, ranked)
+        ranked = ranking.rank(conn, suggestions, work, now=now)
+        ids = store.persist_suggestions(conn, digest_date, ranked)
 
-    summary, model, backend = _synthesize(conn, ranked, llm, settings, kind)
-    store.save_digest(conn, digest_date, kind, summary, ids, model, backend)
-    return store.get_digest(conn, digest_date, kind)
+        summary, model, backend = _synthesize(conn, ranked, llm, settings, kind)
+        store.save_digest(conn, digest_date, kind, summary, ids, model, backend)
+        return store.get_digest(conn, digest_date, kind)
+    finally:
+        store.clear_generating(conn, kind)
 
 
 def _synthesize(conn, ranked: list[Suggestion], llm: LLM, settings: Settings, kind: str):
     if not ranked:
+        if kind == "weekly":
+            return ("A quiet week — nothing notable to review.", None, None)
         return ("Nothing notable to surface today.", None, None)
     lines = []
     for s in ranked:

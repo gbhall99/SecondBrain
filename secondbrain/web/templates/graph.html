@@ -1,64 +1,739 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Graph</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 820px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; cursor: pointer; }
-    form { display: flex; gap: .5rem; margin: 1rem 0; }
-    input[type=text] { flex: 1; padding: .6rem; border: 1px solid #8884; border-radius: 8px; }
-    button { padding: .6rem 1rem; border-radius: 8px; border: 1px solid #8884;
-             cursor: pointer; background: #8882; }
-    .node { border-bottom: 1px solid #8883; padding: .5rem 0; }
-    .edge { padding: .25rem 0 .25rem 1rem; font-size: .92rem; }
-    .meta { color: #888; font-size: .8rem; }
-    .tag { font-size: .75rem; background: #8882; border-radius: 999px; padding: .1rem .5rem; }
-  </style>
-</head>
-<body>
-  <h1>Knowledge graph</h1>
-  <p class="meta"><a href="/">transcripts</a> · <a href="/speakers">speakers</a> ·
-     <a href="/chat">ask</a></p>
+{% extends "base.html" %}
+{% block title %}Graph · SecondBrain{% endblock %}
+{% block style %}
+    .gsearch { display: flex; gap: .5rem; margin: .9rem 0 .6rem; }
+    .gsearch input { flex: 1; min-width: 0; }
 
-  <form onsubmit="searchNodes(event)">
-    <input type="text" id="q" placeholder="Search people, projects, topics…" autofocus />
-    <button type="submit">Search</button>
+    /* Entity-type filter pills (All · People · Projects · …). */
+    .typebar { display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1rem; }
+    .typebar button { font-size: .82rem; padding: .22rem .75rem; border-radius: 999px;
+                      background: none; border: 1px solid var(--line); color: var(--muted); }
+    /* Hover styling only for unpressed pills, so hovering the active one
+       can't paint its --fg text onto its --fg background. */
+    .typebar button[aria-pressed="false"]:hover:not(:disabled) { color: var(--fg);
+                                                                 border-color: var(--muted); }
+    .typebar button[aria-pressed="true"] { background: var(--fg); color: var(--bg);
+                                           border-color: var(--fg); }
+
+    /* Two panes from ~720px: entity list | detail. One column on phones. */
+    #layout { display: grid; grid-template-columns: minmax(13rem, 17rem) minmax(0, 1fr);
+              gap: .2rem 1.7rem; align-items: start; }
+    #layout.single { grid-template-columns: minmax(0, 1fr); }
+    @media (max-width: 719px) { #layout { grid-template-columns: minmax(0, 1fr); } }
+
+    .kicker { text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+              font-size: .74rem; font-weight: 600; margin: .9rem 0 .3rem; }
+
+    .nodelist { list-style: none; margin: .1rem 0 .4rem; padding: 0; }
+    .nodelist a { display: flex; flex-wrap: wrap; align-items: baseline; gap: .1rem .4rem;
+                  padding: .42rem .55rem; border-radius: 8px; text-decoration: none; }
+    .nodelist a:hover { background: var(--soft); }
+    .nodelist a[aria-current="true"] { background: var(--soft);
+                                       box-shadow: inset 2px 0 0 var(--fg); }
+    .nodelist .nname { font-weight: 500; overflow-wrap: anywhere; }
+    /* Why-it-matched highlight; tokens keep it readable in light and dark. */
+    .nodelist mark { background: var(--soft); color: inherit; font-weight: 600;
+                     border-radius: 3px; padding: 0 .05em;
+                     box-shadow: inset 0 -1.5px 0 var(--muted); }
+    #results:focus { outline: none; }
+    .listfoot { margin: .3rem 0 0 .55rem; }
+    .listfoot .linklike { color: var(--muted); }
+    .listfoot .linklike:hover { color: var(--fg); }
+
+    .tag { font-size: .72rem; background: var(--soft); border-radius: 999px;
+           padding: .1rem .55rem; color: var(--muted); white-space: nowrap;
+           vertical-align: middle; }
+
+    #detail:focus { outline: none; }
+    #detail h2 { font-size: 1.3rem; margin: .5rem 0 .1rem; overflow-wrap: anywhere; }
+    .dossier { margin: .4rem 0 0; display: flex; flex-wrap: wrap; gap: .3rem; }
+
+    .edges { list-style: none; margin: .15rem 0 .6rem; padding: 0; }
+    .edges > li { padding: .5rem 0; border-bottom: 1px solid var(--line); }
+    .edges > li:last-child { border-bottom: 0; }
+    .fct { margin: 0; overflow-wrap: anywhere; }
+    .fct .pred { font-weight: 600; }
+    .due { font-size: .78rem; background: var(--soft); border-radius: 999px;
+           padding: .05rem .5rem; white-space: nowrap; }
+    .prov { margin: .12rem 0 0; }
+    details.quote { margin: .15rem 0 0; }
+    details.quote summary { cursor: pointer; color: var(--muted); font-size: .85rem;
+                            width: fit-content; border-radius: 4px; }
+    details.quote summary:hover { color: var(--fg); }
+    details.quote blockquote { margin: .25rem 0 0; padding: .25rem .75rem;
+                               border-left: 3px solid var(--line); font-size: .9rem;
+                               color: var(--muted); overflow-wrap: anywhere; }
+    details.quote blockquote + blockquote { margin-top: .45rem; }
+    .backlink { margin: 1rem 0 0; }
+    @media (max-width: 719px) { .detail-hint { display: none; } }
+{% endblock %}
+{% block content %}
+  <h1>Knowledge graph</h1>
+  <p class="meta">People, projects, places and topics heard in your conversations — and the
+    facts connecting them, each traceable to the conversation it came from.</p>
+
+  <form class="gsearch" id="gform" role="search">
+    <label class="visually-hidden" for="q">Search the knowledge graph</label>
+    <input type="search" id="q" placeholder="Search people, projects, topics…"
+           maxlength="200" autocomplete="off" spellcheck="false" enterkeyhint="search" />
+    <button type="submit" class="btn-primary">Search</button>
   </form>
 
-  <div id="results"></div>
-  <div id="detail"></div>
+  {# Hidden until the first load says the graph has nodes: pills on top of the
+     graph-empty state would be dead controls. #}
+  <div class="typebar" id="typebar" role="group" aria-label="Filter by entity type" hidden>
+    <button type="button" data-type="" aria-pressed="true">All</button>
+    <button type="button" data-type="person" aria-pressed="false">People</button>
+    <button type="button" data-type="project" aria-pressed="false">Projects</button>
+    <button type="button" data-type="organization" aria-pressed="false">Orgs</button>
+    <button type="button" data-type="topic" aria-pressed="false">Topics</button>
+    <button type="button" data-type="place" aria-pressed="false">Places</button>
+  </div>
+
+  <div id="layout">
+    <section id="results" aria-label="Entities" tabindex="-1"></section>
+    <section id="detail" aria-label="Entity detail" tabindex="-1" hidden></section>
+  </div>
+  {# Short screen-reader announcements for async updates (results/detail load). #}
+  <p id="sr-status" class="visually-hidden" role="status"></p>
 
   <script>
-    async function searchNodes(e) {
-      e.preventDefault();
-      const q = document.getElementById('q').value.trim();
-      if (!q) return;
-      const r = await fetch('/api/graph/search?q=' + encodeURIComponent(q));
-      const d = await r.json();
-      document.getElementById('detail').innerHTML = '';
-      document.getElementById('results').innerHTML = d.nodes.length
-        ? d.nodes.map(n => `<div class="node">
-             <a onclick="openNode(${n.id})">${escapeHtml(n.name)}</a>
-             <span class="tag">${n.type}</span>
-             <span class="meta">· ${n.edge_count} links</span></div>`).join('')
-        : '<p class="meta">No matching entities.</p>';
-    }
-    async function openNode(id) {
-      const r = await fetch('/api/graph/node/' + id);
-      const d = await r.json();
-      document.getElementById('detail').innerHTML =
-        `<h2>${escapeHtml(d.node.name)} <span class="tag">${d.node.type}</span></h2>` +
-        (d.edges.length ? d.edges.map(e => `<div class="edge">• ${escapeHtml(e.src_name)}
-            <b>${escapeHtml(e.predicate || e.kind)}</b>
-            ${escapeHtml(e.dst_name || e.object_text || '')}
-            ${e.due_date ? '<span class="meta">(due ' + e.due_date + ')</span>' : ''}</div>`).join('')
-          : '<p class="meta">No facts yet.</p>');
-    }
-    function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+    (function () {
+      'use strict';
+
+      var form = document.getElementById('gform');
+      var input = document.getElementById('q');
+      var layout = document.getElementById('layout');
+      var typebar = document.getElementById('typebar');
+      var resultsBox = document.getElementById('results');
+      var detailBox = document.getElementById('detail');
+      var srStatus = document.getElementById('sr-status');
+
+      // rendered state (q === null: nothing yet; type '' = every entity type)
+      var cur = { q: null, node: 0, type: '' };
+      var selId = 0;                   // canonical id of the entity shown in #detail
+      var graphTotal = null;           // nodes in the whole graph, once known
+      var searchSeq = 0, nodeSeq = 0;  // drop out-of-order responses
+      // Paged entity list ("Show more"): rows rendered, rows fetched (the next
+      // offset — can exceed `shown` if a refetch returned an already-listed
+      // node), and the server's total for the current query.
+      var list = { shown: 0, offset: 0, total: 0, paged: false };
+      var PAGE = 20;                   // server default page size for /api/graph/search
+      var QMAX = 200;                  // keep in sync with the input's maxlength
+      var esc = SB.esc;
+
+      var KIND_LABEL = { fact: 'Facts', decision: 'Decisions', action_item: 'Action items',
+                         idea: 'Ideas', mention: 'Mentions' };
+      var KIND_ORDER = ['fact', 'decision', 'action_item', 'idea', 'mention'];
+      // Entity types the server accepts as a filter (matches the pill bar).
+      var TYPES = ['person', 'project', 'organization', 'topic', 'place'];
+      var TYPE_NOUN = { person: 'people', project: 'projects', organization: 'organizations',
+                        topic: 'topics', place: 'places' };
+
+      // ---- helpers ---------------------------------------------------------
+
+      function announce(msg) { srStatus.textContent = msg; }
+
+      function focusDetail() {
+        // Move focus for keyboard/AT users without yanking the page around:
+        // scroll only as far as needed (matters on phones, where the detail
+        // pane stacks below the list).
+        try { detailBox.focus({ preventScroll: true }); } catch (e) { detailBox.focus(); }
+        if (detailBox.scrollIntoView) detailBox.scrollIntoView({ block: 'nearest' });
+      }
+
+      function loadingSoon(box, msg) {
+        // Show the indicator only if the request is actually slow (>180 ms),
+        // so instant local queries don't flash.
+        return setTimeout(function () {
+          box.innerHTML = '<p class="meta">' + esc(msg) + '</p>';
+        }, 180);
+      }
+
+      function fmtDay(day) {           // '2026-07-02' → 'Thu 2 Jul 2026'
+        if (!day) return '';
+        var d = new Date(day + 'T12:00:00');
+        return isNaN(d) ? day : d.toLocaleDateString(undefined,
+          { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+      }
+      function fmtStampDay(iso) {      // UTC ISO → local '2 Jul 2026'
+        if (!iso) return '';
+        var d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleDateString(undefined,
+          { day: 'numeric', month: 'short', year: 'numeric' });
+      }
+      function fmtStampTime(iso) {     // UTC ISO → local '09:14'
+        if (!iso) return '';
+        var d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleTimeString(undefined,
+          { hour: '2-digit', minute: '2-digit', hour12: false });
+      }
+
+      // ---- URL state (#q=…&type=…&node=…): refresh, back button, deep links --
+
+      function parseHash() {
+        var out = { q: '', node: 0, type: '' };
+        location.hash.replace(/^#/, '').split('&').forEach(function (kv) {
+          var i = kv.indexOf('=');
+          if (i < 0) return;
+          var k = kv.slice(0, i), v = kv.slice(i + 1);
+          try { v = decodeURIComponent(v); } catch (e) { /* keep raw */ }
+          // Clamp like the input's maxlength: a hand-made deep link can't
+          // send a query the server would reject as too long.
+          if (k === 'q') out.q = v.slice(0, QMAX);
+          else if (k === 'type') out.type = TYPES.indexOf(v) >= 0 ? v : '';
+          else if (k === 'node' && v) {
+            // Digit ids open normally; anything else (a paste-mangled
+            // '1e+26') is kept as text for the server to refuse, so the pane
+            // can say the link is bad — parseInt would quietly open an
+            // unrelated entity instead (parseInt('1e+26') === 1).
+            out.node = /^\d+$/.test(v) ? parseInt(v, 10) : v.slice(0, 40);
+          }
+        });
+        return out;
+      }
+      function buildHash(q, node, type) {
+        var parts = [];
+        if (q) parts.push('q=' + encodeURIComponent(q));
+        if (type) parts.push('type=' + encodeURIComponent(type));
+        if (node) parts.push('node=' + encodeURIComponent(node));
+        return parts.length ? '#' + parts.join('&') : '';
+      }
+      function setHash(q, node, type, push) {
+        var h = buildHash(q, node, type);
+        if ((location.hash || '') === h) return;
+        var url = h || location.pathname + location.search;
+        if (push) history.pushState(null, '', url);
+        else history.replaceState(null, '', url);
+      }
+
+      // ---- search / browse ---------------------------------------------------
+
+      async function runSearch(q, type, opts) {
+        opts = opts || {};
+        if (q === cur.q && type === cur.type && !opts.force) return;
+        cur.q = q;
+        cur.type = type;
+        syncTypebar();
+        var mySeq = ++searchSeq;
+        var timer = loadingSoon(resultsBox, q ? 'Searching…' : 'Loading the graph…');
+        try {
+          var d = await SB.api('/api/graph/search?q=' + encodeURIComponent(q)
+                               + (type ? '&type=' + encodeURIComponent(type) : ''),
+                               { quiet: true, button: opts.button });
+          // Clear this request's own loading timer even when superseded — a
+          // ghost timer would otherwise paint 'Searching…' over the newer
+          // response once its 180 ms grace period expires.
+          clearTimeout(timer);
+          if (mySeq !== searchSeq) return;
+          graphTotal = d.node_total;
+          renderResults(q, d);
+        } catch (err) {
+          clearTimeout(timer);
+          if (mySeq !== searchSeq) return;
+          // 422 = the request itself was invalid (e.g. an over-long pasted
+          // deep link); FastAPI's raw validation JSON isn't for humans.
+          var msg = err.status === 422
+            ? 'That search is too long — try a shorter fragment.'
+            : (err.message || 'Something went wrong.');
+          resultsBox.innerHTML =
+            '<div class="empty"><strong>Couldn’t ' + (q ? 'search' : 'load')
+            + ' the graph</strong> ' + esc(msg)
+            + '<br><button type="button" class="linklike" id="retry-search">Try again</button></div>';
+          var b = document.getElementById('retry-search');
+          if (b) {
+            b.addEventListener('click', function () {
+              runSearch(cur.q, cur.type, { force: true });
+            });
+          }
+          announce('Search failed');
+        }
+      }
+
+      // Keep the pill bar's pressed state in step with cur.type.
+      function syncTypebar() {
+        typebar.querySelectorAll('button[data-type]').forEach(function (b) {
+          b.setAttribute('aria-pressed', String(b.getAttribute('data-type') === cur.type));
+        });
+      }
+
+      function setType(t) {
+        if (t === cur.type) return;
+        setHash(cur.q, cur.node, t, true);   // back button undoes the filter
+        runSearch(cur.q, t, {});
+      }
+
+      // Escaped label with each query term wrapped in <mark>, so it's obvious
+      // why a result matched. Matches on the raw text, escapes piecewise —
+      // a term can never match across the characters of an HTML entity.
+      function markTerms(text) {
+        var raw = String(text == null ? '' : text);
+        var terms = (cur.q || '').trim().split(/\s+/).filter(Boolean);
+        if (!terms.length) return esc(raw);
+        terms.sort(function (a, b) { return b.length - a.length; });  // 'atlas' beats 'at'
+        var pat = terms.map(function (t) {
+          return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }).join('|');
+        var re;
+        try { re = new RegExp(pat, 'gi'); } catch (e) { return esc(raw); }
+        var out = '', last = 0, m;
+        while ((m = re.exec(raw)) !== null) {
+          if (!m[0]) { re.lastIndex++; continue; }
+          out += esc(raw.slice(last, m.index)) + '<mark>' + esc(m[0]) + '</mark>';
+          last = m.index + m[0].length;
+        }
+        return out + esc(raw.slice(last));
+        // Alias-only matches ('greg' → Hallman) show their reason via the
+        // server's matched_alias instead (see nodeItem).
+      }
+
+      function nodeItem(n) {
+        var count = Number(n.edge_count) || 0;
+        // When the visible name isn't why this row matched, say what was:
+        // 'via “Greg”' with the query term highlighted inside the alias.
+        var via = n.matched_alias
+          ? '<span class="meta">via “' + markTerms(n.matched_alias) + '”</span>'
+          : '';
+        return '<li><a data-node="' + (Number(n.id) || 0) + '" href="'
+          + esc(buildHash(cur.q, n.id, cur.type)) + '">'
+          + '<span class="nname">' + markTerms(n.label || n.name) + '</span>' + via
+          + '<span class="tag">' + esc(n.type) + '</span>'
+          + '<span class="meta num">' + count + (count === 1 ? ' link' : ' links') + '</span>'
+          + '</a></li>';
+      }
+
+      function renderResults(q, d) {
+        var nodes = d.nodes || [];
+        list.shown = nodes.length;
+        list.offset = nodes.length;
+        list.total = Number(d.total) || 0;
+        list.paged = false;
+        var single = d.node_total === 0;
+        layout.classList.toggle('single', single);
+        typebar.hidden = single;
+        if (single) {
+          resultsBox.innerHTML =
+            '<div class="empty"><strong>No entities yet</strong> '
+            + 'The graph fills in on its own once recorded conversations are transcribed '
+            + 'and processed by the local model. See what’s been captured so far on the '
+            + '<a href="/timeline">Timeline</a>.</div>';
+          detailBox.hidden = true;
+          announce('The knowledge graph is empty');
+          return;
+        }
+        var noun = TYPE_NOUN[cur.type] || 'entities';
+        var html;
+        if (!nodes.length) {
+          var title, hint;
+          if (q) {
+            title = cur.type ? 'No ' + noun + ' match “' + esc(q) + '”'
+                             : 'No matches for “' + esc(q) + '”';
+            hint = 'Try a shorter fragment — matching is partial and includes former names '
+              + '(“greg” finds Gregory).';
+          } else {
+            // Type filter on, nothing of that type yet.
+            title = 'No ' + noun + ' yet';
+            hint = 'The graph hasn’t picked up any ' + noun
+              + ' so far — new conversations fill it in.';
+          }
+          var clear = cur.type
+            ? '<br><button type="button" class="linklike" id="clear-type">'
+              + (q ? 'Search every type' : 'Show all entities') + '</button>'
+            : '';
+          html = '<h2 class="kicker">Results</h2>'
+            + '<div class="empty"><strong>' + title + '</strong> ' + hint + clear + '</div>';
+        } else {
+          var heading;
+          if (q) heading = 'Results for “' + esc(q) + '”';
+          else if (d.total <= nodes.length) {
+            heading = cur.type ? 'All ' + noun : 'All entities';
+          } else {
+            heading = 'Most connected' + (cur.type ? ' ' + noun : '');
+          }
+          html = '<h2 class="kicker" id="list-head">' + heading + '</h2>'
+            + '<ul class="nodelist">' + nodes.map(nodeItem).join('') + '</ul>'
+            + '<p class="meta listfoot" id="list-meta" hidden></p>'
+            + '<p class="listfoot" id="more-line" hidden>'
+            + '<button type="button" class="linklike" id="show-more">Show more</button></p>';
+        }
+        // Re-rendering must never dump focus on <body>: if a row (or the
+        // Show-more button) held focus, put it back on the same entity in the
+        // fresh list — or on the pane itself when that entity is gone.
+        var hadListFocus = resultsBox.contains(document.activeElement);
+        var focusNode = 0;
+        if (hadListFocus && document.activeElement.closest) {
+          var fa = document.activeElement.closest('a[data-node]');
+          if (fa) focusNode = Number(fa.getAttribute('data-node')) || 0;
+        }
+        resultsBox.innerHTML = html;
+        var ct = document.getElementById('clear-type');
+        if (ct) ct.addEventListener('click', function () { setType(''); });
+        updateListFoot();
+        markSelected(selId);
+        if (hadListFocus) focusList(focusNode);
+        if (cur.node === 0) showDetailHint();
+        announce(q ? nodes.length + (nodes.length === 1 ? ' result' : ' results') + ' for ' + q
+                   : nodes.length + ' ' + noun + ' shown');
+      }
+
+      // Keep the "Showing X of N" line, the Show-more button and the heading
+      // in step with the list state (after both a fresh render and Show more).
+      function updateListFoot() {
+        var meta = document.getElementById('list-meta');
+        var line = document.getElementById('more-line');
+        var btn = document.getElementById('show-more');
+        if (!meta || !line || !btn) return;
+        var kind = TYPE_NOUN[cur.type];        // 'people' … or undefined for All
+        var noun = cur.q ? (kind ? 'matching ' + kind : 'matches') : (kind || 'entities');
+        var left = list.total - list.offset;   // rows the server still holds
+        if (left > 0) {
+          meta.textContent = 'Showing ' + list.shown + ' of ' + list.total + ' ' + noun
+            + (cur.q ? '.' : ' — search to jump straight to one.');
+          btn.textContent = 'Show ' + Math.min(PAGE, left) + ' more';
+          meta.hidden = false;
+          line.hidden = false;
+        } else {
+          // Only say "that's everything" if the user actually paged; a list
+          // that fit on one page needs no footer at all.
+          meta.textContent = 'All ' + list.total + ' ' + noun + ' shown.';
+          meta.hidden = !list.paged;
+          line.hidden = true;
+          var head = document.getElementById('list-head');
+          if (head && !cur.q && list.paged) head.textContent = 'All ' + (kind || 'entities');
+        }
+      }
+
+      async function loadMore(btn) {
+        var mySeq = searchSeq;               // tie this append to the current list
+        var q = cur.q || '';
+        // SB.busy disables the button while the request is in flight, which
+        // silently drops keyboard focus to <body> — capture it beforehand so
+        // it can be handed back (or on) once the rows have landed.
+        var hadFocus = document.activeElement === btn;
+        try {
+          var d = await SB.api('/api/graph/search?q=' + encodeURIComponent(q)
+            + (cur.type ? '&type=' + encodeURIComponent(cur.type) : '')
+            + '&offset=' + list.offset, { button: btn });
+          if (mySeq !== searchSeq) return;   // a newer search already re-rendered
+          var ul = resultsBox.querySelector('.nodelist');
+          if (!ul) return;
+          graphTotal = d.node_total;
+          var got = d.nodes || [];
+          // Dedupe on id: if the ranking shifted under us (new facts arrived),
+          // a node from page 1 can reappear on page 2 — never list it twice.
+          var have = {};
+          ul.querySelectorAll('a[data-node]').forEach(function (a) {
+            have[a.getAttribute('data-node')] = true;
+          });
+          var fresh = got.filter(function (n) { return !have[String(Number(n.id) || 0)]; });
+          if (fresh.length) ul.insertAdjacentHTML('beforeend', fresh.map(nodeItem).join(''));
+          list.paged = true;
+          list.total = Number(d.total) || 0;
+          list.offset = got.length ? list.offset + got.length : list.total;  // [] ⇒ done
+          list.shown += fresh.length;
+          updateListFoot();
+          markSelected(selId);
+          var done = list.offset >= list.total;
+          if (hadFocus) {
+            // Keep the keyboard where it was: back on the button for the next
+            // page — or, when the button just vanished, on the first row it
+            // revealed instead of dropping the user on <body>.
+            var tgt = !done ? btn
+              : ((fresh.length
+                  && ul.querySelector('a[data-node="' + (Number(fresh[0].id) || 0) + '"]'))
+                 || resultsBox);
+            try { tgt.focus({ preventScroll: true }); } catch (e) { tgt.focus(); }
+          }
+          announce(done ? 'All ' + list.total + ' shown'
+                        : 'Showing ' + list.shown + ' of ' + list.total);
+        } catch (err) {
+          // SB.api already toasted. Re-focus so retrying is a keypress away.
+          if (hadFocus && mySeq === searchSeq && document.contains(btn)) {
+            try { btn.focus({ preventScroll: true }); } catch (e) { /* ok */ }
+          }
+        }
+      }
+
+      function markSelected(id) {
+        resultsBox.querySelectorAll('a[data-node]').forEach(function (a) {
+          if (id && Number(a.getAttribute('data-node')) === id) {
+            a.setAttribute('aria-current', 'true');
+          } else {
+            a.removeAttribute('aria-current');
+          }
+        });
+      }
+
+      function showDetailHint() {
+        if (graphTotal === 0) { detailBox.hidden = true; return; }
+        detailBox.hidden = false;
+        detailBox.innerHTML = '<div class="empty detail-hint"><strong>Pick an entity</strong> '
+          + 'Its facts, connections and the conversations behind them appear here.</div>';
+      }
+
+      // ---- node detail -------------------------------------------------------
+
+      async function openNode(id, opts) {
+        opts = opts || {};
+        if (id === cur.node && !opts.force) {
+          if (opts.focus) focusDetail();
+          return;
+        }
+        cur.node = id;
+        var mySeq = ++nodeSeq;
+        detailBox.hidden = false;
+        var timer = loadingSoon(detailBox, 'Loading entity…');
+        try {
+          // id is normally a number; a malformed deep link leaves it a string
+          // (see parseHash), which the server rejects and we explain below.
+          var d = await SB.api('/api/graph/node/' + encodeURIComponent(id), { quiet: true });
+          // Clear this request's own loading timer even when superseded — a
+          // ghost timer would otherwise paint 'Loading entity…' over the
+          // newer response once its 180 ms grace period expires.
+          clearTimeout(timer);
+          if (mySeq !== nodeSeq) return;
+          selId = d.node.id;
+          if (d.node.id !== id) {        // merged id — canonicalize the URL
+            cur.node = d.node.id;
+            setHash(cur.q, cur.node, cur.type, false);
+          }
+          renderDetail(d);
+          markSelected(selId);
+          announce('Loaded ' + (d.node.label || d.node.name));
+          if (opts.focus) focusDetail();
+        } catch (err) {
+          clearTimeout(timer);
+          if (mySeq !== nodeSeq) return;
+          renderDetailError(err, id);
+          if (opts.focus) focusDetail();
+        }
+      }
+
+      function renderDetailError(err, id) {
+        var back = ' <a href="' + esc(buildHash(cur.q, 0, cur.type) || '#')
+          + '">Back to browsing</a>';
+        var inner, said;
+        if (err.status === 404) {
+          inner = '<strong>Entity not found</strong> '
+            + esc(err.message || 'It may have been merged into another entity or forgotten.')
+            + back;
+          said = 'Entity not found';
+        } else if (err.status === 422) {
+          // The server refused the id itself (a paste-mangled deep link like
+          // #node=1e+26); its raw validation JSON isn't for humans.
+          inner = '<strong>That link doesn’t point to a valid entity</strong> '
+            + 'The entity id in the address looks damaged — it was probably '
+            + 'garbled when the link was copied.' + back;
+          said = 'That link doesn’t point to a valid entity';
+        } else {
+          inner = '<strong>Couldn’t load this entity</strong> '
+            + esc(err.message || 'Something went wrong.')
+            + '<br><button type="button" class="linklike" id="retry-node">Try again</button>';
+          said = 'Couldn’t load entity';
+        }
+        detailBox.innerHTML = '<div class="empty">' + inner + '</div>';
+        var b = document.getElementById('retry-node');
+        if (b) b.addEventListener('click', function () { openNode(id, { force: true }); });
+        announce(said);
+      }
+
+      function endpointHtml(id, label, focusedId) {
+        if (id === focusedId) return '<strong>' + esc(label) + '</strong>';
+        return '<a href="' + esc(buildHash(cur.q, id, cur.type)) + '">' + esc(label) + '</a>';
+      }
+
+      function provenanceHtml(e) {
+        if (e.conversation_day) {
+          var when = fmtDay(e.conversation_day)
+            + (e.conversation_time ? ' · ' + e.conversation_time : '');
+          var seg = e.segment_ids && e.segment_ids.length ? Number(e.segment_ids[0]) : 0;
+          var href = seg ? '/day?date=' + e.conversation_day + '#seg-' + seg
+                         : '/timeline/' + e.conversation_day;
+          return 'from conversation · <a href="' + esc(href)
+            + '" title="Open the source conversation">' + esc(when) + '</a>';
+        }
+        var noted = fmtStampDay(e.first_seen);
+        return noted ? 'first noted ' + esc(noted) + ' · source conversation unknown'
+                     : 'source unknown';
+      }
+
+      function edgeHtml(e, focusedId) {
+        var subj = endpointHtml(e.src_id, e.src_label || e.src_name, focusedId);
+        var obj = '';
+        if (e.dst_id != null) obj = endpointHtml(e.dst_id, e.dst_label || e.dst_name, focusedId);
+        else if (e.object_text) obj = esc(e.object_text);
+        // No predicate (common for action items/mentions): a quiet dash reads
+        // better than repeating the kind that already heads the group.
+        var pred = e.predicate
+          ? '<span class="pred">' + esc(String(e.predicate).replace(/_/g, ' ')) + '</span>'
+          : (obj ? '<span aria-hidden="true">—</span>' : '');
+        var bits = '';
+        if (e.due_date) bits += ' <span class="due num">due ' + esc(fmtDay(e.due_date)) + '</span>';
+        if (e.confidence != null && e.confidence < 0.75) {
+          bits += ' <span class="meta num">· ' + Math.round(e.confidence * 100)
+            + '% confidence</span>';
+        }
+        // Every citable transcript line behind this fact, each timestamp
+        // linking to its own line in the day view (`quotes`; `quote` is the
+        // legacy first-only field, kept as a fallback).
+        var qs = (e.quotes && e.quotes.length) ? e.quotes
+               : (e.quote && e.quote.text ? [e.quote] : []);
+        var quote = '';
+        if (qs.length) {
+          var body = qs.map(function (qq) {
+            var qt = fmtStampTime(qq.start_at);
+            var who = qq.speaker ? esc(qq.speaker) : '';
+            // '— Zaza · 21:53' when the voice is identified, else '— 21:53'.
+            var label = who && qt ? who + ' · ' + qt : (who || qt);
+            // nowrap is fine for a bare time but must not force a long
+            // 'name · time' pair to overflow a phone-width pane.
+            var cls = who ? 'meta' : 'meta num';
+            var sid = Number(qq.segment_id) || 0;
+            var stamp = '';
+            if (label) {
+              stamp = (e.conversation_day && sid)
+                ? ' <a class="' + cls + '" href="/day?date=' + esc(e.conversation_day)
+                  + '#seg-' + sid + '" title="Open this line in the day view">— '
+                  + label + '</a>'
+                : ' <span class="' + cls + '">— ' + label + '</span>';
+            }
+            return '<blockquote>“' + esc(qq.text) + '”' + stamp + '</blockquote>';
+          }).join('');
+          var sum = qs.length === 1 ? 'Show the source quote'
+                                    : 'Show the ' + qs.length + ' source quotes';
+          quote = '<details class="quote"><summary>' + sum + '</summary>' + body + '</details>';
+        }
+        return '<li><p class="fct">' + subj + (pred ? ' ' + pred : '')
+          + (obj ? ' ' + obj : '') + bits + '</p>'
+          + '<p class="prov meta">' + provenanceHtml(e) + '</p>' + quote + '</li>';
+      }
+
+      function renderDetail(d) {
+        var n = d.node;
+        var label = n.label || n.name;
+        var count = Number(d.edge_count) || 0;
+        var meta = [count + (count === 1 ? ' connection' : ' connections')];
+        var first = fmtStampDay(n.first_seen), last = fmtStampDay(n.last_seen);
+        if (first && first === last) meta.push('heard ' + first);
+        else {
+          if (first) meta.push('first heard ' + first);
+          if (last) meta.push('last heard ' + last);
+        }
+        var html = '<h2>' + esc(label) + ' <span class="tag">' + esc(n.type) + '</span></h2>'
+          + '<p class="meta">' + esc(meta.join(' · ')) + '</p>';
+        if (d.aliases && d.aliases.length) {
+          html += '<p class="meta">Also known as ' + d.aliases.map(esc).join(', ') + '</p>';
+        }
+        var pills = [];
+        if (n.speaker_id != null) {
+          pills.push('<a class="pill" href="/person/' + (Number(n.speaker_id) || 0)
+            + '">Person dossier →</a>');
+        }
+        if (n.type === 'project') {
+          pills.push('<a class="pill" href="/project/' + (Number(n.id) || 0)
+            + '">Project dossier →</a>');
+        }
+        if (pills.length) html += '<div class="dossier">' + pills.join('') + '</div>';
+
+        if (!d.edges.length) {
+          html += '<div class="empty"><strong>No facts recorded yet</strong> '
+            + esc(label) + ' has been identified, but nothing has been linked to it '
+            + 'so far — new conversations will fill this in.</div>';
+        } else {
+          var groups = {};
+          d.edges.forEach(function (e) { (groups[e.kind] = groups[e.kind] || []).push(e); });
+          var kinds = KIND_ORDER.filter(function (k) { return groups[k]; })
+            .concat(Object.keys(groups).filter(function (k) {
+              return KIND_ORDER.indexOf(k) < 0;
+            }).sort());
+          kinds.forEach(function (k) {
+            var title = KIND_LABEL[k]
+              || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, ' ');
+            html += '<h3 class="kicker">' + esc(title) + ' · ' + groups[k].length + '</h3>'
+              + '<ul class="edges">'
+              + groups[k].map(function (e) { return edgeHtml(e, n.id); }).join('')
+              + '</ul>';
+          });
+        }
+        html += '<p class="backlink meta"><a href="'
+          + esc(buildHash(cur.q, 0, cur.type) || '#') + '">← Back to the entity list</a></p>';
+        detailBox.innerHTML = html;
+      }
+
+      // ---- navigation wiring -------------------------------------------------
+
+      function applyHash(user) {
+        var h = parseHash();
+        if (input.value.trim() !== h.q) input.value = h.q;
+        runSearch(h.q, h.type, {});
+        if (h.node !== cur.node) {
+          if (h.node) {
+            openNode(h.node, { focus: !!user });
+          } else {
+            var wasSel = selId;
+            cur.node = 0; selId = 0; nodeSeq++;
+            markSelected(0);
+            showDetailHint();
+            // Leaving the detail pane removes the link that held focus
+            // ("Back to the entity list" / a 404's "Back to browsing"):
+            // put keyboard users back on the row they came from.
+            if (user) focusList(wasSel);
+          }
+        }
+      }
+
+      function focusList(prevId) {
+        var tgt = (prevId && resultsBox.querySelector('a[data-node="' + prevId + '"]'))
+          || resultsBox;
+        try { tgt.focus({ preventScroll: true }); } catch (e) { tgt.focus(); }
+        if (tgt.scrollIntoView) tgt.scrollIntoView({ block: 'nearest' });
+      }
+
+      window.addEventListener('hashchange', function () { applyHash(true); });
+      window.addEventListener('popstate', function () { applyHash(true); });
+
+      // Delegated so it survives every list re-render.
+      resultsBox.addEventListener('click', function (ev) {
+        var b = ev.target && ev.target.closest ? ev.target.closest('#show-more') : null;
+        if (b) loadMore(b);
+      });
+
+      typebar.addEventListener('click', function (ev) {
+        var b = ev.target && ev.target.closest ? ev.target.closest('button[data-type]') : null;
+        if (b) setType(b.getAttribute('data-type') || '');
+      });
+
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var q = input.value.trim();
+        setHash(q, cur.node, cur.type, true);
+        runSearch(q, cur.type, { button: ev.submitter, force: true });
+      });
+
+      var deb = 0;
+      input.addEventListener('input', function () {
+        clearTimeout(deb);
+        deb = setTimeout(function () {
+          var q = input.value.trim();
+          if (q === cur.q) return;
+          setHash(q, cur.node, cur.type, false);   // no history spam while typing
+          runSearch(q, cur.type, {});
+        }, 250);
+      });
+
+      // "/" focuses search from anywhere on the page (except while typing).
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+        var t = e.target || {};
+        var tag = (t.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select'
+            || t.isContentEditable) return;
+        e.preventDefault();
+        input.focus();
+        input.select();
+      });
+
+      applyHash(false);
+    })();
   </script>
-</body>
-</html>
+{% endblock %}

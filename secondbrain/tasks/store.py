@@ -53,6 +53,23 @@ def update_task(conn: sqlite3.Connection, task_id: int, **fields) -> None:
     conn.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*sets.values(), task_id))
 
 
+def release_stale_scheduled(conn: sqlite3.Connection, before_day: str) -> int:
+    """Send tasks still 'scheduled' for a day before ``before_day`` back to
+    the backlog.
+
+    A task accepted into an earlier day's plan but never finished would keep
+    a stale 'scheduled' pill forever — contradicting a fresh Today section
+    that says there's no plan yet. In-progress and done/dropped tasks are
+    left untouched. Returns how many tasks were released.
+    """
+    cur = conn.execute(
+        "UPDATE tasks SET status='backlog', scheduled_for=NULL, updated_at=? "
+        "WHERE status='scheduled' AND scheduled_for IS NOT NULL AND scheduled_for < ?",
+        (utcnow_iso(), before_day),
+    )
+    return cur.rowcount
+
+
 def set_status(conn: sqlite3.Connection, task_id: int, status: str) -> None:
     completed = utcnow_iso() if status == "done" else None
     conn.execute(

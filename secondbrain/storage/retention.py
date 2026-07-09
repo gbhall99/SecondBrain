@@ -91,7 +91,52 @@ def sweep_expired_audio(conn: sqlite3.Connection, settings: Settings | None = No
             continue
         conn.execute("UPDATE audio_files SET status='deleted' WHERE id=?", (r["id"],))
         deleted += 1
+    _sweep_derived_clips(conn, settings)
     return deleted
+
+
+def _sweep_derived_clips(conn: sqlite3.Connection, settings: Settings) -> int:
+    """Delete cached audio clips whose source raw audio is gone.
+
+    The web clip players cache slices in ``audio_processed_dir`` as
+    ``sample_{observation_id}[_{window}].wav`` (People page voice samples) and
+    ``segclip_{segment_id}[_{window}].wav`` (day-view per-line playback), where
+    the optional ``_{window}`` suffix stamps the sliced offsets; both are
+    derived raw audio and must honor the same retention policy as their source
+    chunk.
+    """
+    removed = 0
+    clip_dir = settings.audio_processed_dir
+    if not clip_dir.is_dir():
+        return 0
+    source_status_sql = {
+        "sample": (
+            "SELECT af.status AS status FROM speaker_observations so "
+            "JOIN audio_files af ON af.id = so.audio_file_id WHERE so.id = ?"
+        ),
+        "segclip": (
+            "SELECT af.status AS status FROM transcript_segments ts "
+            "JOIN audio_files af ON af.id = ts.audio_file_id WHERE ts.id = ?"
+        ),
+    }
+    for prefix, sql in source_status_sql.items():
+        for p in clip_dir.glob(f"{prefix}_*.wav"):
+            try:
+                # sample_12.wav and sample_12_50-1050.wav both belong to obs 12.
+                source_id = int(p.stem.split("_")[1])
+            except (IndexError, ValueError):
+                continue  # not one of ours
+            row = conn.execute(sql, (source_id,)).fetchone()
+            if row is not None and row["status"] != "deleted":
+                continue  # source audio still lives — keep the cached clip
+            try:
+                p.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                log.warning("retention: could not delete derived clip %s", p, exc_info=True)
+    if removed:
+        log.info("retention: deleted %d derived audio clip(s)", removed)
+    return removed
 
 
 def free_disk_gb(path: Path) -> float:

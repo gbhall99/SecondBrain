@@ -68,6 +68,12 @@ class TranscriptionConfig(BaseModel):
 class SearchConfig(BaseModel):
     semantic_enabled: bool = True
     embedding_model: str = "bge-small"
+    # Nearest-neighbour ceiling (L2 distance between normalized embeddings,
+    # 0..2). vec0 KNN always returns `k` rows however unrelated; anything above
+    # this is noise, not a match. Calibrated on real transcripts: verbatim ≈0.55,
+    # paraphrase ≈0.7-0.77, unrelated ≥0.9. Raise it if semantic recall feels
+    # too strict, lower it if unrelated lines slip in.
+    semantic_max_distance: float = 0.8
 
 
 class ConversationConfig(BaseModel):

@@ -116,6 +116,71 @@ def test_project_dossier_aggregates(conn, settings):
     assert "we should ship Atlas v2" in quotes
 
 
+def test_project_dossier_fact_subjects_and_redundant_objects(conn, settings):
+    """Facts name their subject; objects that just repeat the project are flagged."""
+    _seed(conn)
+    d = service.project_dossier(conn, 2, settings)
+    works = next(f for f in d["facts"] if f["predicate"] == "works_on")
+    # person→project fact: subject exposed (label + person link), object is
+    # the project itself so the UI can say "this project" instead of "Atlas".
+    assert works["src_label"] == "Dana" and works["src_node_id"] == 1
+    assert works["src_speaker_id"] == 2 and works["src_hidden"] is False
+    assert works["dst_label"] == "Atlas" and works["dst_node_id"] == 2
+    assert works["object_redundant"] is True
+    # project→text fact: subject is the project itself, object is real content
+    status = next(f for f in d["facts"] if f["predicate"] == "status")
+    assert status["src_node_id"] == 2 and status["object_redundant"] is False
+    # an alias counts as "just the project's name again" too
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, dst_node_id, predicate, kind, object_text, "
+        "confidence, conversation_id, source_segment_ids, valid) "
+        "VALUES (7, 3, 2, 'leads', 'fact', 'Project Atlas', 0.7, 1, '[3]', 1)"
+    )
+    d = service.project_dossier(conn, 2, settings)
+    leads = next(f for f in d["facts"] if f["predicate"] == "leads")
+    assert leads["src_label"] == "Sam" and leads["object_redundant"] is True
+    # action items carry the same subject fields ("Sam — write docs")
+    item = next(c for c in d["open_commitments"] if c["object_text"] == "write docs")
+    assert item["src_label"] == "Sam" and item["src_node_id"] == 3
+
+
+def test_project_dossier_dedupes_repeated_facts(conn, settings):
+    """The same statement heard twice renders once (highest confidence kept),
+    while activity.edges keeps counting every mention."""
+    _seed(conn)
+    _audio(conn, 3, 3, "2026-06-18")
+    _seg(conn, 5, 3, "2026-06-18", 0, "dana still on atlas", 2)
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, dst_node_id, predicate, kind, object_text, "
+        "confidence, conversation_id, source_segment_ids, valid) "
+        "VALUES (8, 1, 2, 'works_on', 'fact', 'Atlas', 0.6, 3, '[5]', 1)"
+    )
+    d = service.project_dossier(conn, 2, settings)
+    works = [f for f in d["facts"] if f["predicate"] == "works_on"]
+    assert len(works) == 1
+    assert works[0]["confidence"] == 0.9  # the stronger copy survives
+    assert d["activity"]["edges"] == 5  # mention count still includes both
+
+
+def test_project_dossier_quote_cap_reports_total(conn, settings):
+    _seed(conn)
+    d = service.project_dossier(conn, 2, settings, quotes=2)
+    assert len(d["recent_quotes"]) == 2
+    assert d["quotes_total"] == 3  # segments 1–3 are all cited and quotable
+    d = service.project_dossier(conn, 2, settings)  # default cap not hit
+    assert len(d["recent_quotes"]) == 3 and d["quotes_total"] == 3
+
+
+def test_project_dossier_hides_opted_out_fact_subjects(conn, settings):
+    """Opted-out people never leak through the new subject labels."""
+    _seed(conn)
+    conn.execute("UPDATE speakers SET opted_out=1 WHERE id=2")  # Dana opts out
+    d = service.project_dossier(conn, 2, settings)
+    works = next(f for f in d["facts"] if f["predicate"] == "works_on")
+    assert works["src_hidden"] is True
+    assert works["src_label"] is None and works["src_speaker_id"] is None
+
+
 def test_project_dossier_opt_out_filters_people_and_quotes(conn, settings):
     _seed(conn)
     conn.execute("UPDATE speakers SET opted_out=1 WHERE id=2")  # Dana opts out
@@ -137,3 +202,73 @@ def test_project_dossier_rejects_non_project(conn, settings):
     _seed(conn)
     assert service.project_dossier(conn, 1, settings) is None  # node 1 is a person
     assert service.project_dossier(conn, 999, settings) is None
+
+
+def test_project_dossier_provenance_and_quote_attribution(conn, settings):
+    """Every fact/decision/item carries a deep-linkable source; quotes say who spoke."""
+    _seed(conn)
+    d = service.project_dossier(conn, 2, settings)
+    dec = next(x for x in d["decisions"] if x["object_text"] == "ship Atlas v2")
+    assert dec["edge_id"] == 3
+    assert dec["source_seg"] == 1  # earliest cited segment
+    assert dec["source_day"]  # local /day date to link to
+    fact = next(f for f in d["facts"] if f["object_text"] == "on track")
+    assert fact["source_seg"] == 1 and fact["source_day"]
+    item = next(c for c in d["open_commitments"] if c["object_text"] == "write docs")
+    assert item["source_seg"] == 3 and item["source_day"]
+    q = next(q for q in d["recent_quotes"] if q["text"] == "we should ship Atlas v2")
+    assert q["speaker"] == "Me" and q["day"] and q["segment_id"] == 1
+
+
+def test_action_item_lifecycle(conn, settings):
+    """Unpromoted → open; promoted → tracked (still open); task done → closed."""
+    _seed(conn)
+    d = service.project_dossier(conn, 2, settings)
+    item = next(c for c in d["open_commitments"] if c["object_text"] == "write docs")
+    assert item["task_id"] is None and item["done"] is False
+    assert item["overdue"] is True  # due 2026-06-20, long past
+    assert service.list_projects(conn, settings)[0]["open_action_items"] == 1
+
+    tid = service.promote_action_item(conn, item["edge_id"])
+    d = service.project_dossier(conn, 2, settings)
+    item = next(c for c in d["open_commitments"] if c["object_text"] == "write docs")
+    assert item["task_id"] == tid and item["task_status"] == "backlog"
+    assert item["done"] is False  # tracked but not finished — still open
+    assert service.list_projects(conn, settings)[0]["open_action_items"] == 1
+
+    service.task_set_status(conn, tid, "done")
+    d = service.project_dossier(conn, 2, settings)
+    item = next(c for c in d["open_commitments"] if c["object_text"] == "write docs")
+    assert item["done"] is True and item["task_status"] == "done"
+    assert item["overdue"] is False  # finished items are never flagged overdue
+    atlas = next(p for p in service.list_projects(conn, settings) if p["label"] == "Atlas")
+    assert atlas["open_action_items"] == 0
+
+
+def test_action_items_sort_open_before_done(conn, settings):
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, kind, object_text, conversation_id, "
+        "source_segment_ids, valid) VALUES (6, 2, 'action_item', 'book venue', 1, '[1]', 1)"
+    )
+    tid = service.promote_action_item(conn, 4)  # 'write docs'
+    service.task_set_status(conn, tid, "done")
+    d = service.project_dossier(conn, 2, settings)
+    assert [c["object_text"] for c in d["open_commitments"]] == ["book venue", "write docs"]
+    assert [c["done"] for c in d["open_commitments"]] == [False, True]
+
+
+def test_project_dossier_dedupes_goal_links(conn, settings):
+    """Auto-linking plus a manual link to the same goal is still one goal entry,
+    displayed with the strongest relation."""
+    gid = _seed(conn)  # manual 'advances' link; create_goal may auto-add 'related'
+    conn.execute(
+        "INSERT OR IGNORE INTO goal_links (goal_id, kind, ref_id, relation, score) "
+        "VALUES (?, 'node', 2, 'related', 0.5)",
+        (gid,),
+    )
+    d = service.project_dossier(conn, 2, settings)
+    mine = [g for g in d["linked_goals"] if g["id"] == gid]
+    assert len(mine) == 1 and mine[0]["relation"] == "advances"
+    atlas = next(p for p in service.list_projects(conn, settings) if p["label"] == "Atlas")
+    assert atlas["linked_goals"] == 1  # distinct goals, not link rows

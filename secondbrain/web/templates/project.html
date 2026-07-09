@@ -1,65 +1,260 @@
 {% extends "base.html" %}
-{% block title %}SecondBrain — {{ d.label }}{% endblock %}
+{% block title %}{{ d.label }} · SecondBrain{% endblock %}
 {% block style %}
-    .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
-    .stat { min-width: 7rem; }
-    .stat b { display: block; font-size: 1.3rem; }
-    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #aaa; }
+    h1, .card { overflow-wrap: anywhere; } /* long names / LLM text can't widen the page */
+    .crumb { margin: 0 0 .2rem; }
+    .crumb a { text-decoration: none; color: var(--muted); }
+    .crumb a:hover { color: var(--fg); text-decoration: underline; }
+    .stats { display: flex; gap: .8rem 2.2rem; flex-wrap: wrap; }
+    .stat b { display: block; font-size: 1.35rem; line-height: 1.25; }
+    blockquote { margin: .7rem 0; padding-left: .7rem; border-left: 3px solid var(--line); }
+    blockquote p { margin: 0 0 .15rem; overflow-wrap: anywhere; }
+    blockquote time { font-variant-numeric: tabular-nums; }
+    .card .meta a { color: inherit; }
+    .commit { display: flex; align-items: center; gap: .4rem .9rem; flex-wrap: wrap; }
+    .commit .c-main { flex: 1 1 14rem; min-width: 0; }
+    .commit .promote-btn, .commit .tracked, .commit .done-badge { flex: 0 0 auto; }
+    a.tracked { color: var(--ok); text-decoration: none; }
+    a.tracked:hover { text-decoration: underline; }
+    .done-badge { color: var(--ok); font-size: .85rem; }
+    .commit-done .c-text { color: var(--muted); text-decoration: line-through; }
+    .overdue { color: var(--danger); }
+    .goal-status { font-size: .75rem; padding: .15rem .55rem; margin: 0 0 0 .25rem; }
+    .subject { font-weight: 600; }
+    details.more { margin: .2rem 0 .6rem; }
+    details.more > summary { cursor: pointer; width: max-content; color: var(--muted);
+                             font-size: .9rem; padding: .25rem .1rem; border-radius: 4px;
+                             list-style-position: inside; }
+    details.more > summary:hover { color: var(--fg); }
 {% endblock %}
 {% block content %}
+  {# Node timestamps are usually full UTC ISO stamps, but early/imported rows
+     can be bare dates — render whichever form is stored, readably. #}
+  {% macro when(ts) %}{% if ts and (ts | length) == 10 %}{{ ts | prettyday }}{% else %}{{ ts | localdt or '—' }}{% endif %}{% endmacro %}
+  {% macro source_link(x) %}
+    {%- if x.source_day -%}
+      <a href="/day?date={{ x.source_day }}{% if x.source_seg %}#seg-{{ x.source_seg }}{% endif %}"
+         title="Open the conversation this came from">source</a>
+    {%- endif -%}
+  {% endmacro %}
+  {# Who a fact/item is about, when that isn't this project: a person link when
+     the subject has a matched voice, a graph link otherwise, and a private
+     placeholder for people who opted out of being remembered. #}
+  {% macro subject_of(x) %}
+    {%- if x.src_label -%}
+      {%- if x.src_speaker_id -%}
+        <a class="subject" href="/person/{{ x.src_speaker_id }}"
+           title="Open {{ x.src_label }}’s profile">{{ x.src_label }}</a>
+      {%- else -%}
+        <a class="subject" href="/graph#node={{ x.src_node_id }}"
+           title="Open {{ x.src_label }} in the knowledge graph">{{ x.src_label }}</a>
+      {%- endif -%}
+    {%- else -%}
+      <span class="subject" title="This person opted out of being remembered">Someone</span>
+    {%- endif -%}
+  {% endmacro %}
+  {% macro has_subject(x) %}{{ 1 if (x.src_node_id and x.src_node_id != d.node_id and (x.src_label or x.src_hidden)) else '' }}{% endmacro %}
+
+  {% set n_open = d.open_commitments | rejectattr('done') | list | length %}
+  {% set n_done = (d.open_commitments | length) - n_open %}
+
+  <p class="meta crumb"><a href="/projects">← Projects</a></p>
   <h1>{{ d.label }}</h1>
-  <p class="meta">project
-    {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}</p>
+  <p class="meta">Project
+    {%- if d.aliases %} · also known as {{ d.aliases | join(", ") }}{% endif %}</p>
 
-  <div class="card grid">
-    <div class="stat"><b>{{ d.activity.conversations }}</b>conversations</div>
-    <div class="stat"><b>{{ d.activity.edges }}</b>mentions</div>
-    <div class="stat"><b>{{ d.people | length }}</b>people</div>
-    <div class="stat"><b>{{ d.linked_goals | length }}</b>goals</div>
+  <div class="card stats">
+    <div class="stat"><b>{{ d.activity.conversations }}</b>
+      <span class="meta">conversation{{ '' if d.activity.conversations == 1 else 's' }}</span></div>
+    <div class="stat"><b>{{ d.activity.edges }}</b>
+      <span class="meta">mention{{ '' if d.activity.edges == 1 else 's' }}</span></div>
+    <div class="stat"><b>{{ d.people | length }}</b>
+      <span class="meta">{{ 'person' if d.people | length == 1 else 'people' }}</span></div>
+    <div class="stat"><b>{{ d.linked_goals | length }}</b>
+      <span class="meta">linked goal{{ '' if d.linked_goals | length == 1 else 's' }}</span></div>
+    <div class="stat"><b>{{ n_open }}</b>
+      <span class="meta">open item{{ '' if n_open == 1 else 's' }}</span></div>
   </div>
-  <p class="meta">First seen {{ d.activity.first_seen or "—" }} ·
-     last seen {{ d.activity.last_seen or "—" }}</p>
+  <p class="meta">
+    {% if d.activity.first_seen or d.activity.last_seen %}
+      First mentioned {% if d.activity.first_seen %}<time datetime="{{ d.activity.first_seen }}"
+        title="{{ when(d.activity.first_seen) }}">{{ when(d.activity.first_seen) }}</time>
+      {%- else %}—{% endif %}
+      · last mentioned {% if d.activity.last_seen %}<time datetime="{{ d.activity.last_seen }}"
+        title="{{ when(d.activity.last_seen) }}">{{ when(d.activity.last_seen) }}</time>
+      {%- set ago = d.activity.last_seen | relago %}{% if ago %} ({{ ago }}){% endif %}
+      {%- else %}—{% endif %}
+    {% else %}
+      Not dated yet — mention timestamps appear as conversations are processed.
+    {% endif %}
+  </p>
 
-  {% if d.linked_goals %}
+  {% if not (d.linked_goals or d.people or d.decisions or d.open_commitments
+             or d.facts or d.recent_quotes) %}
+    <div class="empty"><strong>Nothing extracted for this project yet</strong>
+      Facts, decisions, action items, and the people involved are collected automatically
+      as more conversations mention {{ d.label }} — nothing to do on your end.<br>
+      In the meantime, browse the <a href="/timeline">Timeline</a> or
+      <a href="/chat">ask a question</a> about it.</div>
+  {% else %}
+
   <h2>Linked goals</h2>
-  {% for g in d.linked_goals %}
-    <div class="card"><a href="/goals">{{ g.title }}</a>
-      <span class="meta">({{ g.status }}, {{ g.relation }})</span></div>
-  {% endfor %}
+  {% if d.linked_goals %}
+    {% for g in d.linked_goals %}
+      <div class="card"><a href="/goals#goal-{{ g.id }}"
+          title="Open this goal on the Goals page">{{ g.title }}</a>
+        <span class="pill goal-status">{{ g.status }}</span>
+        <span class="meta">{{ g.relation | replace('_', ' ') }}</span></div>
+    {% endfor %}
+  {% else %}
+    <p class="meta">No goals linked yet — goals whose wording matches this project
+      link up automatically, or add one on the <a href="/goals">Goals page</a>.</p>
   {% endif %}
 
+  <h2>People involved</h2>
   {% if d.people %}
-  <h2>People</h2>
-  <p>{% for c in d.people %}<a class="pill"
-      href="{{ '/person/' ~ c.speaker_id if c.speaker_id else '#' }}">{{ c.label }}
-     ({{ c.edges }})</a>{% endfor %}</p>
+    <p>{% for c in d.people %}{% if c.speaker_id %}<a class="pill" href="/person/{{ c.speaker_id }}"
+        title="Open {{ c.label }}'s profile">{{ c.label }} ({{ c.edges }})</a>
+      {%- else %}<a class="pill" href="/graph#node={{ c.node_id }}"
+        title="{{ c.label }} hasn't been matched to a voice yet — open them in the knowledge graph">{{ c.label }} ({{ c.edges }})</a>{% endif %}{% endfor %}</p>
+    <p class="meta">Numbers count how often each person comes up alongside this project.</p>
+  {% else %}
+    <p class="meta">No people tied to this project yet — anyone mentioned alongside it
+      will show up here.</p>
   {% endif %}
 
-  {% if d.decisions %}
+  {% macro decision_card(x) %}
+      <div class="card">{{ x.object_text }}
+        <span class="meta">({% if x.source_day %}heard {{ x.source_day | prettyday }} ·
+          {{ source_link(x) }}{% else %}source conversation unknown{% endif %})</span></div>
+  {% endmacro %}
   <h2>Decisions</h2>
-  {% for x in d.decisions %}<div class="card">{{ x.object_text }}</div>{% endfor %}
+  {% if d.decisions %}
+    {% set decision_cap = 15 %}
+    {% for x in d.decisions[:decision_cap] %}{{ decision_card(x) }}{% endfor %}
+    {% if d.decisions | length > decision_cap %}
+      <details class="more">
+        <summary>Show {{ d.decisions | length - decision_cap }} earlier
+          decision{{ '' if d.decisions | length - decision_cap == 1 else 's' }}</summary>
+        {% for x in d.decisions[decision_cap:] %}{{ decision_card(x) }}{% endfor %}
+      </details>
+    {% endif %}
+  {% else %}
+    <p class="meta">No decisions recorded yet — when a decision about this project is
+      heard in conversation, it lands here with a link to the moment it was made.</p>
   {% endif %}
 
+  <h2>Action items{% if d.open_commitments %} <span class="meta">({{ n_open }} open{% if n_done %}, {{ n_done }} done{% endif %})</span>{% endif %}</h2>
   {% if d.open_commitments %}
-  <h2>Open commitments</h2>
-  {% for c in d.open_commitments %}
-    <div class="card">{{ c.object_text }}{% if c.due_date %}
-      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
-  {% endfor %}
+    {% for c in d.open_commitments %}
+      <div class="card commit{{ ' commit-done' if c.done }}">
+        <div class="c-main"><span class="c-text">
+            {%- if has_subject(c) %}{{ subject_of(c) }} — {% endif %}{{ c.object_text }}</span>
+          <span class="meta">({% if c.due_date %}<span{% if c.overdue %} class="overdue"{% endif %}>due
+              {{ c.due_date | prettyday }}{% if c.overdue %} — overdue{% endif %}</span>
+            {%- if c.source_day %} · {% endif %}{% endif %}{{ source_link(c) }}
+            {%- if not c.due_date and not c.source_day %}no due date{% endif %})</span>
+        </div>
+        {% if c.done %}
+          <span class="done-badge" title="The task for this item is {{ c.task_status }}">✓ Done</span>
+        {% elif c.task_id %}
+          <a class="meta tracked" href="/tasks"
+             title="This item is already in your task backlog">✓ In your tasks</a>
+        {% elif c.edge_id %}
+          <button type="button" class="promote-btn" data-edge="{{ c.edge_id }}"
+                  aria-label="Track “{{ c.object_text }}” as a task">Track as task</button>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="meta">No action items yet — commitments like “I'll send the report Friday”
+      are picked out automatically and can be tracked as tasks from here.</p>
   {% endif %}
 
-  {% if d.facts %}
+  {# A fact edge reads subject → predicate → object. When the subject is this
+     project it stays implicit ("status: on track"); when it's someone else we
+     name them ("Dana — works on this project") instead of dropping them, and
+     we never echo the page title back as the object. #}
+  {% macro fact_card(f) %}
+      <div class="card">
+        {%- if has_subject(f) -%}
+          {{ subject_of(f) }} —
+          {% if f.object_redundant -%}
+            {{ (f.predicate | replace('_', ' ')) if f.predicate else 'involved with' }} this project
+          {%- else -%}
+            {% if f.predicate %}{{ f.predicate | replace('_', ' ') }}: {% endif %}{{ f.object_text or f.dst_label }}
+          {%- endif -%}
+        {%- else -%}
+          {% if f.predicate %}{{ f.predicate | replace('_', ' ') }}: {% endif %}{{ f.object_text or f.dst_label }}
+        {%- endif %}
+        <span class="meta">({% if f.confidence is not none %}{{ "%.0f"|format(f.confidence * 100) }}% confident
+          {%- if f.source_day %} · {% endif %}{% endif %}{{ source_link(f) }}
+          {%- if f.confidence is none and not f.source_day %}from conversation{% endif %})</span></div>
+  {% endmacro %}
   <h2>Known facts</h2>
-  {% for f in d.facts %}
-    <div class="card">{{ f.predicate or "—" }}: {{ f.object_text }}
-      <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}%)</span></div>
-  {% endfor %}
+  {% if d.facts %}
+    {% set fact_cap = 15 %}
+    {% for f in d.facts[:fact_cap] %}{{ fact_card(f) }}{% endfor %}
+    {% if d.facts | length > fact_cap %}
+      <details class="more">
+        <summary>Show {{ d.facts | length - fact_cap }} more
+          fact{{ '' if d.facts | length - fact_cap == 1 else 's' }}
+          <span class="meta">(lower confidence)</span></summary>
+        {% for f in d.facts[fact_cap:] %}{{ fact_card(f) }}{% endfor %}
+      </details>
+    {% endif %}
+  {% else %}
+    <p class="meta">No facts extracted about this project yet — they appear here as
+      conversations are processed by the knowledge graph.</p>
   {% endif %}
 
-  {% if d.recent_quotes %}
   <h2>Recent mentions</h2>
-  {% for q in d.recent_quotes %}
-    <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
-  {% endfor %}
+  {% if d.recent_quotes %}
+    {% for q in d.recent_quotes %}
+      <blockquote>
+        <p>{{ q.text }}</p>
+        <footer class="meta">
+          {%- if q.speaker %}{{ q.speaker }} · {% endif -%}
+          {% if q.day %}
+            <a href="/day?date={{ q.day }}#seg-{{ q.segment_id }}"
+               title="Open this line in the day view">
+              <time datetime="{{ q.start_at }}">{{ q.start_at | localdt }}</time></a>
+          {% else %}
+            <time datetime="{{ q.start_at or '' }}">{{ q.start_at | localdt or '—' }}</time>
+          {% endif %}
+        </footer>
+      </blockquote>
+    {% endfor %}
+    {% if d.quotes_total and d.quotes_total > (d.recent_quotes | length) %}
+      <p class="meta">The {{ d.recent_quotes | length }} most recent of
+        {{ d.quotes_total }} captured lines behind this dossier — each links to its
+        place in the day's transcript, and the “source” links above reach the rest.</p>
+    {% else %}
+      <p class="meta">The lines behind this dossier — each links to its place in the day's
+        transcript.</p>
+    {% endif %}
+  {% else %}
+    <p class="meta">No transcript quotes yet — the lines where this project comes up
+      appear here once conversations are transcribed.</p>
   {% endif %}
+
+  {% endif %}{# fully-empty gate #}
+
+  <script>
+    (function () {
+      'use strict';
+      // Action items → task backlog (idempotent per edge server-side; the
+      // reload re-renders the card in its “✓ In your tasks” state).
+      document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest && e.target.closest('.promote-btn');
+        if (!btn) return;
+        SB.api('/api/actions/' + btn.dataset.edge + '/promote', { method: 'POST', button: btn })
+          .then(function (d) {
+            SB.reload(d && d.title ? 'Added to your backlog: “' + d.title + '”.'
+                                   : 'Added to your backlog.', 'success');
+          })
+          .catch(function () { /* SB.api already toasted the error */ });
+      });
+    })();
+  </script>
 {% endblock %}

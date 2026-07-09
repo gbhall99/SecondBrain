@@ -16,10 +16,17 @@ from secondbrain.storage.db import init_db
 def settings(tmp_path) -> Settings:
     return Settings(
         paths={"data_dir": str(tmp_path / "data")},
-        capture={"sample_rate": 16000, "channels": 1, "chunk_seconds": 1, "min_free_disk_gb": 0.0},
+        # input_device pinned to "" (system default) so a device name in this
+        # machine's config.local.toml can't leak in and fail the microphone
+        # health check whenever that hardware is unplugged — tests are hermetic.
+        capture={"sample_rate": 16000, "channels": 1, "chunk_seconds": 1,
+                 "min_free_disk_gb": 0.0, "input_device": ""},
         vad={"enabled": False},
         transcription={"backend": "mock"},
         search={"semantic_enabled": False},
+        # Explicit mock so tests never talk to a real Ollama configured in this
+        # machine's config.local.toml (init kwargs beat the TOML sources).
+        llm={"backend": "mock"},
     )
 
 

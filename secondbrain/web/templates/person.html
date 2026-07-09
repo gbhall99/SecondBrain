@@ -1,58 +1,400 @@
 {% extends "base.html" %}
-{% block title %}SecondBrain — {{ d.label }}{% endblock %}
+{% block title %}{{ d.label }} · SecondBrain{% endblock %}
 {% block style %}
-    .grid { display: flex; gap: 1rem; flex-wrap: wrap; }
-    .stat { min-width: 7rem; }
-    .stat b { display: block; font-size: 1.3rem; }
-    blockquote { margin: .3rem 0; padding-left: .7rem; border-left: 3px solid #8884; color: #aaa; }
+    [hidden] { display: none !important; } /* .row's display:flex must not defeat hidden */
+    h1, .card { overflow-wrap: anywhere; } /* long names / LLM text can't widen the page */
+    .crumb { margin: 0 0 .2rem; }
+    .crumb a { text-decoration: none; color: var(--muted); }
+    .crumb a:hover { color: var(--fg); text-decoration: underline; }
+    .stats { display: flex; gap: .8rem 2.2rem; flex-wrap: wrap; }
+    .stat b { display: block; font-size: 1.35rem; line-height: 1.25; }
+    .row { display: flex; gap: .5rem .6rem; align-items: center; flex-wrap: wrap; }
+    .name-input { flex: 1 1 10rem; min-width: 0; }
+    blockquote { margin: .7rem 0; padding-left: .7rem; border-left: 3px solid var(--line); }
+    blockquote p { margin: 0 0 .15rem; overflow-wrap: anywhere; }
+    .who-badge { font-weight: 600; }
+    .card .meta a, .convlist .meta a { color: inherit; }
+    .convlist { list-style: none; margin: .4rem 0 0; padding: 0; }
+    .convlist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem;
+                   padding: .45rem 0; border-bottom: 1px solid var(--line); }
+    .convlist li:last-child { border-bottom: 0; }
+    .convlist time { font-variant-numeric: tabular-nums; }
+    .manage-row .linklike { color: inherit; }
+    .manage-row .linklike:hover { color: var(--fg); }
+    .commit { display: flex; align-items: center; gap: .4rem .9rem; flex-wrap: wrap; }
+    .commit .c-main { flex: 1 1 14rem; min-width: 0; }
+    .commit .promote-btn, .commit .tracked { flex: 0 0 auto; }
+    .overdue { color: var(--danger); font-weight: 600; }   /* matches the Tasks page */
+    .due-today { color: var(--warn); font-weight: 600; }
+    a.tracked { color: var(--ok); text-decoration: none; }
+    a.tracked:hover { text-decoration: underline; }
+    .mention blockquote { margin: .55rem 0 .1rem; }
+    .mention blockquote:last-child { margin-bottom: .1rem; }
 {% endblock %}
 {% block content %}
+  {% set who = 'you' if d.is_owner else d.label %}
+  {% set n_conv = d.interactions.conversations %}
+  {% set n_seg = d.interactions.segments %}
+  {% set n_ex = d.profile.exemplar_count or 0 %}
+  {% set n_low = d.profile.low_confidence_segments or 0 %}
+  {# On the People page, unknown voices render as #spk-<id> cards, ignored ones
+     as #ign-<id> (inside the collapsed "Ignored voices" section, which the
+     People page auto-opens for that hash) and known ones as #known-<id> —
+     pick the anchor that actually exists over there. #}
+  {% set people_anchor = '/speakers#' ~ ('spk-' if d.kind == 'unknown'
+      else ('ign-' if d.kind == 'ignored' else 'known-')) ~ d.speaker_id %}
+
+  <p class="meta crumb"><a href="/speakers">← People</a></p>
   <h1>{{ d.label }}{% if d.is_owner %} <span class="meta">(you)</span>{% endif %}</h1>
-  <p class="meta">{{ d.kind }}
-    {% if d.aliases %}· also known as {{ d.aliases | join(", ") }}{% endif %}
-    {% if d.opted_out %}· <strong>opted out</strong> (content hidden){% endif %}
+  <p class="meta">
+    {%- if d.kind == 'owner' %}Your own voice profile
+    {%- elif d.kind == 'unknown' %}Unidentified voice
+    {%- elif d.kind == 'ignored' %}Ignored background voice —
+      <a href="{{ people_anchor }}">restore it on the People page</a> if it's a real person
+    {%- else %}Known voice{% endif %}
+    {%- if d.aliases %} · also known as {{ d.aliases | join(", ") }}{% endif %}
+    {%- if d.opted_out %} · <strong>opted out</strong> (content hidden){% endif %}
+    {%- if d.node_id %} · <a href="/graph#node={{ d.node_id }}"
+      title="Explore everything linked to {{ who }} in the knowledge graph">view in knowledge graph</a>{% endif %}
   </p>
 
-  <div class="card grid">
-    <div class="stat"><b>{{ d.interactions.conversations }}</b>conversations</div>
-    <div class="stat"><b>{{ d.interactions.segments }}</b>segments</div>
-    <div class="stat"><b>{{ d.interactions.talk_minutes }}</b>talk minutes</div>
-    <div class="stat"><b>{{ d.profile.exemplar_count }}</b>voice exemplars</div>
+  {% if d.name_duplicates %}
+    {% set dup = d.name_duplicates[0] %}
+    <div class="card">
+      <strong>Two voices share this name.</strong>
+      <p class="meta" style="margin:.25rem 0 0">Another voice profile is also named
+        “{{ dup.label }}”. If they’re the same person,
+        <a href="/speakers#known-{{ dup.speaker_id }}">merge them on the People page</a>
+        so their whole history lands in one profile.</p>
+    </div>
+  {% endif %}
+
+  {% if d.kind == 'unknown' and not d.opted_out %}
+    <div class="card">
+      <strong>Who is this voice?</strong>
+      <p class="meta" style="margin:.25rem 0 .55rem">SecondBrain heard this voice but doesn't know
+        whose it is yet. Name them and every line — past and future — is relabelled automatically.
+        Not sure? <a href="/speakers#spk-{{ d.speaker_id }}">Hear sample clips on the People page</a>.</p>
+      <form class="row" id="identify-form">
+        <label class="visually-hidden" for="identify-name">Name for {{ d.label }}</label>
+        <input type="text" class="name-input" id="identify-name" maxlength="120"
+               autocomplete="off" placeholder="Who is this? e.g. Sam" />
+        <button type="submit" class="btn-primary">Save name</button>
+      </form>
+    </div>
+  {% endif %}
+
+  <div class="card stats">
+    <div class="stat"><b>{{ n_conv }}</b>
+      <span class="meta">conversation{{ '' if n_conv == 1 else 's' }}</span></div>
+    <div class="stat"><b>{{ n_seg }}</b>
+      <span class="meta">line{{ '' if n_seg == 1 else 's' }} heard</span></div>
+    {# duration_label output ('under 1 min', '21 min', '2 h 05 min') — never a
+       bare '0.0 min'; a voice with no audio at all shows an honest zero. #}
+    {% if d.interactions.talk_label %}
+      <div class="stat"><b>{{ d.interactions.talk_label }}</b>
+        <span class="meta">talking</span></div>
+    {% else %}
+      <div class="stat"><b>0</b>
+        <span class="meta">min talking</span></div>
+    {% endif %}
+    <div class="stat"><b>{{ n_ex }}</b>
+      <span class="meta">voice sample{{ '' if n_ex == 1 else 's' }}</span></div>
   </div>
-  <p class="meta">First seen {{ d.interactions.first_seen or "—" }} ·
-     last seen {{ d.interactions.last_seen or "—" }}
-     {% if not d.profile.voice_profile %}· no voice profile yet{% endif %}</p>
+  <p class="meta">
+    {% if d.interactions.first_seen %}
+      First heard <time datetime="{{ d.interactions.first_seen }}"
+        title="{{ d.interactions.first_seen }} (UTC)">{{ d.interactions.first_seen | localdt }}</time>
+      · last heard <time datetime="{{ d.interactions.last_seen }}"
+        title="{{ d.interactions.last_seen }} (UTC)">{{ d.interactions.last_seen | localdt }}</time>
+      {%- set ago = d.interactions.last_seen | relago %}{% if ago %} ({{ ago }}){% endif %}
+    {% else %}
+      Not heard in any recording yet.
+    {% endif %}
+  </p>
+  <p class="meta">
+    {% if d.profile.voice_profile %}
+      Voice profile active
+      {%- if n_low %} · {{ n_low }} low-confidence line{{ '' if n_low == 1 else 's' }}
+        {%- if d.interactions.last_seen %} —
+          <a href="/day?date={{ d.interactions.last_seen | localday }}&amp;review=1">review recent guesses</a>
+        {%- endif %}
+      {%- else %} · no low-confidence lines{% endif %}
+    {% else %}
+      No voice profile yet — <a href="{{ people_anchor }}">add voice samples on the
+      People page</a> so new lines match to {{ who }} automatically.
+    {% endif %}
+  </p>
+  {% if d.kind != 'unknown' %}
+    <p class="meta manage-row">
+      <a href="{{ people_anchor }}">{% if d.opted_out %}Manage on the People page{% else -%}
+        Hear voice clips &amp; manage on the People page{% endif %}</a>
+      · <button type="button" class="linklike" id="rename-toggle" aria-expanded="false"
+                aria-controls="rename-form">✎ Rename</button>
+    </p>
+    {# Prefilled from the *stored* name (never the display label) so opening
+       Rename and pressing Save is always a no-op, not a silent revert. #}
+    <form class="row" id="rename-form" hidden>
+      <label class="visually-hidden" for="rename-name">New name for {{ d.label }}</label>
+      <input type="text" class="name-input" id="rename-name" maxlength="120"
+             autocomplete="off" value="{{ d.name or '' }}"
+             placeholder="{{ 'Your name' if d.is_owner else 'Their name' }}" />
+      <button type="submit" class="btn-primary">Save</button>
+      <button type="button" id="rename-cancel">Cancel</button>
+    </form>
+  {% elif d.opted_out %}
+    {# An opted-out unknown voice has no identify card, but its merge and
+       opt-in controls still live on the People page — keep a path there. #}
+    <p class="meta manage-row"><a href="{{ people_anchor }}">Manage on the People page</a></p>
+  {% endif %}
 
-  {% if d.facts %}
+  {% if d.opted_out and not d.is_owner %}
+    <div class="empty"><strong>Content hidden</strong>
+      {{ d.label }} opted out of being remembered, so their facts, commitments, quotes, and
+      conversations are kept private. Only the interaction counts above remain.</div>
+  {% else %}
+
   <h2>Known facts</h2>
-  {% for f in d.facts %}
-    <div class="card">{{ f.predicate or "—" }}: {{ f.object_text }}
-      <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}%)</span></div>
-  {% endfor %}
+  {% if d.facts %}
+    {% for f in d.facts %}
+      <div class="card">
+        {%- if f.direction == 'referenced' -%}
+          <span class="pill" title="A fact about {{ f.other_label or 'something else' }} that names {{ who }}">referenced</span>
+          {% if f.other_label %}{{ f.other_label }} — {% endif -%}
+          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
+        {%- else -%}
+          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
+        {%- endif %}
+        <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}% confident{% if f.source_day %}
+          · <a href="/day?date={{ f.source_day }}{% if f.source_seg %}#seg-{{ f.source_seg }}{% endif %}"
+               title="Open the conversation this was extracted from">source</a>{% endif %})</span></div>
+    {% endfor %}
+    {% if d.facts_total and d.facts_total > d.facts | length %}
+      <p class="meta">Showing the {{ d.facts | length }} most confident of {{ d.facts_total }}
+        facts{% if d.node_id %} —
+        <a href="/graph#node={{ d.node_id }}">explore them all in the knowledge graph</a>{% endif %}.</p>
+    {% endif %}
+  {% else %}
+    <p class="meta">No facts extracted about {{ who }} yet — they appear here as conversations
+      are processed by the knowledge graph.</p>
   {% endif %}
 
-  {% if d.commitments.owed_by or d.commitments.owed_to %}
+  {% macro commitment_card(c, badge) %}
+    <div class="card commit">
+      <div class="c-main"><span class="pill who-badge">{{ badge }}</span>
+        {{ c.object_text }}
+        <span class="meta">(
+          {#- 'due tomorrow' / '3 days overdue' wording + colors match Tasks -#}
+          {%- if c.due_label -%}
+            <span class="{{ 'overdue' if c.overdue else ('due-today' if c.due_today) }}"
+                  title="due {{ c.due_date | prettyday }}">{{ c.due_label }}</span> ·
+          {% elif c.due_date %}due {{ c.due_date | prettyday }} · {% endif -%}
+          {{ "%.0f"|format((c.confidence or 0)*100) }}% confident{% if c.source_day %}
+          · <a href="/day?date={{ c.source_day }}{% if c.source_seg %}#seg-{{ c.source_seg }}{% endif %}"
+               title="Open the conversation this was heard in">source</a>{% endif %})</span>
+      </div>
+      {% if c.task_id %}
+        <a class="meta tracked" href="/tasks"
+           title="This commitment is already in your task backlog">✓ In your tasks</a>
+      {% elif c.id %}
+        <button type="button" class="promote-btn" data-edge="{{ c.id }}"
+                aria-label="Track “{{ c.object_text }}” as a task">Track as task</button>
+      {% endif %}
+    </div>
+  {% endmacro %}
+
   <h2>Commitments</h2>
-  {% for c in d.commitments.owed_by %}
-    <div class="card">⬆ owes: {{ c.object_text }}{% if c.due_date %}
-      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
-  {% endfor %}
-  {% for c in d.commitments.owed_to %}
-    <div class="card">⬇ owed to them: {{ c.object_text }}{% if c.due_date %}
-      <span class="meta">(due {{ c.due_date }})</span>{% endif %}</div>
-  {% endfor %}
+  {% if d.commitments.owed_by or d.commitments.owed_to %}
+    {% for c in d.commitments.owed_by %}
+      {{ commitment_card(c, 'You owe' if d.is_owner else d.label + ' owes') }}
+    {% endfor %}
+    {% for c in d.commitments.owed_to %}
+      {{ commitment_card(c, 'Owed to you' if d.is_owner else 'Owed to ' + d.label) }}
+    {% endfor %}
+  {% else %}
+    <p class="meta">No open commitments involving {{ who }} — promises and action items heard
+      in conversation land here.</p>
   {% endif %}
 
-  {% if d.connections %}
+  <h2>Mentions</h2>
+  {% if d.mentions %}
+    {% for m in d.mentions %}
+      <div class="card mention">
+        <span class="pill">{{ (m.kind or 'mention') | replace('_', ' ') }}</span>
+        {{ m.object_text or ((m.predicate or 'mentioned') | replace('_', ' ')) }}
+        {%- if m.other_label %} <span class="meta">· with {{ m.other_label }}</span>{% endif %}
+        <span class="meta">
+          {%- if m.confidence is not none -%}
+            ({{ "%.0f"|format(m.confidence*100) }}% confident
+            {%- if m.source_day %} · <a href="/day?date={{ m.source_day }}{% if m.source_seg %}#seg-{{ m.source_seg }}{% endif %}"
+               title="Open the conversation this came from">source</a>{% endif %})
+          {%- elif m.source_day -%}
+            (<a href="/day?date={{ m.source_day }}{% if m.source_seg %}#seg-{{ m.source_seg }}{% endif %}"
+                title="Open the conversation this came from">source</a>)
+          {%- endif -%}
+        </span>
+        {% for q in m.quotes %}
+          <blockquote>
+            <p>{{ q.text }}</p>
+            <footer class="meta">
+              {% if q.day %}
+                <a href="/day?date={{ q.day }}#seg-{{ q.segment_id }}"
+                   title="Open this line in the day view">
+                  <time datetime="{{ q.start_at }}">{{ q.start_at | localdt }}</time></a>
+              {% else %}
+                {% if q.start_at %}<time datetime="{{ q.start_at }}">{{ q.start_at | localdt }}</time>{% else %}—{% endif %}
+              {% endif %}
+            </footer>
+          </blockquote>
+        {% endfor %}
+      </div>
+    {% endfor %}
+    {% if d.mentions_total and d.mentions_total > d.mentions | length %}
+      <p class="meta">Newest {{ d.mentions | length }} of {{ d.mentions_total }} shown{% if d.node_id %} —
+        <a href="/graph#node={{ d.node_id }}">see the rest in the knowledge graph</a>{% endif %}.</p>
+    {% endif %}
+  {% else %}
+    <p class="meta">No mentions yet — when {{ 'you come up' if d.is_owner else who ~ ' comes up' }}
+      in decisions, ideas, or passing mentions from your conversations, they're collected here
+      with the line that was heard.</p>
+  {% endif %}
+
   <h2>Connections</h2>
-  <p>{% for c in d.connections %}<a class="pill" href="/person/{{ c.speaker_id }}">{{ c.label }}
-     ({{ c.shared_conversations }})</a>{% endfor %}</p>
+  {% if d.connections %}
+    <p>{% for c in d.connections %}<a class="pill" href="/person/{{ c.speaker_id }}"
+        title="{{ c.shared_conversations }} shared conversation{{ '' if c.shared_conversations == 1 else 's' }} with {{ c.label }}">{{ c.label }}
+        ({{ c.shared_conversations }})</a>{% endfor %}</p>
+  {% else %}
+    <p class="meta">No shared conversations with other voices yet.</p>
   {% endif %}
 
-  {% if d.recent_quotes %}
-  <h2>Recent quotes</h2>
-  {% for q in d.recent_quotes %}
-    <blockquote>{{ q.text }}<br><span class="meta">{{ q.start_at }}</span></blockquote>
-  {% endfor %}
+  <h2>Recent conversations</h2>
+  {% if d.recent_conversations %}
+    <ul class="convlist">
+      {% for c in d.recent_conversations %}
+        <li>
+          {% if c.day %}
+            <a href="/day?date={{ c.day }}{% if c.anchor_segment_id %}#seg-{{ c.anchor_segment_id }}{% endif %}"
+               title="Open this conversation in the day view">
+              <time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time></a>
+          {% else %}
+            {% if c.first_at %}<time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time>{% else %}—{% endif %}
+          {% endif %}
+          <span class="meta">{{ c.segments }} line{{ '' if c.segments == 1 else 's' }}
+            from {{ who }}{% if c.talk_minutes and c.talk_minutes >= 0.1 %} · {{ c.talk_minutes }} min{% endif %}</span>
+        </li>
+      {% endfor %}
+    </ul>
+    {% if d.interactions.conversations > d.recent_conversations | length %}
+      <p class="meta">Showing the latest {{ d.recent_conversations | length }} of
+        {{ d.interactions.conversations }} conversations —
+        <a href="/timeline">see all activity in the timeline</a>.</p>
+    {% endif %}
+  {% else %}
+    <p class="meta">No conversations with {{ who }} on record yet — they appear once the
+      recorder hears {{ 'you' if d.is_owner else 'them' }} speak.</p>
   {% endif %}
+
+  <h2>Recent quotes</h2>
+  {% if d.recent_quotes %}
+    {% for q in d.recent_quotes %}
+      <blockquote>
+        <p>{{ q.text }}</p>
+        <footer class="meta">
+          {% if q.day %}
+            <a href="/day?date={{ q.day }}#seg-{{ q.id }}" title="Open this line in the day view">
+              <time datetime="{{ q.start_at }}">{{ q.start_at | localdt }}</time></a>
+          {% else %}
+            {% if q.start_at %}<time datetime="{{ q.start_at }}">{{ q.start_at | localdt }}</time>{% else %}—{% endif %}
+          {% endif %}
+        </footer>
+      </blockquote>
+    {% endfor %}
+    <p class="meta">Newest {{ d.recent_quotes | length }} shown —
+      <a href="/timeline">see all activity in the timeline</a>.</p>
+  {% else %}
+    <p class="meta">No transcript quotes yet — lines attributed to {{ who }} show up here
+      once conversations are transcribed.</p>
+  {% endif %}
+
+  {% endif %}{# opted-out gate #}
+
+  <script>
+    (function () {
+      'use strict';
+
+      function plural(n, word) { n = Number(n) || 0; return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+      // Same feedback contract as the People page: report opt-out redactions
+      // and warn when the new name collides with another voice profile.
+      function nameToast(res, name, renaming) {
+        var msg = res && res.redacted_segments > 0
+          ? 'Saved — “' + name + '” is on your opt-out list, so ' +
+            plural(res.redacted_segments, 'line') + ' were redacted.'
+          : renaming ? 'Renamed to “' + name + '”.'
+                     : 'Saved — this voice is now ' + name + '.';
+        if (res && res.duplicate_of) {
+          msg += ' Heads-up: another voice is already named “' + res.duplicate_of.name +
+                 '” — if they’re the same person, merge them on the People page.';
+        }
+        return msg;
+      }
+
+      function wireNameForm(form, renaming) {
+        if (!form) return;
+        form.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var input = form.querySelector('input');
+          var name = (input.value || '').trim();
+          if (!name) { SB.toast('Type a name first.', 'error'); input.focus(); return; }
+          try {
+            var res = await SB.api('/api/speakers/{{ d.speaker_id }}/name',
+                                   { method: 'POST', body: { name: name }, button: e.submitter });
+            SB.reload(nameToast(res, name, renaming), 'success');
+          } catch (err) { input.focus(); /* SB.api already toasted the error */ }
+        });
+      }
+
+      wireNameForm(document.getElementById('identify-form'), false);
+      wireNameForm(document.getElementById('rename-form'), true);
+
+      // Inline rename (mirrors the People page pattern).
+      var toggle = document.getElementById('rename-toggle');
+      var renameForm = document.getElementById('rename-form');
+      function setRename(show) {
+        if (!renameForm || !toggle) return;
+        renameForm.hidden = !show;
+        toggle.setAttribute('aria-expanded', show ? 'true' : 'false');
+        if (show) {
+          var input = renameForm.querySelector('input');
+          input.focus();
+          input.select();
+        } else {
+          toggle.focus();
+        }
+      }
+      if (toggle && renameForm) {
+        toggle.addEventListener('click', function () { setRename(renameForm.hidden); });
+        var cancel = document.getElementById('rename-cancel');
+        if (cancel) cancel.addEventListener('click', function () { setRename(false); });
+        document.addEventListener('keydown', function (e) {
+          if (e.key !== 'Escape' || renameForm.hidden) return;
+          if (e.target && e.target.closest && e.target.closest('#rename-form')) setRename(false);
+        });
+      }
+
+      // Commitments → task backlog (idempotent per edge server-side; the
+      // reload re-renders the card in its “✓ In your tasks” state).
+      document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest && e.target.closest('.promote-btn');
+        if (!btn) return;
+        SB.api('/api/actions/' + btn.dataset.edge + '/promote', { method: 'POST', button: btn })
+          .then(function (d) {
+            SB.reload(d && d.title ? 'Added to your backlog: “' + d.title + '”.'
+                                   : 'Added to your backlog.', 'success');
+          })
+          .catch(function () { /* SB.api already toasted the error */ });
+      });
+    })();
+  </script>
 {% endblock %}

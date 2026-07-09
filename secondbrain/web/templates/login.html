@@ -1,38 +1,140 @@
 <!doctype html>
+{# Intentionally standalone (no nav/app.js): shown to unauthenticated remote
+   clients only — loopback and already-authed visitors are redirected away by
+   GET /login. Mirrors the base.html tokens; see UI-GUIDE in base.html.
+   Context: next (validated path or ''), error (str|None), username (prefill),
+   no_password (bool: credentials not configured), signed_out (bool). #}
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Sign in</title>
+  <meta name="color-scheme" content="light dark" />
+  <title>Sign in · SecondBrain</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%A7%A0</text></svg>" />
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 360px;
-           margin: 12vh auto; padding: 1.5rem; }
-    form { display: grid; gap: .7rem; }
-    input { padding: .6rem; border: 1px solid #8884; border-radius: 8px; font: inherit; }
-    button { padding: .6rem; border-radius: 8px; border: 1px solid #8884; cursor: pointer;
-             background: #8882; }
-    .err { color: #d33; font-size: .9rem; min-height: 1.2em; }
+    :root { color-scheme: light dark;
+            --bg: #ffffff; --fg: #1c1c1e; --muted: #5d5d63;
+            --line: rgba(128,128,128,.32); --soft: rgba(128,128,128,.11);
+            --danger: #b3261e; --ok: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #161618; --fg: #ececf0; --muted: #a5a5ad;
+              --line: rgba(170,170,180,.28); --soft: rgba(170,170,180,.12);
+              --danger: #ff7b72; --ok: #57ab5a; }
+    }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 400px;
+           margin: 0 auto; padding: clamp(1.5rem, 12vh, 7rem) 1.25rem 2.5rem;
+           background: var(--bg); color: var(--fg); line-height: 1.5; }
+    h1 { font-size: 1.4rem; margin: 0 0 .15rem; }
+    .meta { color: var(--muted); font-size: .85rem; margin: 0 0 1.4rem; }
+    form { display: grid; gap: .85rem; margin: 0; }
+    label { display: block; font-size: .8rem; font-weight: 600; color: var(--muted);
+            margin-bottom: .3rem; }
+    input { width: 100%; padding: .55rem .65rem; border: 1px solid var(--line);
+            border-radius: 8px; font: inherit; font-size: 1rem;
+            background: var(--bg); color: inherit; }
+    input::placeholder { color: var(--muted); opacity: 1; }
+    button { padding: .6rem .9rem; border-radius: 8px; border: 1px solid var(--fg);
+             cursor: pointer; background: var(--fg); color: var(--bg); font: inherit;
+             font-size: .95rem; font-weight: 600; }
+    button:hover:not(:disabled) { opacity: .88; }
+    button:disabled { opacity: .55; cursor: default; }
+    :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+    .err { color: var(--danger); font-size: .9rem; min-height: 1.3em; margin: 0; }
+    .notice { color: var(--ok); font-size: .9rem; margin: 0 0 .9rem; }
+    .setup { border: 1px dashed var(--line); border-radius: 10px; padding: 1.1rem 1rem;
+             color: var(--muted); font-size: .92rem; }
+    .setup strong { display: block; color: var(--fg); margin-bottom: .25rem; }
+    .setup code { background: var(--soft); border-radius: 5px; padding: .1rem .4rem;
+                  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  font-size: .85em; color: var(--fg); white-space: nowrap; }
   </style>
 </head>
 <body>
-  <h1>SecondBrain</h1>
-  <form onsubmit="login(event)">
-    <input type="text" id="username" placeholder="Username" autocomplete="username" autofocus />
-    <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
-    <button type="submit">Sign in</button>
-    <div class="err" id="err"></div>
+  <h1><span aria-hidden="true">🧠</span> SecondBrain</h1>
+  <p class="meta">Sign in to your second brain.</p>
+  {% if signed_out %}<p class="notice" role="status">You've been signed out.</p>{% endif %}
+  {% if no_password %}
+    <div class="setup">
+      <strong>Remote sign-in isn't set up yet</strong>
+      No password has been created, so there's nothing to sign in with. On the Mac
+      running SecondBrain, run <code>sb auth set-password</code>, then reload this
+      page. (On that Mac itself, SecondBrain opens without a login.)
+    </div>
+  {% else %}
+  <form id="login-form" action="/login" method="post">
+    <input type="hidden" name="next" value="{{ next }}" />
+    <div>
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" value="{{ username }}" required
+             autocomplete="username" autocapitalize="none" autocorrect="off"
+             spellcheck="false" {% if not username %}autofocus{% endif %} />
+    </div>
+    <div>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required
+             autocomplete="current-password" {% if username %}autofocus{% endif %} />
+    </div>
+    <button type="submit" id="go">Sign in</button>
+    <p class="err" id="err" role="alert" aria-live="polite">{{ error or '' }}</p>
   </form>
+  {% endif %}
   <script>
-    async function login(e) {
-      e.preventDefault();
-      const r = await fetch('/login', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({username: username.value, password: password.value})
+    (function () {
+      'use strict';
+      var form = document.getElementById('login-form');
+      if (!form) return; // remote sign-in not configured: notice shown instead
+      var btn = document.getElementById('go');
+      var err = document.getElementById('err');
+
+      function safeNext() {
+        var next = new URLSearchParams(location.search).get('next');
+        // Same-origin paths only — mirrors the server's _safe_next rules.
+        if (next && next[0] === '/' && next[1] !== '/' && next[1] !== '\\') return next;
+        return '/';
+      }
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault(); // JS path: fetch + inline errors (action= is the no-JS fallback)
+        if (btn.disabled) return; // double-submit guard — don't burn rate-limit budget
+        err.textContent = '';
+        btn.disabled = true;
+        var label = btn.textContent;
+        btn.textContent = 'Signing in…';
+        var redirecting = false;
+        try {
+          var r = await fetch('/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: form.username.value.trim(),
+              password: form.password.value
+            })
+          });
+          if (r.ok) {
+            redirecting = true; // keep the button busy until navigation lands
+            location.replace(safeNext());
+            return;
+          }
+          var detail = '';
+          try { detail = (await r.json()).detail || ''; } catch (e2) { /* non-JSON body */ }
+          if (typeof detail !== 'string') detail = '';
+          if (r.status === 401) {
+            err.textContent = 'Wrong username or password.';
+            form.password.select();
+          } else if (r.status === 429) {
+            err.textContent = detail ? detail[0].toUpperCase() + detail.slice(1)
+                                     : 'Too many attempts — wait a few minutes, then try again.';
+          } else {
+            err.textContent = detail || 'Sign-in failed (HTTP ' + r.status + ').';
+          }
+        } catch (e2) {
+          err.textContent = 'Can’t reach SecondBrain — check that the server is up, then try again.';
+        } finally {
+          if (!redirecting) { btn.disabled = false; btn.textContent = label; }
+        }
       });
-      if (r.ok) { location.href = '/'; }
-      else { document.getElementById('err').textContent = 'Invalid credentials'; }
-    }
+    })();
   </script>
 </body>
 </html>

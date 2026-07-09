@@ -50,6 +50,10 @@ language = ""                  # empty = auto-detect
 # full-text-only if the extension or embedding model is unavailable.
 semantic_enabled = true
 embedding_model = "bge-small"
+# Drop nearest-neighbour hits farther than this (L2 distance on normalized
+# embeddings, 0..2). Keeps "no matches" honest instead of returning arbitrary
+# segments; raise for looser recall, lower for stricter matching.
+semantic_max_distance = 0.8
 
 [api]
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.

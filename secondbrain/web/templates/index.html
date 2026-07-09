@@ -1,78 +1,583 @@
 {% extends "base.html" %}
 {% block title %}SecondBrain{% endblock %}
 {% block style %}
-    .sub { color: #888; margin-top: 0; }
-    .status { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
-    .rec-on { background: #d33; color: #fff; }
-    .rec-off { background: #999; color: #fff; }
-    form { display: flex; gap: .5rem; margin: 1rem 0; }
-    input[type=text] { flex: 1; padding: .6rem; font-size: 1rem;
-                       border: 1px solid #8884; border-radius: 8px; }
-    .hit { border-bottom: 1px solid #8883; padding: .6rem 0; }
-    .hit .meta { color: #888; font-size: .8rem; }
-    mark, .hit b { background: #fd05; }
+    .sub { color: var(--muted); margin-top: 0; }
+    .status { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; align-items: center; }
+    .rec-on { background: #c22; color: #fff; }
+    .rec-off { background: #6e6e73; color: #fff; }
+    .pill-warn { background: transparent; border: 1px solid var(--danger);
+                 color: var(--danger); font-weight: 600; }
     .stats { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+    .search { margin: .4rem 0 .2rem; }
+    .bar { display: flex; gap: .5rem; flex-wrap: wrap; }
+    #q { flex: 1; min-width: 12rem; }
+    .filters { margin: .45rem 0 .2rem; }
+    .filters summary { cursor: pointer; color: var(--muted); font-size: .9rem;
+                       width: max-content; padding: .15rem .3rem; border-radius: 6px; }
+    .filters summary:hover { color: var(--fg); }
+    .filters[open] summary { color: var(--fg); }
+    .filter-row { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: flex-end;
+                  margin: .5rem 0 .2rem; }
+    .filter-row label { display: flex; flex-direction: column; gap: .2rem;
+                        font-size: .8rem; color: var(--muted); }
+    .filter-row select, .filter-row input { font-size: .92rem; padding: .35rem .5rem; }
+    .filter-row .linklike { padding-bottom: .45rem; color: var(--muted); }
+    .filter-row .linklike:hover { color: var(--fg); }
+    kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+          padding: 0 .35em; font-size: .85em; background: var(--soft); }
+    @media (hover: none) { .kbd-hint { display: none; } }
+    #res-status { margin: .9rem 0 0; }
+    .day-head { margin: 1.25rem 0 .1rem; }
+    .day-head a { text-decoration: none; }
+    .day-head a:hover, .day-head a:focus-visible { text-decoration: underline; }
+    .day-head .meta { font-weight: 400; }
+    ol.hits { list-style: none; margin: 0; padding: 0; }
+    .hit { border-bottom: 1px solid var(--line); padding: .55rem 0; }
+    .hit:last-child { border-bottom: 0; }
+    .hit-text { margin: 0; overflow-wrap: anywhere; }
+    .hit-line { margin: .15rem 0 0; }
+    .hit-line a { color: inherit; }
+    mark { background: #fd06; color: inherit; border-radius: 3px; padding: 0 .08em; }
+    .rel { border: 1px solid var(--line); border-radius: 999px; padding: .05rem .5rem;
+           font-size: .78rem; color: var(--muted); white-space: nowrap; }
+    .lowmark { color: var(--warn); font-weight: 400; }
+    .more-row { margin: 1rem 0; }
 {% endblock %}
 {% block content %}
   <h1>SecondBrain</h1>
   <p class="sub">Your local, private second brain.</p>
 
-  <div class="status">
-    <span class="pill {{ 'rec-on' if status.recording else 'rec-off' }}">
-      {{ '● Recording' if status.recording else '⏸ Paused' }}
-    </span>
-    <span class="pill">{{ status.segments_today }} segments today</span>
-    <span class="pill">{{ status.disk_free_gb }} GB free</span>
-    <span class="pill">retention: {{ status.retention_hours }}h</span>
-    <button onclick="toggle()">
-      {{ 'Pause' if status.recording else 'Resume' }}
-    </button>
+  <section class="status" aria-label="Recorder status">
+    {# The pill reports what is actually happening, not just the switch position:
+       capture_stale means "switched on, but no audio has arrived for a while". #}
+    {% if status.capture_stale %}
+      {% set rkey, rcls, rdot = 'stale', 'pill-warn', '⚠' %}
+      {% set rfor = status.capture_stale_for or 'a while' %}
+      {% set rtxt = 'Recording — no audio for ' ~ rfor %}
+    {% elif status.recording %}
+      {% set rkey, rcls, rdot, rtxt = 'on', 'rec-on', '●', 'Recording' %}
+    {% elif status.recording_enabled %}
+      {% set rkey, rcls, rdot, rtxt = 'paused', 'rec-off', '⏸', 'Paused' %}
+    {% else %}
+      {% set rkey, rcls, rdot, rtxt = 'off', 'rec-off', '○', 'Recording off' %}
+    {% endif %}
+    <span id="rec-pill" role="status" class="pill {{ rcls }}" data-state="{{ rkey }}"
+          {% if rkey == 'stale' %}data-stale-for="{{ rfor }}"
+          title="Recording is switched on, but no audio has actually been captured for {{ rfor }} — the microphone may be unavailable."{% endif %}
+      ><span aria-hidden="true">{{ rdot }}</span> {{ rtxt }}</span>
+    {% if status.recording_enabled %}
+      <button type="button" id="rec-btn" onclick="toggle(this)">
+        {{ 'Pause' if status.recording else 'Resume' }}
+      </button>
+    {% else %}
+      <span class="meta">Recording is switched off in config — pause/resume is
+        disabled until <code>consent.recording_enabled</code> is turned back on.</span>
+    {% endif %}
+    <a class="pill pill-warn" id="pill-capture" href="/health"
+       title="See what's wrong — the health page checks the microphone, daemon, and pipeline"
+       {% if not status.capture_stale %}hidden{% endif %}>Check the microphone</a>
+    <a class="pill" id="pill-today" href="/day" title="Open today's transcript"
+      >{{ status.segments_today }} segment{{ '' if status.segments_today == 1 else 's' }} today</a>
+    <span class="pill {{ '' if status.disk_ok else 'pill-warn' }}" id="pill-disk"
+          title="Free space on the drive holding your recordings"
+      >{{ '' if status.disk_ok else 'Low disk — ' }}{{ status.disk_free_gb }} GB free</span>
+    {% set rh = status.retention_hours %}
+    {% if rh < 0 %}{% set rlabel = 'audio kept forever' %}
+    {% elif rh == 0 %}{% set rlabel = 'audio deleted after transcribing' %}
+    {% elif rh % 24 == 0 %}{% set rd = rh // 24 %}{% set rlabel = 'audio kept ' ~ rd ~ (' day' if rd == 1 else ' days') %}
+    {% else %}{% set rlabel = 'audio kept ' ~ rh ~ 'h' %}{% endif %}
+    <span class="pill" title="How long raw audio is kept after transcription — transcripts are kept forever">{{ rlabel }}</span>
+    {% set active = status.jobs.get('pending', 0) + status.jobs.get('running', 0) %}
+    <a class="pill" id="pill-active" href="/health#jobs"
+       title="Transcription and analysis still running — new transcript lines appear once they finish"
+       {% if not active %}hidden{% endif %}>{{ active }} job{{ '' if active == 1 else 's' }} processing…</a>
+    {% set failed = status.jobs.get('failed', 0) %}
+    <a class="pill pill-warn" id="pill-jobs" href="/health#jobs"
+       title="Pipeline jobs that gave up after retries — details on the health page"
+       {% if not failed %}hidden{% endif %}>{{ failed }} failed job{{ '' if failed == 1 else 's' }}</a>
+    <a class="pill" href="/health"
+       title="System checks and pipeline job history">System health</a>
+  </section>
+
+  {# Both branches are always in the DOM (hidden toggled) so the 30s poll can
+     keep the corpus counts truthful in a long-open tab — including the very
+     first empty → captured transition. #}
+  {% set has_stats = stats and stats.segments %}
+  <div class="stats" id="stats-row" {% if not has_stats %}hidden{% endif %}>
+    <a class="pill" id="stat-conversations" href="/timeline">{{ stats.conversations }} conversation{{ '' if stats.conversations == 1 else 's' }}</a>
+    <a class="pill" id="stat-speakers" href="/speakers">{{ stats.speakers }} {{ 'person' if stats.speakers == 1 else 'people' }}</a>
+    <a class="pill" id="stat-graph" href="/graph">{{ stats.kg_nodes }} entities · {{ stats.kg_edges }} facts</a>
+    <a class="pill" id="stat-projects" href="/projects">{{ stats.projects }} project{{ '' if stats.projects == 1 else 's' }}</a>
+    <a class="pill" id="stat-goals" href="/goals">{{ stats.goals_active }} active goal{{ '' if stats.goals_active == 1 else 's' }}</a>
+    <a class="pill" id="stat-tasks" href="/tasks">{{ stats.tasks_open }} open task{{ '' if stats.tasks_open == 1 else 's' }}</a>
+    <a class="pill" id="pill-brief" href="/brief" {% if not status.digest_count_today %}hidden{% endif %}
+      >{{ status.digest_count_today }} brief item{{ '' if status.digest_count_today == 1 else 's' }}</a>
+  </div>
+  <p class="meta" id="cap-line" {% if not (has_stats and stats.first_day) %}hidden{% endif %}
+    ><span id="cap-range">Captured {{ stats.first_day | prettyday }}{% if stats.last_day and stats.last_day != stats.first_day %} → {{ stats.last_day | prettyday }}{% endif %}</span>
+     · <span id="seg-total">{{ stats.segments }} segment{{ '' if stats.segments == 1 else 's' }} total</span></p>
+  <div class="empty" id="stats-empty" {% if has_stats %}hidden{% endif %}><strong>Nothing captured yet</strong>
+    {% if status.recording %}The recorder is on — once a conversation is transcribed
+    it shows up here and becomes searchable.{% else %}Recording is off right now —
+    once it's on and a conversation is transcribed, it becomes searchable here.{% endif %}
   </div>
 
-  {% if stats %}
-  <div class="stats">
-    <a class="pill" href="/timeline">{{ stats.conversations }} conversations</a>
-    <a class="pill" href="/speakers">{{ stats.speakers }} people</a>
-    <a class="pill" href="/graph">{{ stats.kg_nodes }} entities · {{ stats.kg_edges }} facts</a>
-    <a class="pill" href="/projects">{{ stats.projects }} projects</a>
-    <a class="pill" href="/goals">{{ stats.goals_active }} active goals</a>
-    <a class="pill" href="/tasks">{{ stats.tasks_open }} open tasks</a>
-    {% if status.digest_count_today %}
-    <a class="pill" href="/brief">{{ status.digest_count_today }} brief items</a>{% endif %}
-  </div>
-  {% if stats.first_day %}
-  <p class="meta">Captured {{ stats.first_day }} → {{ stats.last_day }} ·
-     {{ stats.segments }} segments total</p>{% endif %}
-  {% endif %}
-
-  <form onsubmit="doSearch(event)">
-    <input type="text" id="q" placeholder="Search what was said…" autofocus />
-    <button type="submit">Search</button>
+  <h2 id="search-h">Search transcripts</h2>
+  <form class="search" role="search" aria-labelledby="search-h" onsubmit="doSearch(event)">
+    <div class="bar">
+      <label class="visually-hidden" for="q">Search transcripts</label>
+      <input type="search" id="q" placeholder="Search what was said…" autofocus
+             autocomplete="off" />
+      <button type="submit" class="btn-primary">Search</button>
+    </div>
+    <details class="filters" id="filters">
+      <summary id="filters-sum">Filters</summary>
+      <div class="filter-row">
+        <label for="mode">Match
+          <select id="mode">
+            <option value="auto" selected>Words + meaning</option>
+            <option value="fulltext">Exact words</option>
+            <option value="semantic">By meaning</option>
+          </select>
+        </label>
+        {% if speakers %}
+        <label for="speaker">Speaker
+          <select id="speaker">
+            <option value="" selected>Anyone</option>
+            {% for sp in speakers %}
+            <option value="{{ sp.id }}">{{ sp.name or sp.display_label or 'Speaker ' ~ sp.id }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <label for="since">From
+          <input type="date" id="since" />
+        </label>
+        <label for="until">To
+          <input type="date" id="until" />
+        </label>
+        <button type="button" class="linklike" onclick="resetFilters()">Reset filters</button>
+      </div>
+    </details>
   </form>
-  <div id="results"></div>
+  <p class="meta">Finds exact words and lines that mean the same thing, across every
+    transcribed conversation. <span class="kbd-hint">Press <kbd>/</kbd> to jump to search.</span></p>
+
+  {# tabindex=-1: focus lands here when "Show more results" disappears on the
+     last page, so keyboard users keep a place and hear the final count. #}
+  <p id="res-status" class="meta" role="status" tabindex="-1"></p>
+  <div id="results" aria-busy="false"></div>
 
   <script>
-    async function toggle() {
-      const recording = document.querySelector('.rec-on');
-      await fetch(recording ? '/api/pause' : '/api/resume', { method: 'POST' });
-      location.reload();
+    'use strict';
+    var CORPUS_SEGMENTS = {{ stats.segments if stats else 0 }};
+    var MARK_S = '\u{E000}', MARK_E = '\u{E001}';  // snippet sentinels from the server
+    var state = { limit: 20, seq: 0 };
+
+    function $(id) { return document.getElementById(id); }
+
+    /* ---------- live recorder status ---------- */
+
+    function applyStatus(st) {
+      var pill = $('rec-pill');
+      // 'stale' = switched on but no audio actually arriving (mic gone, capture
+      // dead) — the one state where "● Recording" would be a lie.
+      var key = !st.recording_enabled ? 'off'
+              : !st.recording ? 'paused'
+              : st.capture_stale ? 'stale' : 'on';
+      var staleFor = st.capture_stale_for || 'a while';
+      if (pill.dataset.state !== key ||
+          (key === 'stale' && pill.dataset.staleFor !== staleFor)) {
+        pill.dataset.state = key;
+        pill.dataset.staleFor = key === 'stale' ? staleFor : '';
+        pill.className = 'pill ' + (key === 'on' ? 'rec-on'
+                                   : key === 'stale' ? 'pill-warn' : 'rec-off');
+        var dot = { on: '●', paused: '⏸', off: '○', stale: '⚠' }[key];
+        var txt = key === 'on' ? 'Recording'
+                : key === 'paused' ? 'Paused'
+                : key === 'off' ? 'Recording off'
+                : 'Recording — no audio for ' + staleFor;
+        pill.innerHTML = '<span aria-hidden="true">' + dot + '</span> ' + SB.esc(txt);
+        if (key === 'stale') {
+          pill.title = 'Recording is switched on, but no audio has actually been captured for ' +
+                       staleFor + ' — the microphone may be unavailable.';
+        } else {
+          pill.removeAttribute('title');
+        }
+      }
+      var cap = $('pill-capture');
+      if (cap) cap.hidden = key !== 'stale';
+      var btn = $('rec-btn');
+      if (btn && !btn.classList.contains('busy')) {
+        var label = st.recording ? 'Pause' : 'Resume';
+        if (btn.textContent.trim() !== label) btn.textContent = label;
+      }
+      var n = st.segments_today;
+      $('pill-today').textContent = n + ' segment' + (n === 1 ? '' : 's') + ' today';
+      var disk = $('pill-disk');
+      disk.classList.toggle('pill-warn', !st.disk_ok);
+      disk.textContent = (st.disk_ok ? '' : 'Low disk — ') + st.disk_free_gb + ' GB free';
+      var active = ((st.jobs || {}).pending || 0) + ((st.jobs || {}).running || 0);
+      var ap = $('pill-active');
+      if (ap) {
+        ap.hidden = !active;
+        if (active) ap.textContent = active + ' job' + (active === 1 ? '' : 's') + ' processing…';
+      }
+      var failed = (st.jobs || {}).failed || 0;
+      var jobs = $('pill-jobs');
+      jobs.hidden = !failed;
+      jobs.textContent = failed + ' failed job' + (failed === 1 ? '' : 's');
+      var db = st.digest_count_today || 0;
+      var brief = $('pill-brief');
+      brief.hidden = !db;
+      if (db) brief.textContent = db + ' brief item' + (db === 1 ? '' : 's');
+      // Keep the empty-search hint truthful in a long-open tab: once recording
+      // starts, "nothing recorded yet" must stop being the explanation.
+      if (typeof st.segments_total === 'number') CORPUS_SEGMENTS = st.segments_total;
     }
-    async function doSearch(e) {
+
+    function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+    // Same 'Jul 15, 2026' shape as the server-side prettyday filter, so the
+    // caption doesn't change format on the first live refresh.
+    function prettyDay(day) {
+      var d = new Date(day + 'T00:00:00');
+      return isNaN(d) ? day
+        : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    // Corpus pills go stale in a long-open tab without this: conversations,
+    // people, entities etc. are all live counters, not page-load snapshots.
+    function applyStats(s) {
+      if (!s || typeof s.segments !== 'number') return;
+      CORPUS_SEGMENTS = s.segments;
+      var has = s.segments > 0;
+      $('stats-row').hidden = !has;
+      $('stats-empty').hidden = has;
+      $('stat-conversations').textContent = plural(s.conversations, 'conversation');
+      $('stat-speakers').textContent = s.speakers + (s.speakers === 1 ? ' person' : ' people');
+      $('stat-graph').textContent = s.kg_nodes + ' entities · ' + s.kg_edges + ' facts';
+      $('stat-projects').textContent = plural(s.projects, 'project');
+      $('stat-goals').textContent = s.goals_active + ' active goal' + (s.goals_active === 1 ? '' : 's');
+      $('stat-tasks').textContent = s.tasks_open + ' open task' + (s.tasks_open === 1 ? '' : 's');
+      var cap = has && s.first_day;
+      $('cap-line').hidden = !cap;
+      if (cap) {
+        $('cap-range').textContent = 'Captured ' + prettyDay(s.first_day) +
+          (s.last_day && s.last_day !== s.first_day ? ' → ' + prettyDay(s.last_day) : '');
+        $('seg-total').textContent = plural(s.segments, 'segment') + ' total';
+      }
+    }
+
+    async function refreshStatus() {
+      // One cadence for everything above the search box — status pills and
+      // corpus stats both stay truthful, and a failed poll just waits for the
+      // next one (allSettled: one endpoint failing can't starve the other).
+      var r = await Promise.allSettled([
+        SB.api('/api/status', { quiet: true }),
+        SB.api('/api/stats', { quiet: true })
+      ]);
+      if (r[0].status === 'fulfilled') applyStatus(r[0].value);
+      if (r[1].status === 'fulfilled') applyStats(r[1].value);
+    }
+
+    async function toggle(btn) {
+      var pausing = btn.textContent.trim() === 'Pause';
+      try {
+        await SB.api(pausing ? '/api/pause' : '/api/resume', { method: 'POST', button: btn });
+        await refreshStatus();
+        SB.toast(pausing ? 'Recording paused.' : 'Recording resumed.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
+    }
+
+    setInterval(function () { if (!document.hidden) refreshStatus(); }, 30000);
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) refreshStatus();
+    });
+
+    /* ---------- search ---------- */
+
+    function readForm() {
+      var spk = $('speaker');   // absent until at least one voice has lines
+      return {
+        q: $('q').value.trim(),
+        mode: $('mode').value,
+        since: $('since').value,
+        until: $('until').value,
+        speaker: spk ? spk.value : ''
+      };
+    }
+
+    function speakerName() {
+      var spk = $('speaker');
+      return spk && spk.value ? spk.options[spk.selectedIndex].text : '';
+    }
+
+    function filtersActive(p) {
+      return p.mode !== 'auto' || !!p.since || !!p.until || !!p.speaker;
+    }
+
+    function syncFiltersSummary() {
+      var p = readForm();
+      $('filters-sum').textContent = filtersActive(p) ? 'Filters · on' : 'Filters';
+    }
+
+    function syncURL(p) {
+      var u = new URLSearchParams();
+      if (p.q) u.set('q', p.q);
+      if (p.mode !== 'auto') u.set('mode', p.mode);
+      if (p.speaker) u.set('speaker', p.speaker);
+      if (p.since) u.set('since', p.since);
+      if (p.until) u.set('until', p.until);
+      var qs = u.toString();
+      history.replaceState(null, '', qs ? '/?' + qs : '/');
+    }
+
+    function localDayStr(d) {
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+
+    function fmtDay(day) {
+      var d = new Date(day + 'T00:00:00');
+      if (isNaN(d)) return day;
+      var label = d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+      if (day === localDayStr(new Date())) return 'Today · ' + label;
+      var y = new Date(); y.setDate(y.getDate() - 1);
+      if (day === localDayStr(y)) return 'Yesterday · ' + label;
+      return label;
+    }
+
+    function fmtTime(iso) {
+      var d = new Date(iso);
+      return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+
+    function markify(snippet) {
+      return SB.esc(snippet).split(MARK_S).join('<mark>').split(MARK_E).join('</mark>');
+    }
+
+    function hitHTML(h) {
+      var spk = h.speaker
+        ? '<strong>' + SB.esc(h.speaker) +
+          (h.speaker_low_confidence
+            ? ' <span class="lowmark" title="Low-confidence speaker guess">(?)</span>'
+            : '') + ':</strong> '
+        : '';
+      var body = h.snippet ? markify(h.snippet) : SB.esc(h.text);
+      var day = h.day || (h.start_at || '').slice(0, 10);
+      var d = new Date(h.start_at);
+      var full = isNaN(d) ? '' : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+      var rel = (h.extra && h.extra.semantic_only)
+        ? ' <span class="rel" title="Matched by meaning, not by these exact words">≈ related</span>'
+        : '';
+      var t = fmtTime(h.start_at);
+      return '<li class="hit"><p class="hit-text">' + spk + body + '</p>' +
+             '<p class="meta hit-line"><a href="/day?date=' + encodeURIComponent(day) +
+             '#seg-' + h.segment_id + '" title="Open this moment in the day view"' +
+             ' aria-label="Open in day view' + (full ? ' — ' + SB.esc(full) : '') + '">' +
+             (t || 'view in day') + '</a>' + rel + '</p></li>';
+    }
+
+    function renderResults(data, p) {
+      var hits = data.results;
+      var groups = {};   // day -> [hit]
+      hits.forEach(function (h) {
+        var day = h.day || (h.start_at || '').slice(0, 10) || 'unknown';
+        (groups[day] = groups[day] || []).push(h);
+      });
+      var days = Object.keys(groups).sort().reverse();
+      var html = '';
+      var allSemantic = data.mode === 'auto' && hits.length &&
+        hits.every(function (h) { return h.extra && h.extra.semantic_only; });
+      if (allSemantic) {
+        html += '<div class="empty"><strong>No exact word matches</strong> ' +
+                'Showing lines related in meaning instead — the ≈ chip marks them.</div>';
+      }
+      days.forEach(function (day) {
+        var list = groups[day].slice().sort(function (a, b) {
+          return (a.start_at || '') < (b.start_at || '') ? -1 : 1;
+        });
+        html += '<section class="day-group"><h3 class="day-head">' +
+                '<a href="/day?date=' + encodeURIComponent(day) + '">' + SB.esc(fmtDay(day)) +
+                '</a> <span class="meta">· ' + list.length + ' line' +
+                (list.length === 1 ? '' : 's') + '</span></h3><ol class="hits">' +
+                list.map(hitHTML).join('') + '</ol></section>';
+      });
+      if (hits.length >= data.limit && data.limit < 200) {
+        html += '<p class="more-row"><button type="button" class="linklike" id="more-btn" ' +
+                'onclick="showMore(this)">Show more results</button></p>';
+      } else if (hits.length >= 200) {
+        html += '<p class="more-row meta">Showing the first 200 hits — narrow by date or words to see the rest.</p>';
+      }
+      $('results').innerHTML = html;
+      // Only the count phrase gets the "First" prefix — never transform the
+      // user's query text (searching JP must not be announced as “jp”).
+      var head = hits.length + ' result' + (hits.length === 1 ? '' : 's');
+      if (hits.length >= data.limit) head = 'First ' + head;
+      var summary = head + ' for “' + p.q + '”';
+      if (p.speaker && speakerName()) summary += ' from ' + speakerName();
+      if (data.mode === 'auto' && !data.semantic_available) summary += ' · keyword-only (semantic engine unavailable)';
+      $('res-status').textContent = summary;
+    }
+
+    function renderEmpty(data, p) {
+      var hint;
+      if (CORPUS_SEGMENTS === 0) {
+        hint = 'Nothing has been recorded yet — once a conversation is transcribed, it becomes searchable here.';
+      } else if (data.mode === 'semantic' && !data.semantic_available) {
+        hint = 'Semantic search isn’t available right now (embedding model not loaded) — try the “Exact words” mode.';
+      } else if (p.speaker && !(p.since || p.until)) {
+        hint = 'Nothing from ' + SB.esc(speakerName() || 'that person') +
+               ' matches — try different words or <button type="button" class="linklike" ' +
+               'onclick="resetFilters()">clear the filters</button>.';
+      } else if (p.since || p.until) {
+        hint = 'Nothing ' + (p.speaker ? 'from ' + SB.esc(speakerName() || 'that person') + ' ' : '') +
+               'in that date range — <button type="button" class="linklike" ' +
+               'onclick="resetFilters()">clear the filters</button> or try different words.';
+      } else {
+        hint = 'Try fewer or different words, or browse the <a href="/timeline">timeline</a>.';
+      }
+      $('results').innerHTML = '<div class="empty"><strong>No matches for “' +
+        SB.esc(p.q) + '”</strong> ' + hint + '</div>';
+      $('res-status').textContent = 'No matches for “' + p.q + '”.';
+    }
+
+    async function runSearch(more, btn, prevLimit) {
+      var p = readForm();
+      syncFiltersSummary();
+      if (!p.q) {
+        $('results').innerHTML = '';
+        $('res-status').textContent = '';
+        syncURL(p);
+        return;
+      }
+      if (p.since && p.until && p.since > p.until) {
+        // An inverted range can never match — explain and offer the one-tap
+        // fix instead of running a search that reads as a generic "no matches".
+        state.seq++;   // discard any response still in flight
+        syncURL(p);
+        $('results').setAttribute('aria-busy', 'false');
+        $('results').innerHTML = '<div class="empty"><strong>The From date is after the To date</strong> ' +
+          'No day can fall in that range — <button type="button" class="linklike" ' +
+          'onclick="swapDates()">swap the dates</button> or <button type="button" ' +
+          'class="linklike" onclick="resetFilters()">clear the filters</button>.</div>';
+        $('res-status').textContent = 'The From date is after the To date — swap them?';
+        return;
+      }
+      if (!more) state.limit = 20;
+      syncURL(p);
+      var u = new URLSearchParams({ q: p.q, limit: state.limit });
+      if (p.mode !== 'auto') u.set('mode', p.mode);
+      if (p.speaker) u.set('speaker', p.speaker);
+      if (p.since) u.set('since', p.since);
+      if (p.until) u.set('until', p.until);
+      var box = $('results');
+      box.setAttribute('aria-busy', 'true');
+      $('res-status').textContent = 'Searching…';
+      if (!more) box.innerHTML = '';
+      var seq = ++state.seq;   // ignore stale responses from superseded searches
+      try {
+        var data = await SB.api('/api/search?' + u.toString(), { quiet: true, button: btn });
+        if (seq !== state.seq) return;
+        if (data.results.length) renderResults(data, p); else renderEmpty(data, p);
+        if (more) {
+          // Keep keyboard users anchored: refocus the (re-rendered) button, or
+          // on the last page — when it disappears — the "N results" summary.
+          var mb = $('more-btn');
+          if (mb) mb.focus(); else $('res-status').focus();
+        }
+      } catch (err) {
+        if (seq !== state.seq) return;
+        if (more) {
+          // Keep the results the user is reading; only the pagination failed.
+          if (prevLimit) state.limit = prevLimit;  // a retry re-asks for the same page
+          $('res-status').textContent =
+            'Couldn’t load more results — the list below is unchanged. Use “Show more results” to retry.';
+          var retry = $('more-btn');
+          if (retry) retry.focus();
+        } else {
+          $('res-status').textContent = 'Search failed.';
+          box.innerHTML = '<div class="empty"><strong>Search failed</strong> ' +
+            SB.esc(err.message || 'Something went wrong') +
+            ' — <button type="button" class="linklike" onclick="runSearch()">try again</button></div>';
+        }
+      } finally {
+        if (seq === state.seq) box.setAttribute('aria-busy', 'false');
+      }
+    }
+
+    function doSearch(e) {
       e.preventDefault();
-      const q = document.getElementById('q').value.trim();
-      if (!q) return;
-      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
-      const data = await r.json();
-      const box = document.getElementById('results');
-      if (!data.results.length) { box.innerHTML = '<p>No matches.</p>'; return; }
-      box.innerHTML = data.results.map(h => {
-        const spk = h.speaker
-          ? `<b>${escapeHtml(h.speaker)}${h.speaker_low_confidence ? ' (?)' : ''}:</b> `
-          : '';
-        return `<div class="hit"><div>${spk}${h.snippet || escapeHtml(h.text)}</div>
-          <div class="meta">${h.start_at || ''} · file #${h.audio_file_id} · ${h.start_offset_s.toFixed(1)}s</div></div>`;
-      }).join('');
+      runSearch(false, e.submitter);
     }
-    function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+    function showMore(btn) {
+      var prev = state.limit;
+      state.limit = Math.min(state.limit + 40, 200);
+      runSearch(true, btn, prev);
+    }
+
+    function resetFilters() {
+      $('mode').value = 'auto';
+      if ($('speaker')) $('speaker').value = '';
+      $('since').value = '';
+      $('until').value = '';
+      syncFiltersSummary();
+      if ($('q').value.trim()) runSearch();
+    }
+
+    function swapDates() {
+      var s = $('since').value;
+      $('since').value = $('until').value;
+      $('until').value = s;
+      syncFiltersSummary();
+      if ($('q').value.trim()) runSearch();
+    }
+
+    ['mode', 'speaker', 'since', 'until'].forEach(function (id) {
+      var el = $(id);   // the speaker select is absent until a voice has lines
+      if (el) el.addEventListener('change', function () {
+        syncFiltersSummary();
+        if ($('q').value.trim()) runSearch();
+      });
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                t.tagName === 'SELECT' || t.isContentEditable)) return;
+      e.preventDefault();
+      $('q').focus();
+      $('q').select();
+    });
+
+    // Restore a bookmarked / shared search from the URL
+    // (?q=…&mode=…&speaker=…&since=…&until=…).
+    (function initFromURL() {
+      var u = new URLSearchParams(location.search);
+      var mode = u.get('mode');
+      if (mode === 'fulltext' || mode === 'semantic') $('mode').value = mode;
+      var spkSel = $('speaker'), spk = u.get('speaker') || '';
+      if (spkSel && /^\d+$/.test(spk)) {
+        if (!spkSel.querySelector('option[value="' + spk + '"]')) {
+          // A voice merged/renamed since the URL was saved: keep the filter
+          // visible and honest instead of silently dropping it.
+          var opt = document.createElement('option');
+          opt.value = spk;
+          opt.textContent = 'Speaker #' + spk;
+          spkSel.appendChild(opt);
+        }
+        spkSel.value = spk;
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(u.get('since') || '')) $('since').value = u.get('since');
+      if (/^\d{4}-\d{2}-\d{2}$/.test(u.get('until') || '')) $('until').value = u.get('until');
+      var p = readForm();
+      if (filtersActive(p)) $('filters').open = true;
+      syncFiltersSummary();
+      var q = (u.get('q') || '').trim();
+      if (q) { $('q').value = q; runSearch(); }
+    })();
   </script>
 {% endblock %}

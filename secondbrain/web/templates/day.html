@@ -1,52 +1,847 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Day transcript</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    .meta { color: #888; font-size: .8rem; }
-    .seg { border-bottom: 1px solid #8883; padding: .45rem 0; }
+{% extends "base.html" %}
+{% block title %}Day {{ day }} · SecondBrain{% endblock %}
+{% block style %}
+    .daynav { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin: .7rem 0 .9rem; }
+    .daynav input[type="date"] { padding: .3rem .5rem; font-size: .92rem; }
+    @media (hover: none) { .kbd-hint { display: none; } }
+    .summary { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem; margin: .9rem 0 .4rem; }
+    .filter { cursor: pointer; user-select: none; }
+    .filter input { padding: 0; margin: 0 .4rem 0 0; accent-color: currentColor; vertical-align: -1px; }
+    .baddate { border-color: var(--danger); }
+    .conv { border-left: 3px solid var(--line); padding: .15rem 0 .15rem 1rem; margin: 1.2rem 0; }
+    .convhead { font-weight: 600; margin: .1rem 0 .3rem; font-size: .85rem; overflow-wrap: anywhere; }
+    .convd summary { cursor: pointer; border-radius: 4px; }
+    .convd summary .convhead { display: inline; margin: 0; }
+    ol.lines { list-style: none; margin: 0; padding: 0; }
+    .seg { border-bottom: 1px solid var(--line); padding: .55rem 0;
+           display: grid; grid-template-columns: 1fr auto; gap: .1rem .8rem; }
+    /* The review filter hides rows via the hidden attribute — the grid rule
+       above must never win over it (base.html guards this globally too). */
+    .seg[hidden] { display: none; }
+    .seg:last-child { border-bottom: 0; }
+    /* Landing here from a citation chip (/day…#seg-123): make the cited line
+       unmissable instead of dropping the user on an unmarked wall of text. */
+    .seg:target { background: var(--soft); outline: 2px solid var(--line); border-radius: 8px;
+                  padding-left: .5rem; padding-right: .5rem; margin: 0 -.5rem;
+                  scroll-margin-top: .8rem; }
+    .seg-head { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap;
+                align-items: center; gap: .2rem .65rem; }
+    .seg-head time { font-variant-numeric: tabular-nums; }
+    .playbtn { font-size: .72rem; line-height: 1.1; padding: .22rem .5rem;
+               border-radius: 999px; color: var(--muted); }
+    .playbtn:hover:not(:disabled) { color: var(--fg); }
+    .playbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--fg); }
     .spk { font-weight: 600; }
-    .low { color: #c80; }
-    select { font: inherit; padding: .2rem; border: 1px solid #8884; border-radius: 6px; }
-  </style>
-</head>
-<body>
-  <h1>Transcript {{ date }}</h1>
-  <p class="meta"><a href="/">home</a> · <a href="/speakers">speakers</a> ·
-     fix a wrong speaker inline — it locks the line and teaches the profile.</p>
+    .spk.low, .lowmark { color: var(--warn); }
+    .lowmark { font-weight: 400; font-variant-numeric: tabular-nums; }
+    .spk.unattr { color: var(--muted); font-style: italic; }
+    .fixwrap { grid-column: 2; grid-row: 1; align-self: center;
+               display: flex; flex-wrap: wrap; align-items: center;
+               justify-content: flex-end; gap: .4rem .5rem; }
+    .seg select.fix { font-size: .85rem; padding: .25rem .4rem; }
+    .confirmbtn { font-size: .85rem; padding: .25rem .6rem; color: var(--ok); }
+    .fixbtn, .disputebtn { color: var(--muted); font-size: .85rem; }
+    .fixbtn:hover:not(:disabled), .disputebtn:hover:not(:disabled) { color: var(--fg); }
+    .seg-status { font-size: .8rem; color: var(--muted); }
+    .seg-status.err { color: var(--danger); }
+    /* Inline confirm/choice affordance — replaces the native blocking confirm
+       dialog and backs the "no one else is named" dispute flow. Matches the
+       pill/toast language: a short prompt with plain buttons, keyboard-friendly. */
+    .inline-confirm { display: flex; flex-wrap: wrap; align-items: center;
+                      justify-content: flex-end; gap: .3rem .5rem; }
+    .inline-confirm .ic-msg { font-size: .8rem; color: var(--muted); }
+    .inline-confirm button { font-size: .82rem; padding: .22rem .55rem; }
+    .inline-confirm .ic-go { color: var(--ok); }
+    .inline-confirm .ic-danger { color: var(--danger); }
+    .inline-confirm a.ic-go { text-decoration: none; }
+    .locked { color: var(--ok); white-space: nowrap; }
+    .seg-text { grid-column: 1; grid-row: 2; margin: 0; overflow-wrap: anywhere; }
+    .seg.saving { opacity: .65; }
+    .jump { margin-top: .7rem; display: flex; flex-wrap: wrap; gap: .3rem; justify-content: center; }
+    /* Lines transcribed after this render (today only): a quiet, persistent
+       offer to refresh — never an auto-rerender under a correction in flight. */
+    .freshpill { position: fixed; bottom: 3.4rem; left: 50%; transform: translateX(-50%);
+                 z-index: 900; border-radius: 999px; padding: .5rem 1.05rem;
+                 background: var(--fg); color: var(--bg); border-color: var(--fg);
+                 font-size: .9rem; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+    @media (max-width: 480px) {
+      .seg { grid-template-columns: 1fr; }
+      .fixwrap { grid-column: 1; grid-row: 3; margin-top: .25rem; justify-content: flex-start; }
+      .inline-confirm { justify-content: flex-start; }
+      /* 16px floor: anything smaller makes iOS Safari zoom the viewport when
+         the picker gets focus, jarring the phone correction flow. */
+      .seg select.fix { flex: 1; min-width: 0; font-size: 1rem; }
+      .seg-text { grid-column: 1; }
+    }
+{% endblock %}
+{% block content %}
+  <h1>Day · {{ pretty_day }}</h1>
+  <p class="meta">Review who said what, and fix any wrong name — a correction locks that line
+    and teaches the person's voice profile so future matching improves.</p>
 
-  {% for s in segments %}
-    <div class="seg">
-      <span class="spk {{ 'low' if s.speaker_low_confidence else '' }}">
-        {{ s.speaker or 'Unknown' }}{{ ' (?)' if s.speaker_low_confidence else '' }}</span>
-      <span class="meta">{{ (s.start_at or '')[11:19] }}</span>
-      <select onchange="reassign({{ s.id }}, this.value)">
-        <option value="">— fix —</option>
+  <nav class="daynav" aria-label="Day navigation">
+    <a class="pill" id="nav-prev" href="/day?date={{ prev_day }}" rel="prev"
+       aria-label="Previous day, {{ prev_day }}">← Prev</a>
+    <label class="visually-hidden" for="day-pick">Jump to date</label>
+    <input type="date" id="day-pick" value="{{ day }}" />
+    <a class="pill" id="nav-next" href="/day?date={{ next_day }}" rel="next"
+       aria-label="Next day, {{ next_day }}">Next →</a>
+    {% if day != today %}<a class="pill" href="/day">Today</a>{% endif %}
+    <span class="meta kbd-hint">or use the ← → keys</span>
+  </nav>
+
+  {% if invalid_date %}
+    <div class="card baddate" role="alert">
+      <strong>“{{ invalid_date }}” doesn't look like a date.</strong>
+      <span class="meta">Dates are YYYY-MM-DD (e.g. {{ today }}) — showing today instead.</span>
+    </div>
+  {% endif %}
+
+  {% if segments %}
+    {% set heavy = segments|length > 300 %}
+    {% set n_playable = segments | selectattr('audio_status') | rejectattr('audio_status', 'equalto', 'deleted') | list | length %}
+    <div class="summary meta">
+      <span>{{ segments|length }} line{{ 's' if segments|length != 1 }}
+        · {{ blocks|length }} conversation{{ 's' if blocks|length != 1 }}</span>
+      <span id="locked-note" {% if not n_locked %}hidden{% endif %}>✓
+        <span id="count-locked">{{ n_locked }}</span> corrected by you</span>
+      <label class="pill filter"><input type="checkbox" id="only-review" />
+        Needs review only (<span id="count-review">{{ n_review }}</span>)</label>
+    </div>
+    <p class="meta">Names marked with an amber percentage, like
+      <span class="lowmark">(45%?)</span>, are guesses below {{ low_pct }}% match confidence —
+      press ✓ to confirm a right guess, or pick who really spoke to fix a wrong one.
+      <em>Unknown</em> lines have no identified person yet — pick who spoke to name them.
+      {% if n_playable %}Hard to tell from text alone? ▶ plays that line's audio.{% endif %}
+      <span id="tznote">Times shown in this machine's timezone.</span></p>
+    {% if heavy %}
+      <p class="meta">Long day — conversations are collapsed to keep the page quick.
+        Open one to review it; the “Needs review only” filter opens the relevant ones for you.</p>
+    {% endif %}
+
+    {% if not speakers %}
+      <div class="card"><strong>No one to reassign lines to yet.</strong>
+        <span class="meta">Set up people on the <a href="/speakers">People page</a> first —
+        then you can correct speakers here.</span></div>
+    {% endif %}
+
+    {% macro conv_head(b) -%}
+      <time data-ts="{{ b.started_at }}" datetime="{{ b.started_at }}">{{ b.started_at | localhms }}</time>
+      {%- if b.ended_at and b.ended_at != b.started_at %} –
+      <time data-ts="{{ b.ended_at }}" datetime="{{ b.ended_at }}">{{ b.ended_at | localhms }}</time>
+      {%- endif %} · {{ b.segments|length }} line{{ 's' if b.segments|length != 1 }}
+    {%- endmacro %}
+
+    {% for b in blocks %}
+      <section class="conv">
+        {% if heavy %}
+          <details class="convd">
+            <summary><h2 class="convhead meta">{{ conv_head(b) }}</h2></summary>
+        {% else %}
+          <h2 class="convhead meta">{{ conv_head(b) }}</h2>
+        {% endif %}
+        <ol class="lines">
+          {% for s in b.segments %}
+            {% set unattr = s.speaker_id is none %}
+            {% set low = s.speaker_low_confidence and not s.speaker_locked %}
+            {% set needs = (low or unattr) and not s.speaker_locked %}
+            {% set pct = ((s.speaker_confidence or 0) * 100) | round | int %}
+            {# A guess onto an anonymous "Unknown #N" diarizer cluster is a
+               placeholder, not a real person: it reads like an unattributed line
+               (no confirm, "Identify who spoke" instead of "confirm/fix"). #}
+            {% set placeholder = s.speaker_id is not none and not s.speaker_is_named %}
+            {% set can_confirm = low and s.speaker_is_named %}
+            {% set noname = unattr or placeholder %}
+            <li class="seg{{ ' needs-review' if needs }}" id="seg-{{ s.id }}"
+                data-seg="{{ s.id }}"{% if s.speaker_id is not none %} data-current="{{ s.speaker_id }}"{% endif %}>
+              <div class="seg-head">
+                <time class="meta" data-ts="{{ s.start_at }}" datetime="{{ s.start_at }}">{{ s.start_at | localhms }}</time>
+                {% if s.audio_status and s.audio_status != 'deleted' %}
+                  <button type="button" class="playbtn" aria-pressed="false"
+                          data-clip="/api/segments/{{ s.id }}/clip"
+                          title="Hear this moment before deciding who spoke."
+                          aria-label="Play the audio for the line at {{ s.start_at | localhms }}">▶</button>
+                {% endif %}
+                <span class="spk{{ ' low' if low }}{{ ' unattr' if noname }}"
+                      title="{% if s.speaker_locked %}Corrected by you — locked at 100% confidence.{% elif unattr %}No speaker attributed yet — pick who spoke to teach their voice profile.{% elif placeholder %}An unnamed voice cluster — pick who spoke to identify them and teach their voice profile.{% elif low %}Speaker guess {{ pct }}% confident, below the {{ low_pct }}% threshold — confirm it or fix it.{% elif s.speaker_confidence is not none %}Speaker confidence {{ pct }}%.{% endif %}">
+                  {{- s.speaker or 'Unknown' -}}
+                  {%- if low %} <span class="lowmark" aria-hidden="true">({{ pct }}%?)</span><span class="visually-hidden"> (low-confidence guess, {{ pct }}%)</span>{% endif -%}
+                </span>
+                {% if s.speaker_locked %}
+                  {# tabindex=-1 so applyCorrection() can move focus here when a
+                     locked line is re-corrected (matches the JS-created badge). #}
+                  <span class="locked pill" tabindex="-1"
+                        title="You corrected this line — it's locked and won't be re-labeled automatically.">✓ corrected by you</span>
+                {% endif %}
+              </div>
+              <p class="seg-text">{{ s.text }}</p>
+              {% if speakers %}
+                {% set others = speakers | rejectattr('id', 'equalto', s.speaker_id) | list %}
+                {% set fixlabel = 'Change speaker' if s.speaker_locked
+                                  else ('Identify speaker' if noname else 'Fix speaker') %}
+                {% set confirm_label = 'That’s me' if s.speaker_is_owner else 'It’s ' ~ s.speaker %}
+                <span class="fixwrap">
+                  <span class="seg-status" role="status"></span>
+                  {% if can_confirm %}
+                    <button type="button" class="confirmbtn" data-speaker="{{ s.speaker_id }}"
+                            data-name="{{ s.speaker }}"{% if s.speaker_is_owner %} data-owner="1"{% endif %}
+                            title="{% if s.speaker_is_owner %}Yes, that’s you — lock this line and strengthen your voice profile.{% else %}Yes, this is {{ s.speaker }} — lock this line and teach their voice profile.{% endif %}"
+                            aria-label="Confirm {{ s.speaker }} for the line at {{ s.start_at | localhms }}">✓ {{ confirm_label }}</button>
+                  {% endif %}
+                  {% if others %}
+                    <button type="button" class="linklike fixbtn" data-placeholder="{{ fixlabel }}…"
+                            {% if s.speaker_locked %}title="Corrected the wrong way? Move this line to someone else."{% endif %}
+                            aria-label="{{ fixlabel }} for the line at {{ s.start_at | localhms }}">
+                      {{- 'Change…' if s.speaker_locked else fixlabel ~ '…' -}}</button>
+                  {% elif s.speaker_id is not none and not noname %}
+                    {# Attributed, but no one else is named to move the line to.
+                       Without this the only affordance would be nothing — a
+                       confidently-wrong "Me" line would be an uncorrectable
+                       dead-end. Offer to dispute it anyway: name the real
+                       speaker, or unattribute the line. #}
+                    {% set dispute_label = 'Not me' if s.speaker_is_owner else 'Wrong — not ' ~ s.speaker %}
+                    <button type="button" class="linklike disputebtn"
+                            data-owner-attr="{{ '1' if s.speaker_is_owner else '0' }}"
+                            data-name="{{ s.speaker }}"
+                            title="This isn’t {{ 'you' if s.speaker_is_owner else s.speaker }}? No one else is named yet — name who really spoke, or clear this line."
+                            aria-label="{{ dispute_label }} — dispute the speaker for the line at {{ s.start_at | localhms }}">
+                      {{- dispute_label -}}…</button>
+                  {% endif %}
+                </span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ol>
+        {% if heavy %}</details>{% endif %}
+      </section>
+    {% endfor %}
+    <div class="empty" id="all-done" hidden><strong>All lines reviewed</strong>
+      Nothing on this day still needs your attention.</div>
+    {% if speakers %}
+      {# One template picker, cloned on demand — a heavy day stays light because
+         rows carry a small button instead of a duplicate <select> each. #}
+      <select id="fix-template" class="fix" hidden tabindex="-1" aria-hidden="true">
+        <option value="">Fix speaker…</option>
         {% for sp in speakers %}
-          <option value="{{ sp.id }}">{{ sp.name or sp.display_label or ('#' ~ sp.id) }}</option>
+          <option value="{{ sp.id }}"{% if sp.is_owner %} data-owner="1"{% endif %}>{{ sp.name or sp.display_label or ('#' ~ sp.id) }}</option>
         {% endfor %}
       </select>
-      <div>{{ s.text }}</div>
-    </div>
+    {% endif %}
   {% else %}
-    <p class="meta">Nothing recorded for this day.</p>
-  {% endfor %}
+    <div class="empty">
+      <strong>{% if day == today %}Nothing recorded yet today{% else %}Nothing recorded on {{ pretty_day }}{% endif %}</strong>
+      {% if not recording %}Recording is paused, so nothing new is being captured —
+        you can resume from the <a href="/">Home page</a>.
+      {% else %}The recorder is on — captured conversation appears here once transcribed.
+      {% endif %}
+      {% if nav.prev_day_with_data or nav.next_day_with_data %}
+        <div class="jump">
+          {% if nav.prev_day_with_data %}
+            <a class="pill" href="/day?date={{ nav.prev_day_with_data }}">← Last recorded day · {{ nav.prev_day_with_data }}</a>
+          {% endif %}
+          {% if nav.next_day_with_data %}
+            <a class="pill" href="/day?date={{ nav.next_day_with_data }}">Next recorded day · {{ nav.next_day_with_data }} →</a>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if day == today %}
+    {# The recorder keeps transcribing while today is reviewed. A poll fills
+       this in ("3 new lines — refresh") instead of yanking the page around. #}
+    <div role="status">
+      <button type="button" id="fresh-note" class="freshpill" hidden></button>
+    </div>
+  {% endif %}
 
   <script>
-    async function reassign(segId, speakerId) {
-      if (!speakerId) return;
-      await fetch(`/api/segments/${segId}/speaker`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({speaker_id: parseInt(speakerId)})
+    (function () {
+      'use strict';
+
+      // --- render stored UTC timestamps in the viewer's local timezone -------
+      var localized = false;
+      document.querySelectorAll('time[data-ts]').forEach(function (t) {
+        var d = new Date(t.getAttribute('data-ts'));
+        if (isNaN(d)) return;
+        t.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        t.title = d.toLocaleString();
+        localized = true;
       });
-      location.reload();
-    }
+      var note = document.getElementById('tznote');
+      if (note && localized) {
+        var tz = '';
+        try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { /* keep generic */ }
+        note.textContent = tz ? 'Times shown in your timezone (' + tz + ').' : 'Times shown in your local timezone.';
+      }
+      function relabelRowControls(row) {
+        var t = row.querySelector('time');
+        var suffix = ' for the line at ' + (t ? t.textContent : 'this time');
+        row.querySelectorAll('.confirmbtn, .fixbtn, .disputebtn, .playbtn, select.fix').forEach(function (el) {
+          if (el.classList.contains('confirmbtn')) {
+            el.setAttribute('aria-label', 'Confirm ' + (el.dataset.name || 'the speaker') + suffix);
+          } else if (el.classList.contains('disputebtn')) {
+            var mine = el.dataset.ownerAttr === '1';
+            el.setAttribute('aria-label',
+              (mine ? 'Not me' : 'Wrong — not ' + (el.dataset.name || 'them'))
+              + ' — dispute the speaker' + suffix);
+          } else if (el.classList.contains('fixbtn')) {
+            el.setAttribute('aria-label',
+              (el.dataset.placeholder || 'Fix speaker…').replace(/…$/, '') + suffix);
+          } else if (el.classList.contains('playbtn')) {
+            el.setAttribute('aria-label',
+              (el.getAttribute('aria-pressed') === 'true' ? 'Stop the audio' : 'Play the audio') + suffix);
+          } else {
+            el.setAttribute('aria-label', 'Reassign speaker' + suffix);
+          }
+        });
+      }
+      document.querySelectorAll('.seg').forEach(relabelRowControls);
+
+      // --- day-to-day navigation ---------------------------------------------
+      var filterBox = document.getElementById('only-review');
+      var urlReview = false;
+      try { urlReview = new URLSearchParams(location.search).get('review') === '1'; } catch (e) { /* no restore */ }
+      // On days with nothing recorded there is no checkbox — keep carrying the
+      // ?review=1 flag through so a multi-day review session survives gaps.
+      function reviewOn() { return filterBox ? filterBox.checked : urlReview; }
+
+      var pick = document.getElementById('day-pick');
+      if (pick) {
+        pick.addEventListener('change', function () {
+          if (pick.value && pick.value !== pick.defaultValue) {
+            location.href = '/day?date=' + pick.value + (reviewOn() ? '&review=1' : '');
+          }
+        });
+      }
+      document.addEventListener('keydown', function (e) {
+        if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        var el = e.target || {};
+        var tag = (el.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea' || el.isContentEditable) return;
+        var go = e.key === 'ArrowLeft' ? document.getElementById('nav-prev')
+               : e.key === 'ArrowRight' ? document.getElementById('nav-next') : null;
+        if (go) location.href = go.href;
+      });
+
+      // --- "needs review only" filter (persists across days via ?review=1) ----
+      function applyFilter() {
+        var on = reviewOn();
+        var anyVisible = false;
+        document.querySelectorAll('.seg').forEach(function (r) {
+          var show = !on || r.classList.contains('needs-review');
+          r.hidden = !show;
+          if (show) anyVisible = true;
+        });
+        document.querySelectorAll('section.conv').forEach(function (sec) {
+          sec.hidden = on && !sec.querySelector('.seg.needs-review');
+        });
+        if (on) {
+          // On collapsed (heavy) days, open the conversations that need eyes.
+          document.querySelectorAll('details.convd').forEach(function (d) {
+            if (d.querySelector('.seg.needs-review')) d.open = true;
+          });
+        }
+        var done = document.getElementById('all-done');
+        if (done) done.hidden = !(on && !anyVisible);
+      }
+      function syncReviewLinks() {
+        var on = reviewOn();
+        try {
+          var url = new URL(location.href);
+          if (on) url.searchParams.set('review', '1'); else url.searchParams.delete('review');
+          history.replaceState(null, '', url);
+        } catch (e) { /* keep the current URL */ }
+        document.querySelectorAll('a[href^="/day"]').forEach(function (a) {
+          try {
+            var u = new URL(a.getAttribute('href'), location.origin);
+            if (on) u.searchParams.set('review', '1'); else u.searchParams.delete('review');
+            a.setAttribute('href', u.pathname + u.search);
+          } catch (e) { /* leave this link as-is */ }
+        });
+      }
+      if (filterBox) {
+        if (urlReview) {
+          filterBox.checked = true;
+          applyFilter();
+        }
+        filterBox.addEventListener('change', function () { applyFilter(); syncReviewLinks(); });
+      }
+      if (reviewOn()) syncReviewLinks();
+
+      function refreshCounts() {
+        var rc = document.getElementById('count-review');
+        if (rc) rc.textContent = document.querySelectorAll('.seg.needs-review').length;
+        var locked = document.querySelectorAll('.seg .locked').length;
+        var lc = document.getElementById('count-locked');
+        if (lc) lc.textContent = locked;
+        var ln = document.getElementById('locked-note');
+        if (ln) ln.hidden = locked === 0;
+      }
+
+      // --- speaker correction (the teaching action) ---------------------------
+      var tmpl = document.getElementById('fix-template');
+
+      document.addEventListener('click', function (e) {
+        if (!e.target || !e.target.closest) return;
+        var playBtn = e.target.closest('.playbtn');
+        if (playBtn) { playLine(playBtn); return; }
+        var confirmBtn = e.target.closest('.confirmbtn');
+        if (confirmBtn) { confirmCurrent(confirmBtn); return; }
+        var disputeBtn = e.target.closest('.disputebtn');
+        if (disputeBtn) { openDispute(disputeBtn); return; }
+        var fixBtn = e.target.closest('.fixbtn');
+        if (fixBtn) openPicker(fixBtn);
+      });
+
+      // --- inline confirm/choice (replaces the native blocking confirm) ------
+      // Renders a short prompt with plain action buttons into the row's fixwrap,
+      // matching the pill/toast language and staying keyboard/focus friendly.
+      // opts: { message, actions:[{label, kind, href?, run?}], onCancel? }.
+      //   kind: 'go' (green) | 'danger' (red) | undefined (plain).
+      //   href → renders a link (navigates away); otherwise a button whose
+      //          run(close) fires on click (run owns dismissing the panel).
+      // A Cancel is always appended; Cancel/Escape dismiss the panel and call
+      // onCancel(). Opening a panel first clears the row's current controls, so
+      // the caller's onCancel is responsible for restoring them.
+      function inlineConfirm(row, opts) {
+        var wrap = row.querySelector('.fixwrap');
+        if (!wrap) return function () {};
+        var status = wrap.querySelector('.seg-status');
+        wrap.querySelectorAll('button, select, .inline-confirm').forEach(function (el) {
+          if (el !== status) el.remove();
+        });
+        var panel = document.createElement('span');
+        panel.className = 'inline-confirm';
+        panel.setAttribute('role', 'group');
+        if (opts.label) panel.setAttribute('aria-label', opts.label);
+        var msg = document.createElement('span');
+        msg.className = 'ic-msg';
+        msg.textContent = opts.message;
+        panel.appendChild(msg);
+        var closed = false;
+        function close() { if (!closed) { closed = true; panel.remove(); } }
+        function cancelled() { close(); if (opts.onCancel) opts.onCancel(); }
+        var first = null;
+        (opts.actions || []).forEach(function (a) {
+          var b = document.createElement(a.href ? 'a' : 'button');
+          b.className = (a.href ? 'pill ' : '') + (a.kind === 'go' ? 'ic-go'
+                        : a.kind === 'danger' ? 'ic-danger' : '');
+          if (a.href) { b.href = a.href; } else { b.type = 'button'; }
+          b.textContent = a.label;
+          if (a.run) b.addEventListener('click', function () { a.run(close); });
+          panel.appendChild(b);
+          if (!first) first = b;
+        });
+        var cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'linklike';
+        cancel.textContent = 'Cancel';
+        cancel.addEventListener('click', cancelled);
+        panel.appendChild(cancel);
+        panel.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Escape') { ev.stopPropagation(); cancelled(); }
+        });
+        wrap.appendChild(panel);
+        if (first) first.focus();
+        return close;
+      }
+
+      // Rebuild the small dispute button after a cancelled dispute panel so the
+      // row keeps its correction affordance (the panel cleared the controls).
+      function restoreDispute(row, isOwner, name) {
+        var wrap = row.querySelector('.fixwrap');
+        if (!wrap || wrap.querySelector('.disputebtn')) return;
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'linklike disputebtn';
+        b.dataset.ownerAttr = isOwner ? '1' : '0';
+        if (name) b.dataset.name = name;
+        b.textContent = (isOwner ? 'Not me' : 'Wrong — not ' + (name || 'them')) + '…';
+        b.title = 'This isn’t ' + (isOwner ? 'you' : (name || 'them'))
+                + '? No one else is named yet — name who really spoke, or clear this line.';
+        wrap.appendChild(b);
+        relabelRowControls(row);
+        b.focus();
+      }
+
+      // "Not me…" / "Wrong person…" on an attributed line when no one else is
+      // named to move it to. Offer to name the real speaker (People page) or
+      // clear the attribution so a wrong guess stops standing as fact.
+      function openDispute(btn) {
+        var row = btn.closest('.seg');
+        if (!row) return;
+        var isOwner = btn.dataset.ownerAttr === '1';
+        var name = btn.dataset.name || '';
+        var who = isOwner ? 'you' : (name || 'this person');
+        inlineConfirm(row, {
+          label: 'Dispute the speaker for this line',
+          message: 'Not ' + who + '? No one else is named yet.',
+          actions: [
+            { label: 'Add who spoke', kind: 'go', href: '/speakers' },
+            { label: 'Clear this line', kind: 'danger', run: function (close) {
+                unassignLine(row, close);
+              } },
+          ],
+          onCancel: function () { restoreDispute(row, isOwner, name); },
+        });
+      }
+
+      // Clear a wrong attribution (locks the line as an honest "Unknown") when
+      // there is no correct person to move it to yet.
+      async function unassignLine(row, closePanel) {
+        var status = row.querySelector('.seg-status');
+        row.classList.add('saving');
+        if (status) { status.classList.remove('err'); status.textContent = 'Saving…'; }
+        try {
+          await SB.api('/api/segments/' + row.dataset.seg + '/unassign', { method: 'POST' });
+          if (closePanel) closePanel();
+          applyCorrection(row, null, false, null, 'Cleared');
+        } catch (err) {
+          // SB.api already showed the error toast (with the server's message).
+          row.classList.remove('saving');
+          if (status) { status.classList.add('err'); status.textContent = 'Couldn’t save — try again.'; }
+        }
+      }
+
+      // --- listen before deciding: one shared player, per-line toggle --------
+      // The player streams the endpoint URL directly (CSP media-src 'self';
+      // blob: sources are rejected). Diagnostics fetch only after a failure.
+      var player = null, playingBtn = null, playToken = 0;
+
+      function resetPlayBtn() {
+        if (!playingBtn) return;
+        playingBtn.textContent = '▶';
+        playingBtn.setAttribute('aria-pressed', 'false');
+        var row = playingBtn.closest('.seg');
+        if (row) relabelRowControls(row);
+        playingBtn = null;
+      }
+
+      function stopPlayback() {
+        playToken++; // invalidates any play() still starting up
+        resetPlayBtn();
+        if (player) {
+          player.pause();
+          player.removeAttribute('src'); // detach so nothing keeps streaming
+        }
+      }
+
+      // Ask the server why the clip wouldn't play, in words worth reading:
+      // 410 = retention already swept this moment's raw audio (by design).
+      async function explainPlayFailure(btn) {
+        var msg = 'Couldn’t play the audio — try again.';
+        try {
+          var r = await fetch(btn.dataset.clip);
+          if (r.status === 410) {
+            msg = 'Audio for this line has expired — raw recordings are cleaned up '
+                + 'on your retention schedule. The transcript is kept.';
+            btn.dataset.expired = '1';
+            btn.title = 'Audio expired — only the transcript remains.';
+          } else if (!r.ok) {
+            try {
+              var j = await r.json();
+              if (j && j.detail && typeof j.detail === 'string') msg = j.detail;
+            } catch (e2) { /* keep the generic message */ }
+          }
+        } catch (e3) {
+          msg = 'Couldn’t reach SecondBrain — is it still running?';
+        }
+        SB.toast(msg, 'error');
+      }
+
+      async function playLine(btn) {
+        if (btn === playingBtn) { stopPlayback(); return; }
+        stopPlayback();
+        var token = ++playToken;
+        if (!player) {
+          player = new Audio();
+          player.addEventListener('ended', resetPlayBtn);
+          player.addEventListener('error', function () {
+            // Failures mid-playback (after a clean start); pre-start failures
+            // reject play() and are explained there instead.
+            if (playingBtn) {
+              SB.toast('Playback stopped — the audio couldn’t be read.', 'error');
+              resetPlayBtn();
+            }
+          });
+        }
+        SB.busy(btn, true);
+        try {
+          player.src = btn.dataset.clip;
+          await player.play();
+          if (token !== playToken) { player.pause(); return; } // superseded
+          playingBtn = btn;
+          btn.textContent = '■';
+          btn.setAttribute('aria-pressed', 'true');
+          var row = btn.closest('.seg');
+          if (row) relabelRowControls(row);
+        } catch (err) {
+          // pause()/new play() aborting a starting play() is not a failure
+          if (token === playToken && (!err || err.name !== 'AbortError')) {
+            await explainPlayFailure(btn);
+          }
+        } finally {
+          SB.busy(btn, false);
+          if (btn.dataset.expired) btn.disabled = true; // keep expired rows inert
+        }
+      }
+
+      // Swap the row's small button for a real picker (cloned from the single
+      // hidden template select), and swap back if the user bails out.
+      function openPicker(btn) {
+        var row = btn.closest('.seg');
+        if (!tmpl || !row) return;
+        var sel = tmpl.cloneNode(true);
+        sel.hidden = false;
+        sel.removeAttribute('id');
+        sel.removeAttribute('aria-hidden');
+        sel.removeAttribute('tabindex');
+        if (row.dataset.current) {
+          var cur = sel.querySelector('option[value="' + row.dataset.current + '"]');
+          if (cur) cur.remove();
+        }
+        if (sel.options.length <= 1) {
+          SB.toast('No one else to choose — name more people on the People page first.', 'info');
+          return;
+        }
+        sel.options[0].textContent = btn.dataset.placeholder || 'Fix speaker…';
+        btn.replaceWith(sel);
+        relabelRowControls(row);
+        sel.focus();
+        try { if (typeof sel.showPicker === 'function') sel.showPicker(); } catch (err) { /* focus is enough */ }
+        // One-shot restore: removing a focused <select> fires blur synchronously,
+        // so guard against re-entry before swapping the button back in.
+        var restored = false;
+        function restore(refocus) {
+          if (restored) return;
+          restored = true;
+          if (sel.parentNode) sel.replaceWith(btn);
+          if (refocus) btn.focus();
+        }
+        // Reassign's inline confirm removes the picker, so it restores the row's
+        // button on Cancel via this closure (the picker may already be gone).
+        sel._restoreButton = function () {
+          if (restored) return;
+          restored = true;
+          var wrap = row.querySelector('.fixwrap');
+          if (sel.parentNode) sel.remove();
+          if (wrap && !wrap.contains(btn)) wrap.appendChild(btn);
+          relabelRowControls(row);
+          btn.focus();
+        };
+        sel.addEventListener('change', function () { reassign(sel); });
+        sel.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Escape' && !sel.disabled) restore(true);
+        });
+        sel.addEventListener('blur', function () {
+          // Left without choosing: restore the tidy button.
+          if (!sel.value && !sel.disabled) restore(false);
+        });
+      }
+
+      // One-click confirm of the current low-confidence guess: locks the line
+      // and teaches the profile. No dialog — “Change…” can always undo it.
+      async function confirmCurrent(btn) {
+        var row = btn.closest('.seg');
+        if (!row) return;
+        var status = row.querySelector('.seg-status');
+        var name = btn.dataset.name || 'this person';
+        row.classList.add('saving');
+        if (status) { status.classList.remove('err'); status.textContent = ''; }
+        try {
+          var res = await SB.api('/api/segments/' + row.dataset.seg + '/speaker',
+                                 { method: 'POST', body: { speaker_id: parseInt(btn.dataset.speaker, 10) },
+                                   button: btn });
+          applyCorrection(row, (res && res.speaker) || name, !!(res && res.learned),
+                          btn.dataset.speaker, 'Confirmed ');
+        } catch (err) {
+          // SB.api already showed the error toast (with the server's message).
+          row.classList.remove('saving');
+          if (status) { status.classList.add('err'); status.textContent = 'Couldn’t save — try again.'; }
+        }
+      }
+
+      // Picking a target opens an inline confirm (a precision write: moving a
+      // locked line withdraws the prior teaching sample). The confirm matches
+      // the pill/toast language instead of a native blocking dialog, and reads
+      // in the first person when the target is the owner ("…to you").
+      function reassign(sel) {
+        if (!sel.value || sel.disabled) return;
+        var row = sel.closest('.seg');
+        if (!row) return;
+        var opt = sel.options[sel.selectedIndex] || {};
+        var speakerId = sel.value;
+        var toOwner = opt.getAttribute && opt.getAttribute('data-owner') === '1';
+        var name = (opt.textContent || 'this person').trim();
+        var wasLocked = !!row.querySelector('.locked');
+        var target = toOwner ? 'you' : name;
+        var message = wasLocked
+          ? (toOwner
+              ? 'Move this line to you? Your earlier correction is withdrawn and your voice profile learns instead.'
+              : 'Move this line to ' + name + '? Your earlier correction is withdrawn and ' + name + '’s voice profile learns instead.')
+          : (toOwner
+              ? 'Move this line to you? It locks the line and strengthens your voice profile.'
+              : 'Move this line to ' + name + '? It locks the line and teaches ' + name + '’s voice profile.');
+        // The picker fired 'change'; hand off to the inline confirm. The select
+        // is removed by inlineConfirm — Cancel restores the row's button.
+        var restore = sel._restoreButton;
+        inlineConfirm(row, {
+          label: (wasLocked ? 'Move' : 'Reassign') + ' this line to ' + target,
+          message: message,
+          actions: [
+            { label: wasLocked ? 'Move' : 'Reassign', kind: 'go', run: function () {
+                doReassign(row, speakerId, name, wasLocked);
+              } },
+          ],
+          onCancel: function () { if (restore) restore(); },
+        });
+      }
+
+      async function doReassign(row, speakerId, name, wasLocked) {
+        var status = row.querySelector('.seg-status');
+        row.classList.add('saving');
+        if (status) { status.classList.remove('err'); status.textContent = 'Saving…'; }
+        try {
+          var res = await SB.api('/api/segments/' + row.dataset.seg + '/speaker',
+                                 { method: 'POST', body: { speaker_id: parseInt(speakerId, 10) } });
+          applyCorrection(row, (res && res.speaker) || name, !!(res && res.learned),
+                          speakerId, wasLocked ? 'Moved to ' : 'Reassigned to ');
+        } catch (err) {
+          // SB.api already showed the error toast (with the server's message).
+          row.classList.remove('saving');
+          if (status) { status.classList.add('err'); status.textContent = 'Couldn’t save — try again.'; }
+          // Give the row its correction affordance back so the user can retry.
+          var wrap = row.querySelector('.fixwrap');
+          if (wrap && !wrap.querySelector('button, select')) {
+            var again = document.createElement('button');
+            again.type = 'button';
+            again.className = 'linklike fixbtn';
+            again.dataset.placeholder = 'Fix speaker…';
+            again.textContent = 'Fix speaker…';
+            wrap.appendChild(again);
+            relabelRowControls(row);
+          }
+        }
+      }
+
+      function othersRemain(currentId) {
+        if (!tmpl) return false;
+        return Array.prototype.some.call(tmpl.options, function (o) {
+          return o.value && o.value !== String(currentId);
+        });
+      }
+
+      // Reflect a completed write in the row. `name` null ⇒ the line was
+      // *cleared* (disputed with no one to move it to): it becomes a locked,
+      // honest "Unknown" rather than a wrong name standing as fact.
+      function applyCorrection(row, name, learned, speakerId, verb) {
+        var cleared = name === null || speakerId === null;
+        row.classList.remove('saving', 'needs-review');
+        if (cleared) delete row.dataset.current; else row.dataset.current = String(speakerId);
+        var spk = row.querySelector('.spk');
+        if (spk) {
+          spk.textContent = cleared ? 'Unknown' : name;
+          spk.classList.remove('low');
+          spk.classList.toggle('unattr', cleared);
+          spk.title = cleared
+            ? 'You cleared this line — it’s locked as unattributed and won’t be re-labeled automatically.'
+            : 'Corrected by you — locked at 100% confidence.';
+        }
+        var badge = row.querySelector('.locked');
+        if (!badge && spk) {
+          badge = document.createElement('span');
+          badge.className = 'locked pill';
+          badge.setAttribute('tabindex', '-1');
+          badge.textContent = '✓ corrected by you';
+          spk.after(document.createTextNode(' '), badge);
+        }
+        if (badge) {
+          badge.title = cleared
+            ? "You cleared this line — it's locked and won't be re-labeled automatically."
+            : "You corrected this line — it's locked and won't be re-labeled automatically.";
+        }
+        var wrap = row.querySelector('.fixwrap');
+        if (wrap) {
+          var status = wrap.querySelector('.seg-status');
+          if (status) { status.classList.remove('err'); status.textContent = ''; }
+          wrap.querySelectorAll('button, select, .inline-confirm').forEach(function (el) { el.remove(); });
+          // Never a dead-end: a cleared line can still be identified (pick who
+          // spoke), a corrected line can still be changed to someone else.
+          if (cleared || othersRemain(speakerId)) {
+            var change = document.createElement('button');
+            change.type = 'button';
+            change.className = 'linklike fixbtn';
+            change.dataset.placeholder = cleared ? 'Identify speaker…' : 'Change speaker…';
+            change.textContent = cleared ? 'Identify speaker…' : 'Change…';
+            change.title = cleared
+              ? 'Know who spoke? Pick them to attribute and teach their voice profile.'
+              : 'Corrected the wrong way? Move this line to someone else.';
+            wrap.appendChild(change);
+          }
+          relabelRowControls(row);
+        }
+        refreshCounts();
+        applyFilter();
+        if (row.hidden) {
+          // Reviewing with the filter on: keep the keyboard on the queue.
+          var nxt = document.querySelector(
+            '.seg.needs-review:not([hidden]) .confirmbtn, .seg.needs-review:not([hidden]) .fixbtn');
+          var done = document.getElementById('all-done');
+          if (nxt) { nxt.focus(); }
+          else if (done && !done.hidden) { done.setAttribute('tabindex', '-1'); done.focus(); }
+        } else if (badge) {
+          badge.focus();
+        }
+        if (cleared) {
+          SB.toast('Line cleared — now unattributed and locked.', 'success');
+        } else {
+          SB.toast(verb + name + ' — line locked' + (learned ? '; voice profile updated.' : '.'),
+                   'success');
+        }
+      }
+
+      // --- today keeps growing: offer fresh lines without yanking the page ---
+      // (Rendered only when viewing today.) Poll a cheap count-only endpoint and,
+      // when it grows, show a persistent "refresh" pill instead of re-rendering
+      // under the reviewer's feet mid-correction. Baseline uses the same raw
+      // count the endpoint returns so the two compare like-for-like.
+      var fresh = document.getElementById('fresh-note');
+      if (fresh) {
+        var knownLines = {{ raw_seg_count if raw_seg_count is defined else segments|length }};
+        var checkingFresh = false, freshFails = 0, staleWarned = false;
+        var checkFresh = async function () {
+          if (document.hidden || checkingFresh) return;
+          checkingFresh = true;
+          try {
+            var data = await SB.api('/api/day/{{ day }}/count', { quiet: true });
+            var n = data && typeof data.count === 'number' ? data.count : knownLines;
+            freshFails = 0; // a good read clears any earlier "may be stale" doubt
+            if (n > knownLines) {
+              var added = n - knownLines;
+              fresh.textContent = (knownLines === 0 ? 'First line' + (added === 1 ? '' : 's')
+                                                    : added + ' new line' + (added === 1 ? '' : 's'))
+                                  + ' transcribed — refresh';
+              fresh.hidden = false;
+            }
+          } catch (err) {
+            // Transient (server restarting?) — retry next tick. But if it keeps
+            // failing, say so once so the user knows the count may be stale
+            // rather than assuming the room has simply been quiet.
+            if (++freshFails === 3 && !staleWarned) {
+              staleWarned = true;
+              SB.toast('Can’t reach SecondBrain to check for new lines — the count may be stale.',
+                       'error');
+            }
+          }
+          checkingFresh = false;
+        };
+        setInterval(checkFresh, 30000);
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden) checkFresh(); // catch up as soon as the tab returns
+        });
+        fresh.addEventListener('click', function () { location.reload(); });
+      }
+    })();
   </script>
-</body>
-</html>
+{% endblock %}

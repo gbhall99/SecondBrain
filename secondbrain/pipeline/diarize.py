@@ -273,7 +273,8 @@ class PyannoteDiarizer(Diarizer):
             _shim_hf_hub_use_auth_token()  # pyannote 3.x passes the removed use_auth_token kwarg
             from pyannote.audio import Pipeline  # lazy: heavy, gated models
 
-            with _trusted_torch_load():  # pyannote checkpoints need weights_only=False on torch>=2.6
+            # pyannote checkpoints need weights_only=False on torch>=2.6
+            with _trusted_torch_load():
                 self._pipeline = _load_pipeline(Pipeline, self.model, self._token())
             if torch.backends.mps.is_available():
                 self._pipeline.to(torch.device("mps"))

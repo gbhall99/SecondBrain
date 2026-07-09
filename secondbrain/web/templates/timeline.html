@@ -1,31 +1,293 @@
 {% extends "base.html" %}
-{% block title %}SecondBrain — Timeline {{ day }}{% endblock %}
+{% block title %}Timeline {{ day }} · SecondBrain{% endblock %}
 {% block style %}
-    .conv { border-left: 3px solid #8886; padding: .2rem 0 .2rem 1rem; margin: 1rem 0; }
-    .seg { margin: .15rem 0; }
-    .seg .who { font-weight: 600; }
-    .extractions { background: #8881; border-radius: 8px; padding: .5rem .8rem; margin: .5rem 0; }
-    .kind { text-transform: capitalize; color: #888; font-size: .8rem; }
+    @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+    .daynav { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin: .7rem 0 .9rem; }
+    .daynav input[type="date"] { padding: .3rem .5rem; font-size: .92rem; }
+    .skipday { color: var(--muted); }  /* secondary shortcut across empty gaps */
+    @media (hover: none) { .kbd-hint { display: none; } }
+    .baddate { border-color: var(--danger); }
+    .today-tag { font-size: 1rem; font-weight: 400; }
+    .summary { margin: .9rem 0 .3rem; }
+
+    /* Day at a glance: one bar per conversation across a 00:00–24:00 axis. */
+    .glance { margin: .35rem 0 1.4rem; }
+    .strip { position: relative; overflow: hidden; background: var(--soft);
+             border: 1px solid var(--line); border-radius: 8px;
+             height: calc(.6rem + var(--lanes, 1) * 1.3rem); }
+    .strip .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+    .strip .nowmark { position: absolute; top: 0; bottom: 0; width: 2px;
+                      background: var(--danger); opacity: .8; }
+    .strip a.blk { position: absolute; top: calc(.3rem + var(--lane, 0) * 1.3rem);
+                   height: 1rem; min-width: 6px; border-radius: 4px;
+                   background: var(--fg); opacity: .78; }
+    .strip a.blk:hover, .strip a.blk:focus-visible { opacity: 1; }
+    .scale { display: flex; justify-content: space-between; margin-top: .15rem;
+             font-size: .75rem; font-variant-numeric: tabular-nums; }
+    /* Narrow days (e.g. evening-only) get a second, magnified hour axis so
+       sliver bars become readable; the 24 h strip above stays for orientation
+       with a dashed marker outlining the zoomed window. */
+    .zwin { position: absolute; top: 0; bottom: 0; border: 1px dashed var(--muted);
+            border-radius: 6px; opacity: .55; pointer-events: none; }
+    .zoomed { margin-top: .55rem; }
+    .zoomcap { margin: 0 0 .2rem; }
+    /* Lines transcribed after this render (today only): a quiet, persistent
+       offer to refresh — never an auto-rerender under the reader's feet. */
+    .freshpill { position: fixed; bottom: 3.4rem; left: 50%; transform: translateX(-50%);
+                 z-index: 900; border-radius: 999px; padding: .5rem 1.05rem;
+                 background: var(--fg); color: var(--bg); border-color: var(--fg);
+                 font-size: .9rem; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+
+    .conv { border-left: 3px solid var(--line); padding: .15rem 0 .15rem 1rem; margin: 1.25rem 0; }
+    .conv:target { border-left-color: var(--fg); }
+    .convhead { margin: .1rem 0 .25rem; font-size: .92rem; font-weight: 600; }
+    .convhead a { text-decoration: none; display: flex; flex-wrap: wrap;
+                  align-items: baseline; gap: .15rem .55rem; }
+    .convhead .range { font-variant-numeric: tabular-nums; }
+    .convhead a:hover .range, .convhead a:focus-visible .range
+      { text-decoration: underline; text-underline-offset: 3px; }
+    .convhead .go { white-space: nowrap; }
+    .convhead a:hover .go, .convhead a:focus-visible .go { color: var(--fg); }
+
+    .extractions { background: var(--soft); border-radius: 8px; padding: .55rem .8rem;
+                   margin: .45rem 0 .55rem; font-size: .9rem; }
+    .extractions .kind { text-transform: uppercase; letter-spacing: .04em;
+                         color: var(--muted); font-size: .74rem; font-weight: 600; }
+    .extractions ul { margin: .15rem 0 .45rem; padding-left: 1.15rem; }
+    .extractions .exgroup:last-child ul { margin-bottom: .1rem; }
+
+    details.segd summary { cursor: pointer; color: var(--muted); font-size: .85rem;
+                           width: fit-content; border-radius: 4px; }
+    details.segd summary:hover { color: var(--fg); }
+    ol.segs { list-style: none; margin: .3rem 0 0; padding: 0; }
+    .segs li { margin: .35rem 0; overflow-wrap: anywhere; }
+    .segs time { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+    .segs .who { font-weight: 600; }
+    .segs .who.unattr { color: var(--muted); font-style: italic; }
+    .more { margin: .4rem 0 .1rem; }
+    .jump { margin-top: .7rem; display: flex; flex-wrap: wrap; gap: .3rem; justify-content: center; }
 {% endblock %}
 {% block content %}
-  <h1>Timeline · {{ day }}</h1>
-  {% if not blocks %}<p class="meta">Nothing recorded for this day.</p>{% endif %}
-  {% for b in blocks %}
-  <div class="conv">
-    <p class="meta">{{ (b.started_at or '')[11:19] }} · {{ b.participants | join(", ") }}</p>
-    {% if b.extractions %}
-    <div class="extractions">
-      {% for kind, items in b.extractions.items() %}
-        <div><span class="kind">{{ kind }}</span>
-          {% for it in items %}<div>• {{ it.object_text or it.predicate }}</div>{% endfor %}
-        </div>
-      {% endfor %}
-    </div>
+  <h1>Timeline · {{ pretty_day }}{% if is_today %} <span class="today-tag meta">· today</span>{% endif %}</h1>
+  <p class="meta">When conversations happened and how long they ran — open one to read it in full.
+    <a href="/day?date={{ day }}">Open the full transcript &amp; fix speakers →</a></p>
+
+  <nav class="daynav" aria-label="Day navigation">
+    <a class="pill" id="nav-prev" href="/timeline/{{ prev_day }}" rel="prev"
+       aria-label="Previous day, {{ prev_day }}">← Prev</a>
+    <label class="visually-hidden" for="day-pick">Jump to date</label>
+    <input type="date" id="day-pick" value="{{ day }}" max="{{ today }}" />
+    {% if day < today %}
+      <a class="pill" id="nav-next" href="/timeline/{{ next_day }}" rel="next"
+         aria-label="Next day, {{ next_day }}">Next →</a>
     {% endif %}
-    {% for s in b.segments %}
-      <div class="seg"><span class="who">{{ s.speaker }}</span>
-        <span class="meta">{{ (s.start_at or '')[11:19] }}</span> — {{ s.text }}</div>
+    {% if not is_today %}<a class="pill" href="/timeline">Today</a>{% endif %}
+    {# On days that have data, offer a hop straight across runs of empty days
+       (the empty state has its own jump pills, so skip these there). #}
+    {% if blocks and nav.prev_day_with_data and nav.prev_day_with_data != prev_day %}
+      <a class="pill skipday" href="/timeline/{{ nav.prev_day_with_data }}"
+         title="Skip the empty days in between"
+         aria-label="Jump back to the last recorded day, {{ nav.prev_day_with_data }}">« Last recorded · {{ nav.prev_day_with_data }}</a>
+    {% endif %}
+    {% if blocks and nav.next_day_with_data and nav.next_day_with_data != next_day %}
+      <a class="pill skipday" href="/timeline/{{ nav.next_day_with_data }}"
+         title="Skip the empty days in between"
+         aria-label="Jump forward to the next recorded day, {{ nav.next_day_with_data }}">Next recorded · {{ nav.next_day_with_data }} »</a>
+    {% endif %}
+    <span class="meta kbd-hint">or use the ← → keys</span>
+  </nav>
+
+  {% if invalid_date %}
+    <div class="card baddate" role="alert">
+      <strong>“{{ invalid_date }}” doesn't look like a date.</strong>
+      <span class="meta">Dates are YYYY-MM-DD (e.g. {{ today }}) — showing today instead.</span>
+    </div>
+  {% endif %}
+
+  {% if blocks %}
+    <p class="summary meta">{{ blocks|length }} conversation{{ 's' if blocks|length != 1 }}
+      · {{ total_talk }} recorded{% if first_time and last_time %}
+      · <span class="num">{{ first_time }}–{{ last_time }}</span>{% endif %}
+      · {{ total_lines }} line{{ 's' if total_lines != 1 }}{% if tz_label %}
+      · times in {{ tz_label }}{% endif %}</p>
+
+    <div class="glance">
+      <div class="strip" style="--lanes:{{ strip.lanes }}" role="group"
+           aria-label="Day at a glance — each bar is a conversation, placed from midnight to midnight">
+        <span class="tick" style="left:25%" aria-hidden="true"></span>
+        <span class="tick" style="left:50%" aria-hidden="true"></span>
+        <span class="tick" style="left:75%" aria-hidden="true"></span>
+        {% for sp in strip.spans %}
+          <a class="blk" style="left:{{ sp.left }}%;width:{{ sp.width }}%;--lane:{{ sp.lane }}"
+             href="#conv-{{ sp.index }}" title="{{ sp.label }}"
+             aria-label="Conversation {{ sp.index }} of {{ blocks|length }}: {{ sp.label }} — jump to it below"></a>
+        {% endfor %}
+        {% if now_pct is not none %}
+          <span class="nowmark" style="left:{{ now_pct }}%" title="Now" aria-hidden="true"></span>
+        {% endif %}
+        {% if strip.zoom %}
+          <span class="zwin" aria-hidden="true"
+                style="left:{{ strip.zoom.start_pct }}%;width:{{ strip.zoom.width_pct }}%"></span>
+        {% endif %}
+      </div>
+      <div class="scale meta" aria-hidden="true">
+        <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+      </div>
+      {% if strip.zoom %}
+        {# Everything recorded sits in a narrow slice of the day — magnify it.
+           Purely visual sugar (the strip above already carries the labelled,
+           focusable bars), so the whole block is hidden from AT and skipped
+           by the keyboard; bars stay mouse/touch-clickable. #}
+        <div class="zoomed" aria-hidden="true">
+          <p class="zoomcap meta">Zoomed in · {{ strip.zoom.start_label }}–{{ strip.zoom.end_label }}</p>
+          <div class="strip" style="--lanes:{{ strip.lanes }}">
+            {% for lb in strip.zoom.labels %}{% if not loop.first and not loop.last %}
+              <span class="tick" style="left:{{ lb.pct }}%"></span>
+            {% endif %}{% endfor %}
+            {% for sp in strip.spans %}
+              <a class="blk" tabindex="-1" href="#conv-{{ sp.index }}" title="{{ sp.label }}"
+                 style="left:{{ sp.zoom_left }}%;width:{{ sp.zoom_width }}%;--lane:{{ sp.lane }}"></a>
+            {% endfor %}
+            {% if zoom_now_pct is not none %}
+              <span class="nowmark" style="left:{{ zoom_now_pct }}%" title="Now"></span>
+            {% endif %}
+          </div>
+          <div class="scale meta">
+            {% for lb in strip.zoom.labels %}<span>{{ lb.text }}</span>{% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
+    {% set cap = 8 %}
+    {% set open_all = blocks|length <= 5 %}
+    {% for b in blocks %}
+      <article class="conv" id="conv-{{ loop.index }}" aria-labelledby="convh-{{ loop.index }}">
+        <h2 class="convhead" id="convh-{{ loop.index }}">
+          <a href="/day?date={{ day }}#seg-{{ b.segments[0].id }}"
+             title="Open this conversation in the full day transcript">
+            <span class="range">
+              {%- if b.start_time %}<time datetime="{{ b.started_at }}">{{ b.start_time }}</time>{% else %}—{% endif %}
+              {%- if b.end_time and b.end_time != b.start_time %}–<time datetime="{{ b.ended_at }}">{{ b.end_time }}</time>{% endif -%}
+            </span>
+            <span class="meta">{{ b.duration_label }} · {{ b.segment_count }} line{{ 's' if b.segment_count != 1 }}
+              · {{ b.participants | join(', ') }}</span>
+            <span class="go meta" aria-hidden="true">day view →</span>
+          </a>
+        </h2>
+        {% if b.extractions %}
+          <div class="extractions">
+            {% for kind, items in b.extractions.items() %}
+              <div class="exgroup"><span class="kind">{{ kind }}</span>
+                <ul>
+                  {% for it in items %}
+                    {% set label = it.object_text or (it.predicate or '') | replace('_', ' ') %}
+                    <li>{% if it.segment_ids %}<a href="/day?date={{ day }}#seg-{{ it.segment_ids[0] }}"
+                          title="Jump to the source line in the day view">{{ label }}</a>{% else %}{{ label }}{% endif %}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+        <details class="segd"{% if open_all %} open{% endif %}>
+          <summary>Transcript preview</summary>
+          <ol class="segs">
+            {% for s in b.segments[:cap] %}
+              <li>{% if s.time %}<time datetime="{{ s.start_at }}">{{ s.time }}</time>{% endif %}
+                <span class="who{{ ' unattr' if s.speaker == 'Unknown' }}">{{ s.speaker }}</span>
+                — {{ s.text }}</li>
+            {% endfor %}
+          </ol>
+          {% if b.segment_count > cap %}
+            <p class="more meta"><a href="/day?date={{ day }}#seg-{{ b.segments[cap].id }}">Read all {{ b.segment_count }} lines in the day view →</a></p>
+          {% endif %}
+        </details>
+      </article>
     {% endfor %}
-  </div>
-  {% endfor %}
+  {% else %}
+    <div class="empty">
+      <strong>{% if is_today %}Nothing recorded yet today{% else %}Nothing recorded on {{ pretty_day }}{% endif %}</strong>
+      {% if is_today %}
+        {% if recording %}The recorder is listening — conversations show up here shortly after
+          they're transcribed.
+        {% else %}Recording is paused, so nothing new is being captured — you can resume from
+          the <a href="/">Home page</a>.{% endif %}
+      {% else %}No conversations were captured on this day.{% endif %}
+      {% if nav.prev_day_with_data or nav.next_day_with_data %}
+        <div class="jump">
+          {% if nav.prev_day_with_data %}
+            <a class="pill" href="/timeline/{{ nav.prev_day_with_data }}">← Last recorded day · {{ nav.prev_day_with_data }}</a>
+          {% endif %}
+          {% if nav.next_day_with_data %}
+            <a class="pill" href="/timeline/{{ nav.next_day_with_data }}">Next recorded day · {{ nav.next_day_with_data }} →</a>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if is_today %}
+    {# The recorder keeps transcribing while today is open. A quiet poll fills
+       this in ("2 new lines transcribed — refresh") instead of re-rendering
+       under the reader — same pattern as the day view. #}
+    <div role="status">
+      <button type="button" id="fresh-note" class="freshpill" hidden></button>
+    </div>
+  {% endif %}
+
+  <script>
+    (function () {
+      'use strict';
+      var pick = document.getElementById('day-pick');
+      if (pick) {
+        pick.addEventListener('change', function () {
+          if (pick.value && pick.value !== pick.defaultValue) {
+            location.href = '/timeline/' + pick.value;
+          }
+        });
+      }
+      document.addEventListener('keydown', function (e) {
+        if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        var el = e.target || {};
+        var tag = (el.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea' || el.isContentEditable) return;
+        var go = e.key === 'ArrowLeft' ? document.getElementById('nav-prev')
+               : e.key === 'ArrowRight' ? document.getElementById('nav-next') : null;
+        if (go) location.href = go.href;
+      });
+
+      // --- today keeps growing: offer fresh lines without yanking the page --
+      // (Rendered only when viewing today.) Poll the day's cheap segment list
+      // and, once it outgrows what this render showed, surface a persistent
+      // "refresh" pill — so the empty state's promise that conversations show
+      // up shortly after transcription holds for a tab left open.
+      var fresh = document.getElementById('fresh-note');
+      if (fresh) {
+        var knownLines = {{ total_lines }};
+        var checkingFresh = false;
+        var checkFresh = async function () {
+          if (document.hidden || checkingFresh) return;
+          checkingFresh = true;
+          try {
+            var data = await SB.api('/api/day/{{ day }}', { quiet: true });
+            var n = data && data.segments ? data.segments.length : knownLines;
+            if (n > knownLines) {
+              var added = n - knownLines;
+              fresh.textContent = (knownLines === 0
+                ? 'First conversation transcribed — refresh'
+                : added + ' new line' + (added === 1 ? '' : 's') + ' transcribed — refresh');
+              fresh.hidden = false;
+            }
+          } catch (err) { /* transient (server restarting?) — try next tick */ }
+          checkingFresh = false;
+        };
+        setInterval(checkFresh, 60000);
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden) checkFresh(); // catch up as soon as the tab returns
+        });
+        fresh.addEventListener('click', function () { location.reload(); });
+      }
+    })();
+  </script>
 {% endblock %}

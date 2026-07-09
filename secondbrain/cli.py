@@ -186,12 +186,42 @@ def search(
     if not hits:
         typer.echo("No matches.")
         raise typer.Exit()
+    from secondbrain.search import fulltext
+
     for h in hits:
         when = h.get("start_at") or "?"
-        snippet = h.get("snippet") or h["text"]
+        # Snippets carry invisible sentinel markers around matched terms (so the
+        # web UI can highlight safely); render them as [brackets] in a terminal.
+        snippet = (h.get("snippet") or h["text"]).replace(fulltext.MARK_START, "[").replace(
+            fulltext.MARK_END, "]"
+        )
         spk = _speaker_prefix(h)
         loc = f"(#{h['audio_file_id']} @ {h['start_offset_s']:.1f}s)"
         typer.echo(f"{when}  {loc}\n  {spk}{snippet}\n")
+
+
+@app.command()
+def reindex() -> None:
+    """Embed transcript segments missing from the semantic search index.
+
+    The web server also backfills automatically at startup; this command is the
+    manual/inspectable version. No-op when semantic search is unavailable.
+    """
+    from secondbrain.search import semantic
+
+    settings = get_settings()
+    if not settings.search.semantic_enabled:
+        typer.echo("Semantic search is disabled ([search].semantic_enabled = false).")
+        raise typer.Exit()
+    with db_session(settings=settings) as conn:
+        if not semantic.is_available(conn, settings):
+            typer.echo(
+                "Semantic backend unavailable (sqlite-vec or the embedding model "
+                "didn't load) — full-text search still works."
+            )
+            raise typer.Exit(1)
+        n = semantic.backfill_missing(conn, settings)
+    typer.echo(f"Indexed {n} segment(s)." if n else "Nothing to index — all segments embedded.")
 
 
 @app.command()
@@ -498,7 +528,7 @@ def speaker_reassign(segment_id: int, speaker_id: int) -> None:
     settings = get_settings()
     with db_session(settings=settings) as conn:
         ok = service.reassign_segment(conn, segment_id, speaker_id, settings)
-    typer.echo("Reassigned." if ok else "Segment not found.")
+    typer.echo("Reassigned." if ok else "Segment or speaker not found.")
 
 
 @speaker_app.command("reattribute")
@@ -543,10 +573,16 @@ def digest(
     regenerate: bool = typer.Option(False, help="Force regeneration."),
 ) -> None:
     """Show today's morning brief (or weekly review)."""
+    from secondbrain.proactive.engine import DigestInFlight
+
     settings = get_settings()
     kind = "weekly" if weekly else "daily"
     with db_session(settings=settings) as conn:
-        d = service.generate_digest(conn, settings, kind=kind, force=regenerate)
+        try:
+            d = service.generate_digest(conn, settings, kind=kind, force=regenerate)
+        except DigestInFlight as exc:
+            typer.echo(f"Hold on — {exc}. Try again in a minute.")
+            raise typer.Exit(1) from exc
         suggestions = service.list_suggestions(conn)
     if d:
         typer.echo(d["summary_md"].strip() + "\n")

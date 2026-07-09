@@ -41,5 +41,7 @@ def test_corpus_stats_counts_and_span(conn):
     assert s["goals_active"] == 1
     assert s["tasks"] == 1
     assert s["tasks_open"] == 1
-    assert s["first_day"] == "2026-06-15"
-    assert s["last_day"] == "2026-06-17"
+    # Local calendar days (same bucketing as segments_today, search day groups,
+    # and the /day view), derived from the stored UTC timestamps.
+    assert s["first_day"] == service._local_day_of("2026-06-15T09:00:00.000Z")
+    assert s["last_day"] == service._local_day_of("2026-06-17T09:00:00.000Z")

@@ -1,80 +1,929 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Goals</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 820px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    .meta { color: #888; font-size: .85rem; }
-    .goal { border-bottom: 1px solid #8883; padding: .6rem 0; }
-    input, textarea, select { padding: .45rem; border: 1px solid #8884; border-radius: 8px;
-                              font: inherit; }
-    button { padding: .45rem .8rem; border-radius: 8px; border: 1px solid #8884;
-             cursor: pointer; background: #8882; }
-    form { display: grid; gap: .5rem; max-width: 480px; margin: 1rem 0; }
-    .done { text-decoration: line-through; color: #888; }
-  </style>
-</head>
-<body>
-  <h1>Goals</h1>
-  <p class="meta"><a href="/">transcripts</a> · <a href="/brief">brief</a> ·
-     <a href="/chat">ask</a></p>
+{% extends "base.html" %}
+{% block title %}Goals · SecondBrain{% endblock %}
+{% block style %}
+    /* filters */
+    .filters { display: flex; flex-wrap: wrap; gap: .25rem; margin: 1rem 0 .2rem; }
+    .filters .pill { text-decoration: none; }
+    .filters .pill:hover { text-decoration: underline; }
+    .filters .pill[aria-current] { background: var(--fg); color: var(--bg); }
+    .filters .count { opacity: .75; font-variant-numeric: tabular-nums; }
 
-  <form onsubmit="addGoal(event)">
-    <input type="text" id="title" placeholder="Goal title" required />
-    <textarea id="description" placeholder="Description (helps auto-linking)"></textarea>
-    <div>
-      <input type="date" id="target_date" />
-      <select id="priority">
-        <option value="1">High</option>
-        <option value="2" selected>Medium</option>
-        <option value="3">Low</option>
-      </select>
-      <button type="submit">Add goal</button>
-    </div>
-  </form>
+    /* add form */
+    details.add { margin: .9rem 0 1.2rem; }
+    details.add summary { cursor: pointer; font-weight: 600; width: max-content;
+                          padding: .3rem .2rem; border-radius: 6px; }
+    .add-form { display: grid; gap: .7rem; margin: .6rem 0 0; }
+    .field { display: grid; gap: .2rem; }
+    .field > label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+    .field > label .meta { font-weight: 400; }
+    .form-row { display: flex; gap: .9rem; flex-wrap: wrap; align-items: end; }
+
+    /* goal cards */
+    .goal-head { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .55rem; }
+    .goal-title { font-size: 1.05rem; margin: 0; }
+    .goal-head .pill { font-size: .75rem; padding: .15rem .55rem; margin: 0; }
+    .prio-1 { background: color-mix(in srgb, var(--danger) 14%, transparent);
+              color: var(--danger); font-weight: 600; }
+    .prio-3 { color: var(--muted); }
+    .st-paused { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+    .st-done { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+    .st-dropped { color: var(--muted); }
+    .due { font-size: .85rem; color: var(--muted); }
+    .due.overdue { color: var(--danger); font-weight: 600; }
+    .goal-desc { margin: .25rem 0 0; }
+    .goal-closed .goal-title { color: var(--muted); text-decoration: line-through; }
+    .goal-closed .goal-desc { opacity: .8; }
+    .goal-progress { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+                     margin-top: .45rem; font-size: .85rem; }
+    .goal-progress[hidden] { display: none; }   /* flex would beat the UA [hidden] rule */
+    .goal-progress progress { width: min(10rem, 42vw); height: .45rem; accent-color: var(--ok); }
+    .acts { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; }
+    .acts button { font-size: .85rem; padding: .35rem .7rem; }
+    button.armed { background: var(--danger); border-color: var(--danger);
+                   color: var(--bg); font-weight: 600; }
+    button.armed:focus-visible { outline-color: var(--danger); }
+
+    /* disclosures: per-goal tasks + knowledge links */
+    .disc::after { content: " ▸"; content: " ▸" / ""; font-size: .8em; }
+    .disc[aria-expanded="true"]::after { content: " ▾"; content: " ▾" / ""; }
+    .goal-tasks, .goal-links { margin: .45rem 0 .1rem; padding: .15rem 0 .15rem .85rem;
+                               border-left: 2px solid var(--line); font-size: .9rem; }
+    .task-tree { list-style: none; margin: .1rem 0; padding: 0; }
+    .t-row { display: flex; align-items: baseline; gap: .45rem; flex-wrap: wrap;
+             padding: .16rem 0; }
+    .t-child { margin-left: 1.15rem; }
+    .t-title { overflow-wrap: anywhere; }
+    .t-closed .t-title { text-decoration: line-through; color: var(--muted); }
+    .t-status { flex: none; font-size: .72rem; padding: .06rem .5rem; border-radius: 999px;
+                background: var(--soft); color: var(--muted); white-space: nowrap; }
+    .ts-done { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+    .ts-in_progress { background: color-mix(in srgb, var(--ok) 10%, transparent); color: var(--fg); }
+    .ts-blocked { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+    .tree-foot { margin: .3rem 0 .1rem; }
+    .goal-extras { margin-top: .45rem; font-size: .85rem; }
+    .links-none { margin: .45rem 0 0; font-size: .8rem; }
+    .lk-pills { display: flex; flex-wrap: wrap; gap: .15rem; }
+    .lk-pill { font-size: .8rem; max-width: 100%; overflow-wrap: anywhere; }
+    .lk-kind { font-size: .7rem; color: var(--muted); margin-right: .35rem;
+               text-transform: uppercase; letter-spacing: .03em; }
+    .lk-adv { border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent); }
+    .lk-gone { opacity: .6; }
+
+    /* inline edit */
+    .edit-form { display: grid; gap: .7rem; margin-top: .3rem; }
+    .edit-acts { display: flex; gap: .5rem; }
+
+    /* decompose / plan editor */
+    .plan-wait { display: flex; align-items: center; gap: .55rem; margin-top: .6rem; }
+    .spinner { width: .9em; height: .9em; border-radius: 50%; flex: none;
+               border: 2px solid var(--muted); border-top-color: transparent;
+               animation: sb-spin .7s linear infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation: none; border-top-color: var(--muted); }
+    }
+    .plan-error { border: 1px solid var(--danger); border-radius: 10px; padding: .6rem .8rem;
+                  margin-top: .6rem; font-size: .9rem; display: flex; gap: .6rem;
+                  align-items: center; flex-wrap: wrap; }
+    .plan-ok { border: 1px solid var(--ok); border-radius: 10px; padding: .6rem .8rem;
+               margin-top: .6rem; font-size: .92rem; display: flex; gap: .35rem .7rem;
+               align-items: center; flex-wrap: wrap; }
+    .plan { margin-top: .7rem; outline-offset: 4px; }
+    .plan h3 { margin: .1rem 0 .15rem; }
+    .plan ol { list-style: none; margin: .45rem 0 0; padding: 0; }
+    .plan .steps { padding-left: 1.7rem; margin-top: .1rem; }
+    .plan-restored { margin: 0 0 .25rem; color: var(--warn); }
+    .step-row { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap;
+                padding: .14rem 0; }
+    .step-row input[type=checkbox] { flex: none; width: 1rem; height: 1rem;
+                                     accent-color: var(--fg); }
+    .step-row input[type=text] { flex: 1; min-width: 9rem; padding: .32rem .5rem;
+                                 font-size: .95rem; }
+    .ms-row input[type=text] { font-weight: 600; }
+    .step-meta { font-size: .78rem; color: var(--muted); }
+    .step-detail { margin: 0 0 .1rem 1.55rem; font-size: .82rem; }
+    li.off { opacity: .5; }
+    li.off input[type=text] { text-decoration: line-through; }
+    .plan-acts { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+                 margin-top: .75rem; }
+{% endblock %}
+{% block content %}
+  <h1>Goals</h1>
+  <p class="meta">What you're working toward — conversations and tasks are linked to these
+    automatically, and the local model can break a goal into a task plan.</p>
+
+  <details class="add" {% if not counts.total %}open{% endif %}>
+    <summary>Add a goal</summary>
+    <form id="add-goal-form" class="card add-form" onsubmit="addGoal(event)">
+      <div class="field">
+        <label for="goal-title">Title</label>
+        <input type="text" id="goal-title" required maxlength="500"
+               placeholder="e.g. Run a half marathon in October" />
+      </div>
+      <div class="field">
+        <label for="goal-desc">Description <span class="meta">(optional — helps auto-linking and better plans)</span></label>
+        <textarea id="goal-desc" rows="2" maxlength="4000"
+                  placeholder="Why it matters, what “done” looks like…"></textarea>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label for="goal-date">Target date <span class="meta">(optional)</span></label>
+          <input type="date" id="goal-date" />
+        </div>
+        <div class="field">
+          <label for="goal-priority">Priority</label>
+          <select id="goal-priority">
+            <option value="1">High</option>
+            <option value="2" selected>Medium</option>
+            <option value="3">Low</option>
+          </select>
+        </div>
+        <button type="submit" class="btn-primary">Add goal</button>
+      </div>
+    </form>
+  </details>
+
+  {% if counts.total %}
+    <nav class="filters" aria-label="Filter goals by status">
+      <a class="pill" href="/goals"{% if not status_filter %} aria-current="true"{% endif %}>
+        All <span class="count">{{ counts.total }}</span></a>
+      {% for s in ('active', 'paused', 'done', 'dropped') %}{% if counts[s] %}
+        <a class="pill" href="/goals?status={{ s }}"{% if status_filter == s %} aria-current="true"{% endif %}>
+          {{ s | capitalize }} <span class="count">{{ counts[s] }}</span></a>
+      {% endif %}{% endfor %}
+    </nav>
+  {% endif %}
+
+  {% if not counts.total %}
+    <div class="empty"><strong>No goals yet</strong>
+      Add your first goal above — SecondBrain links it to related people, projects and
+      decisions from your conversations, and can break it into a step-by-step plan
+      that lands in your Tasks backlog.</div>
+  {% elif not goals %}
+    <div class="empty"><strong>No {{ status_filter }} goals</strong>
+      Nothing has status “{{ status_filter }}” right now — <a href="/goals">show all goals</a>.</div>
+  {% endif %}
 
   {% for g in goals %}
-    <div class="goal" id="goal-{{ g.id }}">
-      <strong class="{{ 'done' if g.status in ['done','dropped'] else '' }}">{{ g.title }}</strong>
-      <span class="meta">· P{{ g.priority }} · {{ g.status }}{% if g.target_date %} · by {{ g.target_date }}{% endif %}</span>
-      {% if g.description %}<div class="meta">{{ g.description }}</div>{% endif %}
-      <div>
-        <button onclick="setStatus({{ g.id }}, 'done')">Done</button>
-        <button onclick="setStatus({{ g.id }}, 'paused')">Pause</button>
-        <button onclick="setStatus({{ g.id }}, 'active')">Activate</button>
-        <button onclick="delGoal({{ g.id }})">Delete</button>
+    {% set closed = g.status in ('done', 'dropped') %}
+    <article class="card goal{{ ' goal-closed' if closed }}" id="goal-{{ g.id }}"
+             aria-labelledby="goal-title-{{ g.id }}"
+             data-id="{{ g.id }}" data-title="{{ g.title }}"
+             data-description="{{ g.description or '' }}"
+             data-target-date="{{ g.target_date or '' }}"
+             data-priority="{{ g.priority }}" data-status="{{ g.status }}"
+             data-tasks-total="{{ g.tasks_total }}" data-tasks-done="{{ g.tasks_done }}">
+      <div class="goal-view">
+        <div class="goal-head">
+          <h2 class="goal-title" id="goal-title-{{ g.id }}">{{ g.title }}</h2>
+          {% set pr = g.priority if g.priority in (1, 2, 3) else 2 %}
+          <span class="pill prio-{{ pr }}" title="Priority: {{ ['High','Medium','Low'][pr - 1] }}"
+                aria-label="Priority: {{ ['High','Medium','Low'][pr - 1] }}">{{ ['High','Med','Low'][pr - 1] }}</span>
+          {% if g.status != 'active' %}
+            <span class="pill st-{{ g.status }}">{{ g.status | capitalize }}</span>
+          {% endif %}
+          {% if g.target_date %}
+            <span class="due{{ ' overdue' if g.overdue }}">
+              {%- if g.overdue %}was due {{ g.target_label }}{% else %}by {{ g.target_label }}{% endif -%}
+            </span>
+          {% endif %}
+        </div>
+        {% if g.description %}<p class="goal-desc meta">{{ g.description }}</p>{% endif %}
+        <div class="goal-progress" {% if not g.tasks_total %}hidden{% endif %}>
+          <progress value="{{ g.tasks_done }}" max="{{ g.tasks_total or 1 }}" aria-hidden="true"></progress>
+          <button type="button" class="linklike disc progress-text tasks-toggle"
+                  aria-expanded="false" aria-controls="goal-tasks-{{ g.id }}"
+                  title="Show this goal's tasks right here"
+                  onclick="toggleTasks({{ g.id }}, this)">{{ g.tasks_done }}/{{ g.tasks_total }} tasks done</button>
+          <span class="meta progress-when">
+            {%- if g.progress_label %}last progress {{ g.progress_label }}{% endif -%}
+          </span>
+        </div>
+        <div class="goal-tasks" id="goal-tasks-{{ g.id }}" hidden></div>
+        {% if g.links_count %}
+          <div class="goal-extras">
+            <button type="button" class="linklike disc links-toggle"
+                    aria-expanded="false" aria-controls="goal-links-{{ g.id }}"
+                    title="Knowledge-graph entries SecondBrain matched to this goal"
+                    onclick="toggleLinks({{ g.id }}, this)">{{ g.links_count }} knowledge link{{ '' if g.links_count == 1 else 's' }}</button>
+          </div>
+        {% elif not closed %}
+          <p class="links-none meta">Nothing linked yet — links appear as related conversations are captured.</p>
+        {% endif %}
+        <div class="goal-links" id="goal-links-{{ g.id }}" hidden></div>
+        <div class="acts">
+          {% if g.status in ('active', 'paused') %}
+            <button type="button" class="btn-breakdown" onclick="breakDown({{ g.id }})"
+                    title="Ask the local model to propose milestones and steps — you review before anything is saved">
+              Break into tasks</button>
+          {% endif %}
+          <button type="button" class="btn-edit" onclick="editGoal(this)">Edit</button>
+          {% if g.status == 'paused' %}
+            <button type="button" onclick="setStatus({{ g.id }}, 'active', this, 'Goal resumed.')">Resume</button>
+          {% endif %}
+          {% if g.status in ('active', 'paused') %}
+            <button type="button" onclick="setStatus({{ g.id }}, 'done', this, 'Goal marked done.')">Mark done</button>
+          {% endif %}
+          {% if g.status == 'active' %}
+            <button type="button" onclick="setStatus({{ g.id }}, 'paused', this, 'Goal paused.')"
+                    title="Park it for now — everything is kept">Pause</button>
+          {% endif %}
+          {% if g.status in ('active', 'paused') %}
+            <button type="button" onclick="setStatus({{ g.id }}, 'dropped', this, 'Goal dropped — history kept.')"
+                    title="Stop pursuing this goal but keep it for history">Drop</button>
+          {% endif %}
+          {% if closed %}
+            <button type="button" onclick="setStatus({{ g.id }}, 'active', this, 'Goal reopened.')">Reopen</button>
+          {% endif %}
+          <button type="button" class="btn-danger" onclick="delGoal(this)"
+                  title="Remove for good — its tasks stay in the backlog, unlinked">Delete</button>
+        </div>
       </div>
-    </div>
+      <div class="plan-slot"></div>
+    </article>
   {% endfor %}
 
   <script>
+    'use strict';
+
+    /* ---------- tiny DOM helper (textContent/attrs only — never innerHTML) -- */
+    function el(tag, attrs) {
+      const n = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs || {})) {
+        if (v === null || v === undefined) continue;
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else n.setAttribute(k, v);
+      }
+      for (let i = 2; i < arguments.length; i++) if (arguments[i]) n.append(arguments[i]);
+      return n;
+    }
+
+    function debounce(fn, ms) {
+      let t;
+      return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+    }
+
+    const $goal = id => document.getElementById(`goal-${id}`);
+
+    /* ---------- unsaved-work safety net -------------------------------------
+     * A decompose can take minutes of local-LLM work, so its output must never
+     * be silently lost:
+     *  - every rendered-but-unaccepted plan (with the user's edits and ticks)
+     *    is mirrored into sessionStorage and restored after a reload;
+     *  - page mutations re-render in place (refreshGoals) instead of reloading;
+     *  - leaving the tab with a draft pending asks for confirmation.
+     */
+    const inflight = new Set();            // goal ids (strings) being decomposed
+    const planCache = {};                  // goal id → last proposed plan
+    const DRAFTS_KEY = 'sb-goal-plan-drafts';
+
+    function loadDrafts() {
+      try { return JSON.parse(sessionStorage.getItem(DRAFTS_KEY)) || {}; }
+      catch (e) { return {}; }
+    }
+    function storeDrafts(d) {
+      try { sessionStorage.setItem(DRAFTS_KEY, JSON.stringify(d)); }
+      catch (e) { /* storage unavailable (private mode) — drafts just won't survive reloads */ }
+    }
+    function saveDraft(id, plan) {
+      const d = loadDrafts();
+      d[id] = { plan: plan, savedAt: Date.now() };
+      storeDrafts(d);
+    }
+    function clearDraft(id) {
+      const d = loadDrafts();
+      if (d[id]) { delete d[id]; storeDrafts(d); }
+    }
+
+    window.addEventListener('beforeunload', e => {
+      if (inflight.size || document.querySelector('.plan')) {
+        e.preventDefault();
+        e.returnValue = '';   // legacy engines need a truthy returnValue
+      }
+    });
+
+    /* ---------- in-place page refresh ----------------------------------------
+     * Re-render the goal list from the server WITHOUT a real reload, so an
+     * in-flight decompose keeps running and unaccepted drafts, open edit forms
+     * and expanded disclosures are carried across. Falls back to a full reload
+     * if anything goes wrong (drafts still survive via sessionStorage).
+     */
+    async function refreshGoals(msg, kind, opts) {
+      opts = opts || {};
+      const main = document.getElementById('main');
+      try {
+        const r = await fetch(location.href, { headers: { Accept: 'text/html' } });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        const fresh = doc.getElementById('main');
+        if (!fresh) throw new Error('unexpected response');
+        document.querySelectorAll('.plan').forEach(p => {   // capture latest edits
+          const gid = p.closest('.goal').dataset.id;
+          saveDraft(gid, editorState(gid));
+        });
+        const edits = snapshotEdits(opts.skipEditId);
+        const add = opts.skipAddForm ? null : snapshotAdd();
+        const openTasks = openDisclosureIds('.goal-tasks');
+        const openLinks = openDisclosureIds('.goal-links');
+        main.replaceChildren(...fresh.childNodes);   // parsed <script> stays inert
+        restoreAdd(add);
+        restoreEdits(edits);
+        hydrateSlots({ silent: true });
+        openTasks.forEach(id => { const a = $goal(id); if (a) openTasksBox(a, null); });
+        openLinks.forEach(id => { const a = $goal(id); if (a) openLinksBox(a, null); });
+        if (opts.focusGoal != null) focusCard(opts.focusGoal);
+        if (msg) SB.toast(msg, kind || 'success');
+      } catch (err) {
+        SB.reload(msg, kind);   // degraded path: plain reload
+      }
+    }
+
+    function openDisclosureIds(sel) {
+      return Array.from(document.querySelectorAll(sel + ':not([hidden])'))
+        .map(b => b.closest('.goal').dataset.id);
+    }
+
+    function focusCard(id) {
+      const art = $goal(id);
+      if (!art) { document.getElementById('main').focus(); return; }
+      art.tabIndex = -1;
+      art.focus();
+    }
+
+    /* ---------- add ---------------------------------------------------------- */
+    document.addEventListener('toggle', e => {
+      if (e.target.matches && e.target.matches('details.add') && e.target.open) {
+        const t = document.getElementById('goal-title');
+        if (t) t.focus();
+      }
+    }, true);   // capture: 'toggle' doesn't bubble
+
+    function snapshotAdd() {
+      const dt = document.querySelector('details.add');
+      const v = id => { const n = document.getElementById(id); return n ? n.value : ''; };
+      const s = { open: dt.open, title: v('goal-title'), desc: v('goal-desc'),
+                  date: v('goal-date'), prio: v('goal-priority'),
+                  focused: (dt.contains(document.activeElement) && document.activeElement.id) || null };
+      return (s.title || s.desc || s.date || s.prio !== '2') ? s : null;
+    }
+    function restoreAdd(s) {
+      if (!s) return;
+      document.querySelector('details.add').open = s.open;
+      document.getElementById('goal-title').value = s.title;
+      document.getElementById('goal-desc').value = s.desc;
+      document.getElementById('goal-date').value = s.date;
+      document.getElementById('goal-priority').value = s.prio;
+      if (s.focused) setTimeout(() => {   // after the details 'toggle' focus task
+        const n = document.getElementById(s.focused);
+        if (n) n.focus();
+      }, 0);
+    }
+
     async function addGoal(e) {
       e.preventDefault();
-      await fetch('/api/goals', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          title: title.value, description: description.value || null,
-          target_date: target_date.value || null, priority: parseInt(priority.value)
-        })
+      const v = id => document.getElementById(id).value;
+      try {
+        const res = await SB.api('/api/goals', { method: 'POST', button: e.submitter, body: {
+          title: v('goal-title'),
+          description: v('goal-desc') || null,
+          target_date: v('goal-date') || null,
+          priority: parseInt(v('goal-priority'), 10),
+        }});
+        refreshGoals('Goal added.', 'success', { focusGoal: res.id, skipAddForm: true });
+      } catch (err) { /* SB.api already toasted; the typed values stay put */ }
+    }
+
+    /* ---------- status + delete --------------------------------------------- */
+    async function setStatus(id, status, btn, msg) {
+      try {
+        await SB.api(`/api/goals/${id}/status`, { method: 'POST', body: { status }, button: btn });
+        refreshGoals(msg || `Goal marked ${status}.`, 'success', { focusGoal: id });
+      } catch (err) { /* SB.api already toasted */ }
+    }
+
+    // Two-step confirm: first press arms the button, second press acts.
+    function armed(btn, label, fn) {
+      if (btn.dataset.armed) { disarm(btn); fn(); return; }
+      btn.dataset.armed = '1';
+      btn.dataset.restore = btn.textContent;
+      btn.textContent = label;
+      btn.classList.add('armed');
+      SB.toast('Press again within 8 seconds to confirm.', 'info');
+      btn._disarmT = setTimeout(() => disarm(btn), 8000);
+    }
+    function disarm(btn) {
+      if (!btn.dataset.armed) return;
+      clearTimeout(btn._disarmT);
+      delete btn.dataset.armed;
+      btn.textContent = btn.dataset.restore;
+      btn.classList.remove('armed');
+    }
+
+    function delGoal(btn) {
+      const art = btn.closest('.goal');
+      armed(btn, 'Really delete?', async () => {
+        try {
+          await SB.api(`/api/goals/${art.dataset.id}`, { method: 'DELETE', button: btn });
+          clearDraft(art.dataset.id);
+          refreshGoals(`Deleted “${art.dataset.title}” — its tasks stay in the backlog.`, 'success');
+        } catch (err) { /* SB.api already toasted; the goal stays on screen */ }
       });
-      location.reload();
     }
-    async function setStatus(id, status) {
-      await fetch(`/api/goals/${id}/status`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({status})
+
+    /* ---------- inline edit --------------------------------------------------- */
+    function field(id, label, control) {
+      return el('div', { class: 'field' }, el('label', { for: id, text: label }), control);
+    }
+
+    function buildEditForm(art, opener) {
+      const d = art.dataset, view = art.querySelector('.goal-view');
+
+      const desc = el('textarea', { id: `eg-desc-${d.id}`, class: 'e-desc', rows: '2', maxlength: '4000' });
+      desc.value = d.description;
+      const prio = el('select', { id: `eg-prio-${d.id}`, class: 'e-prio' });
+      [['1', 'High'], ['2', 'Medium'], ['3', 'Low']].forEach(([val, label]) => {
+        prio.append(el('option', { value: val, text: label, selected: val === d.priority ? '' : null }));
       });
-      location.reload();
+
+      const cancel = () => {
+        form.remove();
+        view.hidden = false;
+        (opener || art.querySelector('.btn-edit') || art).focus();
+      };
+      const form = el('form', { class: 'edit-form', 'data-goal-id': d.id,
+                                'aria-label': `Edit goal “${d.title}”` },
+        field(`eg-title-${d.id}`, 'Title',
+          el('input', { type: 'text', id: `eg-title-${d.id}`, class: 'e-title', required: '',
+                        maxlength: '500', value: d.title })),
+        field(`eg-desc-${d.id}`, 'Description', desc),
+        el('div', { class: 'form-row' },
+          field(`eg-date-${d.id}`, 'Target date',
+            el('input', { type: 'date', id: `eg-date-${d.id}`, class: 'e-date', value: d.targetDate })),
+          field(`eg-prio-${d.id}`, 'Priority', prio),
+          el('div', { class: 'edit-acts' },
+            el('button', { type: 'submit', class: 'btn-primary', text: 'Save' }),
+            el('button', { type: 'button', text: 'Cancel', title: 'Or press Escape',
+                           onclick: cancel }))));
+      form.addEventListener('keydown', ev => {   // Escape anywhere in the form cancels
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); cancel(); }
+      });
+      form.addEventListener('submit', ev => saveEdit(ev, d.id));
+      view.hidden = true;
+      view.after(form);
+      return form;
     }
-    async function delGoal(id) {
-      await fetch(`/api/goals/${id}`, {method: 'DELETE'});
-      document.getElementById('goal-' + id).remove();
+
+    function editGoal(btn) {
+      const art = btn.closest('.goal');
+      const existing = art.querySelector('.edit-form');
+      if (existing) { existing.querySelector('input').focus(); return; }
+      buildEditForm(art, btn).querySelector('input').focus();
     }
+
+    function snapshotEdits(skipId) {
+      const out = [];
+      document.querySelectorAll('.edit-form').forEach(f => {
+        const id = f.dataset.goalId;
+        if (skipId != null && String(skipId) === id) return;
+        const focused = f.contains(document.activeElement)
+          ? (document.activeElement.className.match(/e-(title|desc|date|prio)/) || [null])[0]
+          : null;
+        out.push({ id, focused,
+                   title: f.querySelector('.e-title').value,
+                   desc: f.querySelector('.e-desc').value,
+                   date: f.querySelector('.e-date').value,
+                   prio: f.querySelector('.e-prio').value });
+      });
+      return out;
+    }
+    function restoreEdits(edits) {
+      edits.forEach(s => {
+        const art = $goal(s.id);
+        if (!art) return;
+        const form = buildEditForm(art, art.querySelector('.btn-edit'));
+        form.querySelector('.e-title').value = s.title;
+        form.querySelector('.e-desc').value = s.desc;
+        form.querySelector('.e-date').value = s.date;
+        form.querySelector('.e-prio').value = s.prio;
+        if (s.focused) { const n = form.querySelector('.' + s.focused); if (n) n.focus(); }
+      });
+    }
+
+    async function saveEdit(e, id) {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await SB.api(`/api/goals/${id}`, { method: 'PATCH', button: e.submitter, body: {
+          title: f.querySelector('.e-title').value,
+          description: f.querySelector('.e-desc').value,   // '' clears it
+          target_date: f.querySelector('.e-date').value,    // '' clears it
+          priority: parseInt(f.querySelector('.e-prio').value, 10),
+        }});
+        refreshGoals('Goal updated.', 'success', { focusGoal: id, skipEditId: id });
+      } catch (err) { /* SB.api already toasted; edits stay in the form */ }
+    }
+
+    /* ---------- per-goal task drill-down -------------------------------------- */
+    const T_STATUS = { backlog: 'backlog', next: 'next', scheduled: 'scheduled',
+                       in_progress: 'in progress', blocked: 'blocked',
+                       done: 'done', dropped: 'dropped' };
+
+    function toggleTasks(id, btn) {
+      const art = $goal(id);
+      const box = art.querySelector('.goal-tasks');
+      if (!box.hidden) {
+        box.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      openTasksBox(art, btn);
+    }
+
+    async function openTasksBox(art, btn) {
+      btn = btn || art.querySelector('.tasks-toggle');
+      const box = art.querySelector('.goal-tasks');
+      box.hidden = false;
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      box.replaceChildren(el('p', { class: 'meta', role: 'status', text: 'Loading tasks…' }));
+      let tasks;
+      try {
+        tasks = (await SB.api(`/api/tasks?goal_id=${art.dataset.id}`, { quiet: true })).tasks || [];
+      } catch (err) {
+        box.replaceChildren(el('p', { class: 'meta' }, 'Couldn’t load this goal’s tasks. ',
+          el('button', { type: 'button', class: 'linklike', text: 'Retry',
+                         onclick: () => openTasksBox(art, btn) })));
+        return;
+      }
+      renderTaskTree(box, tasks);
+    }
+
+    function taskRow(t, child) {
+      return el('li', { class: 't-row' + (child ? ' t-child' : '')
+                               + (t.status === 'done' ? ' t-closed' : '') },
+        el('span', { class: `t-status ts-${t.status}`, text: T_STATUS[t.status] || t.status }),
+        el('span', { class: 't-title', text: t.title }),
+        t.estimate_minutes ? el('span', { class: 'meta', text: `~${t.estimate_minutes}m` }) : null);
+    }
+
+    function renderTaskTree(box, tasks) {
+      const live = tasks.filter(t => t.status !== 'dropped');
+      const dropped = tasks.length - live.length;
+      if (!live.length) {
+        box.replaceChildren(el('p', { class: 'meta', text: dropped
+          ? 'All of this goal’s tasks were dropped.'
+          : 'No tasks yet — “Break into tasks” below drafts a plan for this goal.' }));
+        return;
+      }
+      const ids = new Set(live.map(t => t.id));
+      const kids = new Map();
+      const roots = [];
+      live.forEach(t => {   // milestones first, their steps nested under them
+        if (t.parent_task_id && ids.has(t.parent_task_id)) {
+          if (!kids.has(t.parent_task_id)) kids.set(t.parent_task_id, []);
+          kids.get(t.parent_task_id).push(t);
+        } else roots.push(t);
+      });
+      const list = el('ul', { class: 'task-tree' });
+      roots.forEach(t => {
+        list.append(taskRow(t, false));
+        (kids.get(t.id) || []).forEach(c => list.append(taskRow(c, true)));
+      });
+      box.replaceChildren(list, el('p', { class: 'meta tree-foot' },
+        el('a', { href: '/tasks', text: 'Open the Tasks page →' }),
+        dropped ? ` (${dropped} dropped task${dropped === 1 ? '' : 's'} not shown)` : null));
+    }
+
+    /* ---------- auto-linking evidence ----------------------------------------- */
+    function toggleLinks(id, btn) {
+      const art = $goal(id);
+      const box = art.querySelector('.goal-links');
+      if (!box.hidden) {
+        box.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      openLinksBox(art, btn);
+    }
+
+    async function openLinksBox(art, btn) {
+      btn = btn || art.querySelector('.links-toggle');
+      const box = art.querySelector('.goal-links');
+      if (!box) return;
+      box.hidden = false;
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      box.replaceChildren(el('p', { class: 'meta', role: 'status', text: 'Loading links…' }));
+      let links;
+      try {
+        links = (await SB.api(`/api/goals/${art.dataset.id}`, { quiet: true })).links || [];
+      } catch (err) {
+        box.replaceChildren(el('p', { class: 'meta' }, 'Couldn’t load the links. ',
+          el('button', { type: 'button', class: 'linklike', text: 'Retry',
+                         onclick: () => openLinksBox(art, btn) })));
+        return;
+      }
+      if (!links.length) {
+        box.replaceChildren(el('p', { class: 'meta',
+          text: 'Nothing linked yet — links appear as related conversations are captured.' }));
+        return;
+      }
+      const wrap = el('div', { class: 'lk-pills' });
+      const MAX = 12;
+      links.slice(0, MAX).forEach(l => wrap.append(linkPill(l)));
+      if (links.length > MAX) {
+        wrap.append(el('button', { type: 'button', class: 'linklike',
+                                   text: `Show all ${links.length}`, onclick: ev => {
+          ev.target.remove();
+          links.slice(MAX).forEach(l => wrap.append(linkPill(l)));
+        }}));
+      }
+      box.replaceChildren(wrap);
+    }
+
+    function linkPill(l) {
+      const isNode = l.kind === 'node';
+      const resolved = isNode ? l.ref_type != null : l.src_node_id != null;
+      const type = (l.ref_type || (isNode ? 'entity' : 'note')).replace(/_/g, ' ');
+      let label = (l.label || '').trim() || (resolved ? `${type} #${l.ref_id}` : 'no longer in the graph');
+      if (label.length > 70) label = label.slice(0, 67) + '…';
+      let href = null;
+      if (resolved) {
+        href = isNode
+          ? (l.ref_type === 'project' ? `/project/${l.ref_id}` : `/graph#node=${l.ref_id}`)
+          : `/graph#node=${l.src_node_id}`;   // an edge is shown on its source entity
+      }
+      const title = type
+        + (l.relation === 'advances' ? ' — advances this goal' : ' — related')
+        + (typeof l.score === 'number' ? ` · match ${Math.round(l.score * 100)}%` : '');
+      const attrs = { title, class: 'pill lk-pill' + (l.relation === 'advances' ? ' lk-adv' : '')
+                                                   + (resolved ? '' : ' lk-gone') };
+      if (href) attrs.href = href;
+      return el(href ? 'a' : 'span', attrs,
+        el('span', { class: 'lk-kind', text: type }), label);
+    }
+
+    /* ---------- AI decomposition ---------------------------------------------- */
+    function planSlot(id) {
+      const a = $goal(id);
+      return a ? a.querySelector('.plan-slot') : null;
+    }
+
+    function setBreakBusy(id, on) {
+      const a = $goal(id);
+      const b = a && a.querySelector('.btn-breakdown');
+      if (b) SB.busy(b, on);
+    }
+
+    function renderWait(id) {
+      const slot = planSlot(id);
+      if (!slot) return;
+      slot.replaceChildren(
+        el('p', { class: 'plan-wait meta', role: 'status' },
+          el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+          el('span', { text: 'Thinking — the local model is drafting a step-by-step plan. ' +
+                             'This can take a couple of minutes. Keep this tab open — ' +
+                             'leaving the page cancels the draft.' })));
+    }
+
+    async function breakDown(id) {
+      const key = String(id);
+      if (inflight.has(key)) {
+        SB.toast('Already drafting a plan for this goal — hang tight.', 'info');
+        return;
+      }
+      inflight.add(key);
+      setBreakBusy(id, true);
+      renderWait(id);
+      let plan = null, failure = null;
+      try {
+        plan = await SB.api(`/api/goals/${id}/decompose`, { method: 'POST', quiet: true });
+      } catch (err) {
+        failure = err.message || 'Something went wrong while drafting the plan.';
+      }
+      inflight.delete(key);
+      setBreakBusy(id, false);
+      const slot = planSlot(id);
+      if (failure !== null) {
+        if (slot) planError(slot, id, failure);
+        else SB.toast(failure, 'error');
+        return;
+      }
+      if (!plan || !(plan.milestones || []).length) {
+        const msg = 'The model came back with an empty plan. A more specific title or ' +
+                    'description usually helps — or just try again.';
+        if (slot) planError(slot, id, msg);
+        else SB.toast(msg, 'error');
+        return;
+      }
+      planCache[id] = plan;
+      if (!slot) {   // the card left the current view mid-request — keep the work
+        saveDraft(key, plan);
+        SB.toast('Plan drafted — the draft is waiting on the goal’s card.', 'success');
+        return;
+      }
+      renderPlan($goal(id), slot, id, plan);
+      saveDraft(key, editorState(key));
+    }
+
+    function planError(slot, id, msg) {
+      slot.replaceChildren(
+        el('div', { class: 'plan-error', role: 'alert' },
+          el('span', { text: msg }),
+          el('button', { type: 'button', text: 'Retry', onclick: () => breakDown(id) }),
+          el('button', { type: 'button', class: 'linklike', text: 'Dismiss',
+                         onclick: () => slot.replaceChildren() })));
+    }
+
+    function stepMeta(t) {
+      const bits = [];
+      if (t.estimate_minutes) bits.push(`~${t.estimate_minutes}m`);
+      if (t.effort) bits.push(`effort ${t.effort}/5`);
+      if (t.value) bits.push(`value ${t.value}/5`);
+      return bits.join(' · ');
+    }
+
+    // Serialize the plan editor back into a plan object (titles, tick state and
+    // the original metadata) — the shape saved to sessionStorage and re-rendered
+    // by hydrateSlots after a reload or in-place refresh.
+    function editorState(id) {
+      const art = $goal(id);
+      const src = planCache[id] || { milestones: [] };
+      if (!art || !art.querySelector('.plan')) return src;
+      const out = { milestones: [] };
+      art.querySelectorAll('.milestones > li').forEach((li, i) => {
+        const orig = src.milestones[i] || {};
+        const ms = Object.assign({}, orig);
+        ms.title = li.querySelector('.ms-title').value;
+        ms.keep = li.querySelector('.ms-keep').checked;
+        ms.tasks = [];
+        li.querySelectorAll('.steps > li').forEach((tli, j) => {
+          const t = Object.assign({}, (orig.tasks || [])[j] || {});
+          t.title = tli.querySelector('.t-title').value;
+          t.keep = tli.querySelector('.t-keep').checked;
+          ms.tasks.push(t);
+        });
+        out.milestones.push(ms);
+      });
+      return out;
+    }
+
+    // Re-render transient plan UI after a load or in-place refresh: spinners for
+    // decomposes still running, then any unaccepted drafts from sessionStorage.
+    function hydrateSlots(opts) {
+      opts = opts || {};
+      inflight.forEach(id => { renderWait(id); setBreakBusy(id, true); });
+      const drafts = loadDrafts();
+      let restored = 0;
+      Object.keys(drafts).forEach(id => {
+        if (inflight.has(id)) return;
+        const art = $goal(id);
+        if (!art) return;                      // goal hidden by the current filter — draft kept
+        const slot = art.querySelector('.plan-slot');
+        if (!slot || slot.querySelector('.plan')) return;
+        planCache[id] = drafts[id].plan;
+        renderPlan(art, slot, id, drafts[id].plan,
+                   { focus: false, restoredAt: opts.silent ? null : drafts[id].savedAt });
+        restored += 1;
+      });
+      if (restored && !opts.silent) {
+        SB.toast(restored === 1
+          ? 'Restored your unaccepted plan draft — nothing is saved until you accept.'
+          : `Restored ${restored} unaccepted plan drafts — nothing is saved until you accept.`,
+          'info');
+      }
+    }
+
+    function renderPlan(art, slot, id, plan, opts) {
+      opts = opts || {};
+      const existing = parseInt(art.dataset.tasksTotal, 10) || 0;
+      const list = el('ol', { class: 'milestones' });
+
+      plan.milestones.forEach((ms, i) => {
+        const li = el('li', { class: 'ms' });
+        const keep = el('input', { type: 'checkbox', checked: ms.keep === false ? null : '',
+                                   class: 'ms-keep', 'aria-label': `Include milestone ${i + 1}` });
+        li.append(el('div', { class: 'step-row ms-row' }, keep,
+          el('input', { type: 'text', class: 'ms-title', value: ms.title,
+                        'aria-label': `Milestone ${i + 1} title` })));
+        if (ms.detail) li.append(el('p', { class: 'step-detail meta', text: ms.detail }));
+        const steps = el('ol', { class: 'steps' });
+        (ms.tasks || []).forEach((t, j) => {
+          const tli = el('li', {});
+          tli.append(el('div', { class: 'step-row' },
+            el('input', { type: 'checkbox', checked: t.keep === false ? null : '', class: 't-keep',
+                          'aria-label': `Include milestone ${i + 1} step ${j + 1}` }),
+            el('input', { type: 'text', class: 't-title', value: t.title,
+                          'aria-label': `Milestone ${i + 1} step ${j + 1} title` }),
+            el('span', { class: 'step-meta', text: stepMeta(t) })));
+          if (t.detail) tli.append(el('p', { class: 'step-detail meta', text: t.detail }));
+          steps.append(tli);
+        });
+        li.append(steps);
+        list.append(li);
+      });
+
+      const count = el('span', { class: 'meta', role: 'status' });
+      const accept = el('button', { type: 'button', class: 'btn-primary', text: 'Accept plan',
+                                    onclick: ev => acceptPlan(art, slot, id, ev.target) });
+      const discard = el('button', { type: 'button', text: 'Discard',
+                                     onclick: ev => armed(ev.target, 'Really discard?', () => {
+                                       clearDraft(String(id));
+                                       slot.replaceChildren();
+                                       SB.toast('Plan discarded — nothing was saved.', 'info');
+                                     }) });
+
+      const restoredNote = opts.restoredAt
+        ? el('p', { class: 'meta plan-restored', text:
+            `Restored your unaccepted draft from ${new Date(opts.restoredAt)
+              .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} — it survives reloads in this tab.` })
+        : null;
+
+      const box = el('section', { class: 'plan card', tabindex: '-1',
+                                  'aria-label': `Proposed plan for “${art.dataset.title}”` },
+        el('h3', { text: 'Proposed plan' }),
+        restoredNote,
+        el('p', { class: 'meta',
+                  text: 'Review it: edit titles, untick anything you don\'t want, then accept. '
+                      + 'Nothing is saved until you accept.'
+                      + (existing ? ` This goal already has ${existing} task${existing === 1 ? '' : 's'} — accepted steps are added alongside them.` : '') }),
+        list,
+        el('div', { class: 'plan-acts' }, accept, discard, count));
+
+      function recount() {
+        let n = 0;
+        list.querySelectorAll('li.ms').forEach(li => {
+          const on = li.querySelector('.ms-keep').checked;
+          li.classList.toggle('off', !on);
+          li.querySelectorAll('.steps input').forEach(inp => { inp.disabled = !on; });
+          li.querySelector('.ms-title').disabled = !on;
+          if (!on) return;
+          n += 1;   // the milestone itself becomes a container task
+          li.querySelectorAll('.steps > li').forEach(tli => {
+            const kept = tli.querySelector('.t-keep').checked;
+            tli.classList.toggle('off', !kept || !on);
+            if (kept) n += 1;
+          });
+        });
+        count.textContent = n ? `Creates ${n} task${n === 1 ? '' : 's'} in your backlog.`
+                              : 'Nothing selected — untick less, or discard.';
+        accept.disabled = !n;
+      }
+      const persist = () => saveDraft(String(id), editorState(String(id)));
+      list.addEventListener('change', () => { recount(); persist(); });
+      list.addEventListener('input', debounce(persist, 400));
+      recount();
+
+      slot.replaceChildren(box);
+      if (opts.focus !== false) box.focus();
+    }
+
+    async function acceptPlan(art, slot, id, btn) {
+      const src = planCache[id] || { milestones: [] };
+      const milestones = [];
+      slot.querySelectorAll('.milestones > li').forEach((li, i) => {
+        if (!li.querySelector('.ms-keep').checked) return;
+        const orig = src.milestones[i] || {};
+        const ms = Object.assign({}, orig);
+        delete ms.keep;   // editor-only flag — not part of the plan contract
+        ms.title = li.querySelector('.ms-title').value.trim() || orig.title || `Milestone ${i + 1}`;
+        ms.tasks = [];
+        li.querySelectorAll('.steps > li').forEach((tli, j) => {
+          if (!tli.querySelector('.t-keep').checked) return;
+          const t = Object.assign({}, (orig.tasks || [])[j] || {});
+          delete t.keep;
+          t.title = tli.querySelector('.t-title').value.trim() || t.title || `Step ${j + 1}`;
+          ms.tasks.push(t);
+        });
+        milestones.push(ms);
+      });
+      if (!milestones.length) return;
+      try {
+        const res = await SB.api(`/api/goals/${id}/plan/accept`,
+                                 { method: 'POST', body: { milestones }, button: btn });
+        const created = (res.task_ids || []).length;
+        clearDraft(String(id));
+        updateProgress(art, created);
+        slot.replaceChildren(
+          el('div', { class: 'plan-ok', role: 'status' },
+            el('strong', { text: `Created ${created} task${created === 1 ? '' : 's'}.` }),
+            el('a', { href: '/tasks', text: 'Open the Tasks page →' })));
+        openTasksBox(art, null);   // show the freshly created tasks right here
+        SB.toast('Plan accepted.', 'success');
+      } catch (err) { /* SB.api already toasted; the editor stays for retrying */ }
+    }
+
+    function updateProgress(art, added) {
+      const total = (parseInt(art.dataset.tasksTotal, 10) || 0) + added;
+      const done = parseInt(art.dataset.tasksDone, 10) || 0;
+      art.dataset.tasksTotal = String(total);
+      const box = art.querySelector('.goal-progress');
+      if (!box || !total) return;
+      box.hidden = false;
+      const bar = box.querySelector('progress');
+      bar.max = total; bar.value = done;
+      box.querySelector('.progress-text').textContent = `${done}/${total} tasks done`;
+    }
+
+    hydrateSlots({ silent: false });   // bring back drafts after a (re)load
   </script>
-</body>
-</html>
+{% endblock %}

@@ -65,7 +65,11 @@ def get_or_create_owner(conn: sqlite3.Connection, name: str = "Me") -> int:
 
 
 def create_unknown_speaker(conn: sqlite3.Connection) -> int:
-    n = conn.execute("SELECT COUNT(*) AS n FROM speakers WHERE kind='unknown'").fetchone()["n"]
+    # Count ignored voices too: they keep their "Unknown #N" display label, so
+    # reusing N after a dismissal would mint two voices with the same name.
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM speakers WHERE kind IN ('unknown','ignored')"
+    ).fetchone()["n"]
     label = f"Unknown #{n + 1}"
     cur = conn.execute(
         "INSERT INTO speakers (kind, display_label) VALUES ('unknown', ?)", (label,)
@@ -426,6 +430,49 @@ def name_speaker(
     return redacted
 
 
+def unmerge_speakers(
+    conn: sqlite3.Connection,
+    src: int,
+    dst: int,
+    segment_ids: list[int],
+    observation_ids: list[int],
+) -> int:
+    """Reverse a prior ``merge_speakers(src → dst)`` from a recorded snapshot.
+
+    Gives ``src`` back the listed segments/observations that are *still* attached
+    to ``dst`` (anything the user re-assigned elsewhere since the merge is left
+    alone), clears the soft merge pointer, and recomputes both profiles. Returns
+    the number of transcript segments restored.
+    """
+    restored = 0
+    with transaction(conn):
+        for i in range(0, len(segment_ids), 500):  # stay under SQLite's param cap
+            chunk = segment_ids[i : i + 500]
+            ph = ",".join("?" * len(chunk))
+            cur = conn.execute(
+                f"UPDATE transcript_segments SET speaker_id=? "
+                f"WHERE id IN ({ph}) AND speaker_id=?",
+                (src, *chunk, dst),
+            )
+            restored += cur.rowcount or 0
+        for i in range(0, len(observation_ids), 500):
+            chunk = observation_ids[i : i + 500]
+            ph = ",".join("?" * len(chunk))
+            conn.execute(
+                f"UPDATE speaker_observations SET speaker_id=? "
+                f"WHERE id IN ({ph}) AND speaker_id=?",
+                (src, *chunk, dst),
+            )
+        conn.execute(
+            "UPDATE speakers SET merged_into=NULL WHERE id=? AND merged_into=?", (src, dst)
+        )
+        recompute_centroid(conn, src)
+        recompute_centroid(conn, dst)
+        _recount_segments(conn, src)
+        _recount_segments(conn, dst)
+    return restored
+
+
 def merge_speakers(
     conn: sqlite3.Connection, src_id: int, dst_id: int, settings: Settings | None = None
 ) -> int:
@@ -445,6 +492,21 @@ def merge_speakers(
         ).fetchone()["n"]
         conn.execute("UPDATE transcript_segments SET speaker_id=? WHERE speaker_id=?", (dst, src))
         conn.execute("UPDATE speaker_observations SET speaker_id=? WHERE speaker_id=?", (dst, src))
+        # A named voice merged into an unnamed one keeps its name: "same person
+        # as Unknown #2" must never silently un-identify Alice just because the
+        # surviving row happened to be the anonymous one. (The web undo restores
+        # dst's prior identity — see service.merge_speakers_undoable/undo_merge.)
+        src_row = conn.execute("SELECT name FROM speakers WHERE id=?", (src,)).fetchone()
+        dst_row = conn.execute("SELECT name FROM speakers WHERE id=?", (dst,)).fetchone()
+        if (
+            src_row is not None and dst_row is not None
+            and (src_row["name"] or "").strip() and not (dst_row["name"] or "").strip()
+        ):
+            conn.execute(
+                "UPDATE speakers SET name=?, display_label=?, "
+                "kind=CASE WHEN is_owner=1 THEN 'owner' ELSE 'known' END WHERE id=?",
+                (src_row["name"], src_row["name"], dst),
+            )
         conn.execute("UPDATE speakers SET merged_into=? WHERE id=?", (dst, src))
         recompute_centroid(conn, dst)
         _recount_segments(conn, dst)

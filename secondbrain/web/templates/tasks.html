@@ -1,81 +1,600 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Tasks</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    .meta { color: #888; font-size: .85rem; }
-    .task { border-bottom: 1px solid #8883; padding: .5rem 0; }
-    .done { text-decoration: line-through; color: #888; }
-    button { padding: .35rem .7rem; border-radius: 8px; border: 1px solid #8884;
-             cursor: pointer; background: #8882; font-size: .85rem; }
-    input { padding: .5rem; border: 1px solid #8884; border-radius: 8px; font: inherit; }
-    form { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
-  </style>
-</head>
-<body>
-  <h1>Tasks</h1>
-  <p class="meta"><a href="/">transcripts</a> · <a href="/goals">goals</a> ·
-     <a href="/brief">brief</a></p>
+{% extends "base.html" %}
+{% block title %}Tasks · SecondBrain{% endblock %}
+{% block style %}
+    /* today plan toolbar */
+    .plan-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .7rem;
+                margin: .4rem 0 .7rem; }
+    .plan-bar .pill { margin: 0; }
+    .st-proposed { background: color-mix(in srgb, var(--warn) 16%, transparent);
+                   color: var(--warn); font-weight: 600; }
+    .st-accepted { background: color-mix(in srgb, var(--ok) 14%, transparent);
+                   color: var(--ok); font-weight: 600; }
+    .cap-group { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap;
+                 margin-left: auto; }
+    #capacity { width: 5.6rem; }
+    @media (max-width: 480px) { .cap-group { margin-left: 0; } }
+    .plan-hint { margin: -.2rem 0 .5rem; }
 
-  <h2>Today
-    <button onclick="planAction('propose')">Propose plan</button>
-    <button onclick="planAction('accept')">Accept</button>
-  </h2>
-  {% if today and today.tasks %}
-    {% for t in today.tasks %}
-      {% if t %}
-      <div class="task">
-        <strong class="{{ 'done' if t.status in ['done','dropped'] else '' }}">{{ t.title }}</strong>
-        <span class="meta">· {{ t.estimate_minutes or '–' }}m · v{{ t.value }}/e{{ t.effort }}</span>
-        <button onclick="done({{ t.id }})">Done</button>
-        <button onclick="research({{ t.id }})">Research</button>
+    /* task rows (shared by Today / Backlog / Completed / action items) */
+    ul.tasks { list-style: none; margin: .2rem 0 .6rem; padding: 0; }
+    .task { border-bottom: 1px solid var(--line); padding: .6rem 0 .65rem; }
+    .t-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .5rem; }
+    .t-line .pill { font-size: .72rem; padding: .12rem .55rem; margin: 0; flex: none; }
+    .t-title { font-weight: 500; overflow-wrap: anywhere; }
+    .t-closed .t-title { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+    .q-do { background: color-mix(in srgb, var(--danger) 13%, transparent);
+            color: var(--danger); font-weight: 600; }
+    .q-schedule { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+    .q-delegate { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+    .q-eliminate { color: var(--muted); }
+    .ts-in_progress { background: color-mix(in srgb, var(--ok) 12%, transparent); font-weight: 600; }
+    .ts-blocked { background: color-mix(in srgb, var(--warn) 18%, transparent);
+                  color: var(--warn); font-weight: 600; }
+    .t-detail { margin: .1rem 0 0; font-size: .88rem; color: var(--muted);
+                white-space: pre-wrap; overflow-wrap: anywhere; }
+    .t-meta { margin: .15rem 0 0; font-size: .82rem; }
+    .overdue { color: var(--danger); font-weight: 600; }
+    .due-today { color: var(--warn); font-weight: 600; }
+    .t-status-line { margin: .3rem 0 0; }
+    .t-acts { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; }
+    .t-acts button { font-size: .82rem; padding: .32rem .68rem; }
+    @media (max-width: 480px) {
+      .t-acts { gap: .45rem; }
+      .t-acts button { flex: 1 0 auto; padding: .5rem .6rem; }
+    }
+
+    /* research notes */
+    .notes { margin: .55rem 0 .1rem; padding-left: .85rem; border-left: 2px solid var(--line); }
+    .note { margin: .45rem 0; }
+    .note-head { margin: 0 0 .25rem; }
+    .note-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .92rem; }
+    .note-srcs { margin: .15rem 0 0; padding-left: 1.1rem; font-size: .82rem;
+                 color: var(--muted); }
+    .note-srcs a { overflow-wrap: anywhere; }
+
+    /* Eisenhower legend */
+    details.tag-legend { margin: .2rem 0 .6rem; }
+    details.tag-legend summary { cursor: pointer; width: max-content; max-width: 100%;
+                                 color: var(--muted); font-size: .85rem;
+                                 padding: .15rem .2rem; border-radius: 6px; }
+    details.tag-legend ul { list-style: none; margin: .3rem 0 0; padding: 0;
+                            display: grid; gap: .35rem; }
+    details.tag-legend li { font-size: .85rem; color: var(--muted); }
+    details.tag-legend li .pill { font-size: .72rem; padding: .12rem .55rem;
+                                  margin: 0 .3rem 0 0; }
+
+    /* add + edit forms */
+    .add-form { margin: .8rem 0 1rem; }
+    .add-main { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .add-main input { flex: 1; min-width: min(14rem, 100%); }
+    details.add-more { margin-top: .45rem; }
+    details.add-more summary { cursor: pointer; width: max-content; max-width: 100%;
+                               padding: .15rem .2rem; border-radius: 6px;
+                               color: var(--muted); font-size: .85rem; }
+    .form-row { display: flex; gap: .9rem .9rem; flex-wrap: wrap; align-items: end;
+                margin-top: .5rem; }
+    .field { display: grid; gap: .2rem; }
+    .field > label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+    .field input[type=number] { width: 7rem; }
+    .field-wide { flex: 1 0 100%; }
+    .field-wide textarea { width: 100%; }
+    .edit-form { display: grid; gap: .7rem; margin-top: .4rem; }
+    .edit-form textarea { width: 100%; }
+    .edit-acts { display: flex; gap: .5rem; }
+
+    /* completed disclosure */
+    details.done-wrap { margin: 1rem 0; }
+    details.done-wrap summary { cursor: pointer; font-weight: 600; width: max-content;
+                                padding: .3rem .2rem; border-radius: 6px; }
+{% endblock %}
+{% block content %}
+  {% set QUADRANTS = {
+      'do':        ('Do', 'Urgent + important — due soon and high value. Do these first.'),
+      'schedule':  ('Schedule', 'Important but not urgent — plan time for it.'),
+      'delegate':  ('Delegate', 'Urgent but lower value — keep it quick or hand it off.'),
+      'eliminate': ('Eliminate', 'Neither urgent nor important — batch it, or question it.'),
+  } %}
+  {% set ST_LABEL = {'next': 'next', 'scheduled': 'scheduled',
+                     'in_progress': 'in progress', 'blocked': 'blocked'} %}
+
+  {% macro trow(t, ctx) %}
+    {% set closed = t.status in ('done', 'dropped') %}
+    <li class="task{{ ' t-closed' if closed }}" id="task-{{ t.id }}"
+        data-id="{{ t.id }}" data-title="{{ t.title }}" data-detail="{{ t.detail or '' }}"
+        data-estimate="{{ t.estimate_minutes or '' }}" data-due="{{ t.due_date or '' }}"
+        data-value="{{ t.value }}" data-effort="{{ t.effort }}">
+      <div class="t-view">
+        <div class="t-line">
+          {% set q = QUADRANTS.get(t.quadrant) %}
+          {% if q and not closed %}
+            <span class="pill q-{{ t.quadrant }}" title="{{ q[1] }}">{{ q[0] }}</span>
+          {% endif %}
+          <span class="t-title">{{ t.title }}</span>
+          {% set show_pill = ('in_progress', 'blocked') if ctx == 'plan'
+                             else ('next', 'scheduled', 'in_progress', 'blocked') %}
+          {% if t.status in show_pill %}
+            <span class="pill ts-{{ t.status }}">{{ ST_LABEL[t.status] }}</span>
+          {% endif %}
+        </div>
+        {% if t.detail and not closed %}
+          <p class="t-detail">{{ t.detail }}</p>
+        {% endif %}
+        <p class="t-meta meta">
+          {%- if closed -%}
+            {{ t.status }}{% if t.closed_label %} {{ t.closed_label }}{% endif %}
+          {%- else -%}
+            {%- if t.due_label -%}
+              <span class="{{ 'overdue' if t.overdue else ('due-today' if t.due_today) }}">{{ t.due_label }}</span> ·
+            {% endif -%}
+            {% if t.estimate_minutes %}{{ t.estimate_minutes }}m{% else %}~30m{% endif %}
+            · value {{ t.value }}/5 · effort {{ t.effort }}/5
+            {%- if t.source == 'conversation' %} · from a conversation{% endif -%}
+            {%- if t.goal_title %} · goal:
+              <a href="/goals#goal-{{ t.goal_id }}" title="Open this goal on the Goals page">{{ t.goal_title }}</a>
+            {%- elif t.source == 'ai' %} · from a goal plan{% endif -%}
+          {%- endif %}
+          <button type="button" class="linklike notes-toggle" aria-expanded="false"
+                  aria-controls="notes-{{ t.id }}" onclick="toggleNotes({{ t.id }}, this)"
+                  {% if not t.notes_count %}hidden{% endif %}>Notes ({{ t.notes_count }})</button>
+        </p>
+        <p class="t-status-line meta" role="status" hidden></p>
+        <div class="t-acts">
+          {% if closed %}
+            <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Restored to the backlog.')">Undo</button>
+          {% else %}
+            {% if t.status == 'in_progress' %}
+              <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Stopped — back in the backlog.')"
+                      title="Stop working on it for now">Stop</button>
+            {% elif t.status != 'blocked' %}
+              <button type="button" onclick="setStatus({{ t.id }}, 'in_progress', this, 'Started — good luck.')"
+                      title="Mark as in progress">Start</button>
+            {% endif %}
+            <button type="button" onclick="setStatus({{ t.id }}, 'done', this, 'Done — nice work.')">Done</button>
+            <button type="button" onclick="research({{ t.id }}, this)"
+                    title="Ask the local model to dig through your conversations and knowledge for this task — takes a moment, and the note is saved here">Research</button>
+            {% if web_research_enabled %}
+              <button type="button" onclick="research({{ t.id }}, this, true)"
+                      title="Search the web through your configured engine and save a summarised, cited note here — takes a moment">Research (web)</button>
+            {% endif %}
+            <button type="button" onclick="editTask(this)">Edit</button>
+            {% if ctx == 'plan' %}
+              <button type="button" onclick="removeFromPlan({{ t.id }}, this)"
+                      title="Take it out of today’s plan — the task goes back to the backlog">Not today</button>
+            {% endif %}
+            {% if t.status == 'blocked' %}
+              <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Unblocked — back in the running.')">Unblock</button>
+            {% else %}
+              <button type="button" onclick="setStatus({{ t.id }}, 'blocked', this, 'Marked blocked — it won\'t be planned until unblocked.')"
+                      title="Waiting on something? Blocked tasks are skipped by the planner">Block</button>
+            {% endif %}
+            <button type="button" class="btn-danger" onclick="setStatus({{ t.id }}, 'dropped', this, 'Dropped — find it under Completed if you change your mind.')"
+                    title="Stop tracking it — kept under Completed, undoable">Drop</button>
+          {% endif %}
+        </div>
+        <div class="notes" id="notes-{{ t.id }}" hidden data-loaded="0"></div>
       </div>
-      {% endif %}
-    {% endfor %}
-  {% else %}<p class="meta">No plan yet — click "Propose plan".</p>{% endif %}
+    </li>
+  {% endmacro %}
 
-  <h2>All tasks</h2>
-  <form onsubmit="addTask(event)">
-    <input type="text" id="title" placeholder="New task…" required />
-    <button type="submit">Add</button>
-  </form>
-  {% for t in backlog %}
-    <div class="task" id="task-{{ t.id }}">
-      <span class="{{ 'done' if t.status in ['done','dropped'] else '' }}">{{ t.title }}</span>
-      <span class="meta">· {{ t.status }}{% if t.due_date %} · due {{ t.due_date }}{% endif %}</span>
-      <button onclick="done({{ t.id }})">Done</button>
+  <h1>Tasks</h1>
+  <p class="meta">A plan for today sized to your time budget, a backlog ranked by
+    urgency and importance, and action items heard in your conversations.</p>
+
+  <section aria-labelledby="today-h">
+    <h2 id="today-h">Today <span class="meta">· {{ today_label }}</span></h2>
+    <div class="plan-bar">
+      {% if plan %}
+        <span class="pill st-{{ plan.status }}">{{ 'Accepted' if plan.status == 'accepted' else 'Proposed' }}</span>
+        {% if plan_tasks %}
+          <span class="meta">{{ plan_done }}/{{ plan_tasks | length }} done ·
+            {{ planned_minutes }} of {{ plan.capacity_minutes }} min planned</span>
+        {% endif %}
+      {% endif %}
+      <span class="cap-group">
+        <label class="meta" for="capacity">Capacity</label>
+        <input type="number" id="capacity" min="15" max="1440" step="5"
+               value="{{ plan.capacity_minutes if plan else default_capacity }}" />
+        <span class="meta" aria-hidden="true">min</span>
+        <button type="button" onclick="planAction('propose', this)"
+                {% if not n_open_total %}disabled{% endif %}
+                title="{{ 'Add a task first — there\'s nothing to plan yet' if not n_open_total
+                          else 'Pick the highest-priority open tasks that fit the capacity' }}">
+          {{ 'Re-propose' if plan else 'Propose plan' }}</button>
+        {% if plan and plan.status == 'proposed' and plan_tasks %}
+          <button type="button" class="btn-primary" onclick="planAction('accept', this)"
+                  title="Mark these tasks scheduled for today">Accept plan</button>
+        {% endif %}
+      </span>
     </div>
-  {% endfor %}
+    {% if plan and plan.status == 'proposed' and plan_tasks %}
+      <p class="meta plan-hint">This is a draft — accept it to schedule these tasks for today,
+        or change the capacity and re-propose.</p>
+    {% endif %}
+
+    {% if not plan %}
+      {% if n_open_total %}
+        <div class="empty"><strong>No plan for today yet</strong>
+          “Propose plan” picks the most urgent and valuable open tasks that fit your
+          {{ default_capacity }}-minute budget — nothing is scheduled until you accept.</div>
+      {% else %}
+        <div class="empty"><strong>Nothing to plan yet</strong>
+          Add your first task below, then propose a plan and SecondBrain will fit
+          the day to your time budget.</div>
+      {% endif %}
+    {% elif not plan_tasks %}
+      <div class="empty"><strong>Nothing to schedule</strong>
+        {% if n_open_total %}Every open task is currently blocked — unblock one below,
+          or add a new task, then re-propose.{% else %}Your backlog is empty —
+          add a task below, then hit “Re-propose”.{% endif %}</div>
+    {% else %}
+      <ul class="tasks">
+        {% for t in plan_tasks %}{{ trow(t, 'plan') }}{% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="actions-h">
+    <h2 id="actions-h">Detected action items</h2>
+    {% if actions %}
+      <p class="meta">Commitments SecondBrain heard in your conversations — add the real
+        ones to your backlog, dismiss the rest.</p>
+      <ul class="tasks">
+        {% for a in actions %}
+          <li class="task">
+            <div class="t-line"><span class="t-title">{{ a.object_text or '(unspecified)' }}</span></div>
+            <p class="t-meta meta">{{ a.src_name }}{% if a.dst_name %} → {{ a.dst_name }}{% endif %}
+              {%- if a.due_label %} · <span class="{{ 'overdue' if a.overdue else ('due-today' if a.due_today) }}">{{ a.due_label }}</span>{% endif %}
+              {%- if a.detected_label %} · heard {{ a.detected_label }}{% endif %}</p>
+            <div class="t-acts">
+              <button type="button" onclick="promoteAction({{ a.id }}, this)"
+                      title="Track it — it becomes a task in your backlog">Add to tasks</button>
+              <button type="button" onclick="dismissAction({{ a.id }}, this)"
+                      title="Not a real to-do? Remove it from this list — it won’t come back">Dismiss</button>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="meta">No action items detected from conversations yet — when a conversation
+        contains a commitment (“I’ll send the report Friday”), it appears here for
+        one-tap promotion.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="backlog-h">
+    <h2 id="backlog-h">Backlog{% if open_tasks %} <span class="meta">· {{ open_tasks | length }} open
+      {%- if plan_tasks %}, {{ plan_tasks | length }} more in today’s plan{% endif %}</span>{% endif %}</h2>
+    {% if n_open_total %}
+      <details class="tag-legend">
+        <summary>What the Do / Schedule / Delegate / Eliminate tags mean</summary>
+        <ul>
+          {% for key, q in QUADRANTS.items() %}
+            <li><span class="pill q-{{ key }}">{{ q[0] }}</span>{{ q[1] }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+
+    <form class="add-form" onsubmit="addTask(event)">
+      <div class="add-main">
+        <label class="visually-hidden" for="new-title">New task title</label>
+        <input type="text" id="new-title" required maxlength="500"
+               placeholder="Add a task… e.g. Renew car registration" />
+        <button type="submit" class="btn-primary">Add task</button>
+      </div>
+      <details class="add-more">
+        <summary>More options — detail, estimate, due date, value, effort</summary>
+        <div class="form-row">
+          <div class="field field-wide">
+            <label for="new-detail">Detail (optional)</label>
+            <textarea id="new-detail" rows="2" maxlength="4000"
+                      placeholder="Context, links, notes — Research also uses this to ground its digging"></textarea>
+          </div>
+          <div class="field">
+            <label for="new-est">Estimate (min)</label>
+            <input type="number" id="new-est" min="1" max="1440" step="1" placeholder="30" />
+          </div>
+          <div class="field">
+            <label for="new-due">Due date</label>
+            <input type="date" id="new-due" />
+          </div>
+          <div class="field">
+            <label for="new-value">Value</label>
+            <select id="new-value">
+              <option value="1">1 · barely</option><option value="2">2 · low</option>
+              <option value="3" selected>3 · useful</option>
+              <option value="4">4 · important</option><option value="5">5 · critical</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="new-effort">Effort</label>
+            <select id="new-effort">
+              <option value="1">1 · minutes</option><option value="2">2 · short</option>
+              <option value="3" selected>3 · medium</option>
+              <option value="4">4 · long</option><option value="5">5 · huge</option>
+            </select>
+          </div>
+        </div>
+      </details>
+    </form>
+
+    {% if open_tasks %}
+      <p class="meta">Ranked by priority — due dates, value, effort and goal priority set the
+        order and the Do / Schedule / Delegate / Eliminate tags.</p>
+      <ul class="tasks">
+        {% for t in open_tasks %}{{ trow(t, 'backlog') }}{% endfor %}
+      </ul>
+    {% elif plan_tasks %}
+      <p class="meta">Everything open is in today’s plan — nicely focused.</p>
+    {% elif completed %}
+      <div class="empty"><strong>All clear</strong>
+        Every task is done or dropped — add the next one above.</div>
+    {% else %}
+      <div class="empty"><strong>No tasks yet</strong>
+        Add your first task above — or break a goal into steps from the
+        <a href="/goals">Goals page</a> and they’ll land here.</div>
+    {% endif %}
+
+    {% if completed %}
+      <details class="done-wrap">
+        <summary>Completed ({{ completed | length }})</summary>
+        <ul class="tasks">
+          {% for t in completed %}{{ trow(t, 'done') }}{% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+  </section>
 
   <script>
+    'use strict';
+
+    /* tiny DOM helper (textContent/attrs only — never innerHTML) */
+    function el(tag, attrs) {
+      const n = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs || {})) {
+        if (v === null || v === undefined) continue;
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else n.setAttribute(k, v);
+      }
+      for (let i = 2; i < arguments.length; i++) if (arguments[i]) n.append(arguments[i]);
+      return n;
+    }
+    const $task = id => document.getElementById(`task-${id}`);
+
+    /* ---------- add ------------------------------------------------------- */
     async function addTask(e) {
       e.preventDefault();
-      await fetch('/api/tasks', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({title: title.value})});
-      location.reload();
+      const v = id => document.getElementById(id).value;
+      const body = { title: v('new-title'),
+                     value: parseInt(v('new-value'), 10),
+                     effort: parseInt(v('new-effort'), 10) };
+      if (v('new-detail').trim()) body.detail = v('new-detail').trim();
+      if (v('new-est')) body.estimate_minutes = parseInt(v('new-est'), 10);
+      if (v('new-due')) body.due_date = v('new-due');
+      try {
+        await SB.api('/api/tasks', { method: 'POST', body, button: e.submitter });
+        SB.reload('Task added to your backlog.', 'success');
+      } catch (err) { /* SB.api already toasted; the typed values stay put */ }
     }
-    async function done(id) {
-      await fetch(`/api/tasks/${id}/status`, {method:'POST',
-        headers:{'Content-Type':'application/json'}, body: JSON.stringify({status:'done'})});
-      location.reload();
+
+    /* ---------- one-tap status changes ------------------------------------ */
+    async function setStatus(id, status, btn, msg) {
+      try {
+        await SB.api(`/api/tasks/${id}/status`, { method: 'POST', body: { status }, button: btn });
+        SB.reload(msg, 'success');
+      } catch (err) { /* SB.api already toasted */ }
     }
-    async function planAction(action) {
-      await fetch('/api/plan/today', {method:'POST',
-        headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
-      location.reload();
+
+    /* ---------- today plan ------------------------------------------------- */
+    async function planAction(action, btn) {
+      const body = { action };
+      if (action === 'propose') {
+        const cap = document.getElementById('capacity');
+        if (!cap.reportValidity()) return;
+        if (cap.value) body.capacity_minutes = parseInt(cap.value, 10);
+      }
+      try {
+        await SB.api('/api/plan/today', { method: 'POST', body, button: btn });
+        SB.reload(action === 'accept'
+          ? 'Plan accepted — these tasks are scheduled for today.'
+          : 'Plan proposed — review it, then accept.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
     }
-    async function research(id) {
-      const r = await fetch(`/api/tasks/${id}/research`, {method:'POST',
-        headers:{'Content-Type':'application/json'}, body: JSON.stringify({web:false})});
-      const d = await r.json();
-      alert((d.notes[0] && d.notes[0].summary_md) || 'No result');
+
+    /* ---------- per-task research ------------------------------------------ */
+    async function research(id, btn, web) {
+      const row = $task(id);
+      const line = row.querySelector('.t-status-line');
+      line.hidden = false;
+      line.textContent = web
+        ? 'Researching on the web — searching through your configured engine and '
+          + 'summarising. This can take a minute; the note is saved to this task.'
+        : 'Researching — the local model is digging through your conversations '
+          + 'and knowledge. This can take a minute; the note is saved to this task.';
+      let d;
+      try {
+        d = await SB.api(`/api/tasks/${id}/research`, { method: 'POST',
+                                                        body: { web: !!web }, button: btn });
+      } catch (err) {
+        line.hidden = true; line.textContent = '';
+        return;   /* SB.api already toasted the failure */
+      }
+      line.hidden = true; line.textContent = '';
+      const toggle = row.querySelector('.notes-toggle');
+      const n = (d && d.notes ? d.notes.length : 0);
+      if (toggle) { toggle.hidden = false; toggle.textContent = `Notes (${n})`; }
+      await openNotes(id, true);
+      SB.toast(web ? 'Web research note saved to this task.'
+                   : 'Research note saved to this task.', 'success');
+    }
+
+    function toggleNotes(id, btn) {
+      const box = document.getElementById(`notes-${id}`);
+      if (!box.hidden) {
+        box.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      openNotes(id, false);
+    }
+
+    async function openNotes(id, force) {
+      const row = $task(id);
+      const box = document.getElementById(`notes-${id}`);
+      const toggle = row.querySelector('.notes-toggle');
+      box.hidden = false;
+      if (toggle) toggle.setAttribute('aria-expanded', 'true');
+      if (box.dataset.loaded === '1' && !force) return;
+      box.replaceChildren(el('p', { class: 'meta', role: 'status', text: 'Loading notes…' }));
+      let notes;
+      try {
+        notes = (await SB.api(`/api/tasks/${id}/research`, { quiet: true })).notes || [];
+      } catch (err) {
+        box.replaceChildren(el('p', { class: 'meta' }, 'Couldn’t load the research notes. ',
+          el('button', { type: 'button', class: 'linklike', text: 'Retry',
+                         onclick: () => openNotes(id, true) })));
+        return;
+      }
+      box.dataset.loaded = '1';
+      renderNotes(box, notes);
+    }
+
+    function renderNotes(box, notes) {
+      if (!notes.length) {
+        box.replaceChildren(el('p', { class: 'meta',
+          text: 'No research notes yet — “Research” asks the local model to dig into this task.' }));
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      notes.forEach(n => {
+        const head = [(n.backend === 'web' ? 'Web research' : 'Local research'),
+                      n.created_label || ''].filter(Boolean).join(' · ');
+        const card = el('article', { class: 'note card' },
+          el('p', { class: 'note-head meta', text: head }),
+          el('div', { class: 'note-body', text: n.summary_md || '(empty note)' }));
+        const srcs = Array.isArray(n.sources) ? n.sources : [];
+        if (srcs.length) {
+          const list = el('ul', { class: 'note-srcs' });
+          srcs.forEach(s => {
+            const url = /^https?:\/\//.test(s.ref || '');
+            const seg = /^seg:(\d+)$/.exec(s.ref || '');
+            let item;
+            if (url) {
+              item = el('a', { href: s.ref, rel: 'noopener', text: s.title || s.ref });
+            } else if (seg && s.day) {   /* jump to the cited moment in the Day view */
+              item = el('a', { href: `/day?date=${encodeURIComponent(s.day)}#seg-${seg[1]}`,
+                               title: 'Open this moment in the Day view',
+                               text: s.title || s.ref });
+            } else {
+              item = el('span', { text: s.title || s.ref || '' });
+            }
+            list.append(el('li', {}, item));
+          });
+          card.append(el('p', { class: 'meta', text:
+            `Grounded in ${srcs.length} source${srcs.length === 1 ? '' : 's'}:` }), list);
+        }
+        frag.append(card);
+      });
+      box.replaceChildren(frag);
+    }
+
+    /* ---------- inline edit ------------------------------------------------- */
+    function field(id, label, control) {
+      return el('div', { class: 'field' }, el('label', { for: id, text: label }), control);
+    }
+    function scaleSelect(id, cls, current, labels) {
+      const s = el('select', { id, class: cls });
+      labels.forEach((label, i) => {
+        const val = String(i + 1);
+        s.append(el('option', { value: val, text: `${val} · ${label}`,
+                                selected: val === String(current) ? '' : null }));
+      });
+      return s;
+    }
+
+    function editTask(btn) {
+      const li = btn.closest('.task');
+      const existing = li.querySelector('.edit-form');
+      if (existing) { existing.querySelector('input').focus(); return; }
+      const d = li.dataset, view = li.querySelector('.t-view');
+      const cancel = () => { form.remove(); view.hidden = false; btn.focus(); };
+      const form = el('form', { class: 'edit-form card', 'data-id': d.id,
+                                'aria-label': `Edit task “${d.title}”` },
+        field(`et-title-${d.id}`, 'Title',
+          el('input', { type: 'text', id: `et-title-${d.id}`, class: 'e-title',
+                        required: '', maxlength: '500', value: d.title })),
+        field(`et-detail-${d.id}`, 'Detail (optional)',
+          el('textarea', { id: `et-detail-${d.id}`, class: 'e-detail', rows: '3',
+                           maxlength: '4000', text: d.detail || '',
+                           placeholder: 'Context, links, notes — Research also uses this to ground its digging' })),
+        el('div', { class: 'form-row' },
+          field(`et-est-${d.id}`, 'Estimate (min)',
+            el('input', { type: 'number', id: `et-est-${d.id}`, class: 'e-est', min: '0',
+                          max: '1440', step: '1', value: d.estimate, placeholder: '30' })),
+          field(`et-due-${d.id}`, 'Due date',
+            el('input', { type: 'date', id: `et-due-${d.id}`, class: 'e-due', value: d.due })),
+          field(`et-value-${d.id}`, 'Value',
+            scaleSelect(`et-value-${d.id}`, 'e-value', d.value,
+                        ['barely', 'low', 'useful', 'important', 'critical'])),
+          field(`et-effort-${d.id}`, 'Effort',
+            scaleSelect(`et-effort-${d.id}`, 'e-effort', d.effort,
+                        ['minutes', 'short', 'medium', 'long', 'huge']))),
+        el('div', { class: 'edit-acts' },
+          el('button', { type: 'submit', class: 'btn-primary', text: 'Save' }),
+          el('button', { type: 'button', text: 'Cancel', title: 'Or press Escape',
+                         onclick: cancel })));
+      form.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); cancel(); }
+      });
+      form.addEventListener('submit', ev => saveEdit(ev, d.id));
+      view.hidden = true;
+      li.append(form);
+      form.querySelector('input').focus();
+    }
+
+    async function saveEdit(e, id) {
+      e.preventDefault();
+      const f = e.target;
+      const est = f.querySelector('.e-est').value;
+      try {
+        await SB.api(`/api/tasks/${id}`, { method: 'PATCH', button: e.submitter, body: {
+          title: f.querySelector('.e-title').value,
+          detail: f.querySelector('.e-detail').value,             /* '' clears */
+          estimate_minutes: est === '' ? 0 : parseInt(est, 10),   /* 0 clears */
+          due_date: f.querySelector('.e-due').value,              /* '' clears */
+          value: parseInt(f.querySelector('.e-value').value, 10),
+          effort: parseInt(f.querySelector('.e-effort').value, 10),
+        }});
+        SB.reload('Task updated.', 'success');
+      } catch (err) { /* SB.api already toasted; your edits stay in the form */ }
+    }
+
+    /* ---------- today plan: pull one task out ------------------------------- */
+    async function removeFromPlan(id, btn) {
+      try {
+        await SB.api('/api/plan/today', { method: 'POST',
+                                          body: { action: 'remove_task', task_id: id },
+                                          button: btn });
+        SB.reload('Out of today’s plan — the task is back in your backlog.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
+    }
+
+    /* ---------- action-item promotion / dismissal ---------------------------- */
+    async function promoteAction(edgeId, btn) {
+      try {
+        const d = await SB.api(`/api/actions/${edgeId}/promote`, { method: 'POST', button: btn });
+        SB.reload(d && d.title ? `Added to your backlog: “${d.title}”.`
+                               : 'Added to your backlog.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
+    }
+
+    async function dismissAction(edgeId, btn) {
+      try {
+        await SB.api(`/api/actions/${edgeId}/dismiss`, { method: 'POST', button: btn });
+        SB.reload('Dismissed — it won’t be suggested again.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
     }
   </script>
-</body>
-</html>
+{% endblock %}

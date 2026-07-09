@@ -1,8 +1,11 @@
 """Username/password auth with a stdlib-signed session cookie.
 
 No third-party deps: passwords are PBKDF2-hashed, the session cookie is an
-HMAC-signed ``username:expiry`` token. Credentials + the signing secret live in
-``app_state`` (which is inside the encrypted DB when SQLCipher is enabled).
+HMAC-signed ``username:generation:expiry`` token. Credentials, the signing
+secret, and the session generation live in ``app_state`` (which is inside the
+encrypted DB when SQLCipher is enabled). The generation is a monotonic counter
+embedded in every cookie: logout bumps it, instantly revoking all outstanding
+cookies server-side instead of trusting browsers to forget them.
 Loopback clients are exempt so local use and the CLI/menu bar never need a login.
 """
 
@@ -21,9 +24,12 @@ from secondbrain.storage import state
 
 _CRED_KEY = "auth_credentials"
 _SECRET_KEY = "auth_session_secret"
+_GEN_KEY = "auth_session_generation"
 _PBKDF2_ROUNDS = 200_000
 COOKIE_NAME = "sb_session"
-EXEMPT_PREFIXES = ("/health", "/login", "/logout", "/static")
+# /favicon.ico is exempt like /static: browsers fetch it unauthenticated and it
+# only serves the emoji icon (nothing personal).
+EXEMPT_PREFIXES = ("/health", "/login", "/logout", "/static", "/favicon.ico")
 
 
 # --- password hashing --------------------------------------------------------
@@ -81,28 +87,47 @@ def session_secret(conn: sqlite3.Connection) -> bytes:
     return raw.encode()
 
 
+def session_generation(conn: sqlite3.Connection) -> int:
+    """Current session generation; cookies minted under an older one are dead."""
+    raw = state.get_state(conn, _GEN_KEY)
+    try:
+        return int(raw) if raw else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_session_generation(conn: sqlite3.Connection) -> int:
+    """Revoke every outstanding session cookie (sign out everywhere)."""
+    gen = session_generation(conn) + 1
+    state.set_state(conn, _GEN_KEY, str(gen))
+    return gen
+
+
 # --- signed session cookie ---------------------------------------------------
 
 
-def make_cookie(username: str, secret: bytes, max_age_days: int) -> str:
+def make_cookie(username: str, secret: bytes, max_age_days: int, generation: int = 0) -> str:
     exp = int(time.time()) + max_age_days * 86400
-    payload = f"{username}:{exp}"
+    payload = f"{username}:{generation}:{exp}"
     sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
     token = base64.urlsafe_b64encode(payload.encode()).decode()
     return f"{token}.{sig}"
 
 
-def verify_cookie(cookie: str, secret: bytes) -> str | None:
+def verify_cookie(cookie: str, secret: bytes, generation: int = 0) -> str | None:
+    """Return the username when the cookie is authentic, unexpired, and from the
+    current session generation; None otherwise (including pre-generation legacy
+    cookies, which simply require one fresh sign-in)."""
     try:
         token, sig = cookie.split(".")
         payload = base64.urlsafe_b64decode(token.encode()).decode()
         expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
-        username, exp = payload.rsplit(":", 1)
+        username, gen, exp = payload.rsplit(":", 2)
+        if int(exp) < int(time.time()) or int(gen) != generation:
+            return None
     except (ValueError, TypeError):
-        return None
-    if int(exp) < int(time.time()):
         return None
     return username
 

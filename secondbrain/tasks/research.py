@@ -12,10 +12,33 @@ import json
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.llm.client import LLM, get_llm
 from secondbrain.storage.models import utcnow_iso
+
+# Detail text appended to auto-built research queries is capped so a very long
+# note can't drown the retrieval query the title anchors.
+_QUERY_DETAIL_CHARS = 500
+
+
+def _local_dt(ts: str | None) -> datetime | None:
+    """Stored UTC timestamp → aware datetime in the machine's local timezone.
+
+    Sources carry the local calendar day derived from this, matching how the
+    Day view buckets segments, so ``/day?date=<day>#seg-<id>`` links built from
+    research sources land on the cited moment.
+    """
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone()
 
 
 @dataclass
@@ -47,11 +70,15 @@ class LocalResearcher(Researcher):
         from secondbrain.knowledge import chat
 
         ans = chat.answer(self.conn, query, llm=self.llm, settings=self.settings)
-        sources = [
-            {"title": f"{c['speaker']} · {(c['start_at'] or '')[:19]}",
-             "ref": f"seg:{c['segment_id']}"}
-            for c in ans.get("citations", [])
-        ]
+        sources = []
+        for c in ans.get("citations", []):
+            dt = _local_dt(c.get("start_at"))
+            when = (f"{dt.strftime('%b')} {dt.day}, {dt.strftime('%H:%M')}" if dt
+                    else (c.get("start_at") or "")[:19])
+            src = {"title": f"{c['speaker']} · {when}", "ref": f"seg:{c['segment_id']}"}
+            if dt:  # lets the UI link the source to /day?date=<day>#seg-<id>
+                src["day"] = dt.strftime("%Y-%m-%d")
+            sources.append(src)
         return ResearchNote(summary_md=ans["answer"], backend=self.backend_name, sources=sources)
 
 
@@ -119,8 +146,11 @@ def run_research(
     """Run research for a task and store the note. Returns the note id."""
     settings = settings or get_settings()
     if query is None:
-        row = conn.execute("SELECT title FROM tasks WHERE id=?", (task_id,)).fetchone()
+        row = conn.execute("SELECT title, detail FROM tasks WHERE id=?", (task_id,)).fetchone()
         query = row["title"] if row else ""
+        detail = (row["detail"] or "").strip() if row else ""
+        if detail:  # context-rich tasks get better-grounded notes
+            query = f"{query} — {detail[:_QUERY_DETAIL_CHARS]}"
     researcher = researcher or get_researcher(conn, web=web, settings=settings, llm=llm)
     note = researcher.research(query)
     cur = conn.execute(

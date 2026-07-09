@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · SecondBrain{% endblock %}
+{% block content %}
+  <h1>{{ title }}</h1>
+  <p class="meta">HTTP {{ status_code }}{% if detail %} — {{ detail }}{% endif %}</p>
+  {% if hint %}<p>{{ hint }}</p>{% endif %}
+  {% if links %}
+    <p>{% for l in links %}<a class="pill" href="{{ l.href }}">{{ l.label }}</a> {% endfor %}</p>
+  {% endif %}
+  <p>
+    <button type="button" class="linklike" onclick="history.back()">Go back</button>
+    · <a href="/">Home</a>
+  </p>
+{% endblock %}

@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from secondbrain.knowledge import graph
 from secondbrain.llm.client import MockLLM
 from secondbrain.proactive import engine
@@ -43,6 +45,39 @@ def test_weekly_digest_kind(conn, settings):
     engine.run_digest(conn, llm=MockLLM(responses=["weekly review"]), settings=settings, kind="weekly")
     row = conn.execute("SELECT kind FROM digests").fetchone()
     assert row["kind"] == "weekly"
+
+
+def test_run_digest_refuses_overlapping_run(conn, settings):
+    from secondbrain.proactive import store
+
+    settings.proactive.enabled = True
+    _owner(conn)
+    store.mark_generating(conn, "daily")
+    with pytest.raises(engine.DigestInFlight):
+        engine.run_digest(conn, llm=MockLLM(responses=["x"]), settings=settings)
+    store.clear_generating(conn, "daily")  # run finished (or crashed): unblocked
+    assert engine.run_digest(conn, llm=MockLLM(responses=["x"]), settings=settings) is not None
+
+
+def test_run_digest_clears_marker_even_when_llm_fails(conn, settings):
+    from secondbrain.proactive import store
+
+    settings.proactive.enabled = True
+    owner = _owner(conn)
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=0.9, extraction_id=None)
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d")
+    graph.upsert_edge(conn, src_node_id=owner, dst_node_id=dana, predicate="action_item",
+                      kind="action_item", object_text="send deck", due_date=tomorrow,
+                      confidence=0.9, source_segment_ids=[1])
+
+    class BoomLLM:
+        def complete(self, system, prompt):
+            raise RuntimeError("model offline")
+
+    with pytest.raises(RuntimeError):
+        engine.run_digest(conn, llm=BoomLLM(), settings=settings)
+    assert store.generating_since(conn, "daily") is None  # cleared in finally
 
 
 def test_synthesize_drops_hallucinated_citations(conn, settings):

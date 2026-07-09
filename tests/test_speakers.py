@@ -246,3 +246,11 @@ def test_set_owner_from_history(conn):
     service.set_owner(conn, sid)
     row = conn.execute("SELECT is_owner, kind FROM speakers WHERE id=?", (sid,)).fetchone()
     assert row["is_owner"] == 1 and row["kind"] == "owner"
+    # moving ownership demotes the previous owner to a regular known voice
+    # (no stale kind='owner' rows left behind)
+    other = registry.create_unknown_speaker(conn)
+    service.set_owner(conn, other)
+    old = conn.execute("SELECT is_owner, kind FROM speakers WHERE id=?", (sid,)).fetchone()
+    new = conn.execute("SELECT is_owner, kind FROM speakers WHERE id=?", (other,)).fetchone()
+    assert (new["is_owner"], new["kind"]) == (1, "owner")
+    assert (old["is_owner"], old["kind"]) == (0, "known")

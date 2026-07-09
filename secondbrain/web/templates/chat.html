@@ -1,59 +1,576 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Ask</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 820px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.55; }
-    a { color: inherit; }
-    form { display: flex; gap: .5rem; margin: 1rem 0; }
-    input[type=text] { flex: 1; padding: .6rem; font-size: 1rem;
-                       border: 1px solid #8884; border-radius: 8px; }
-    button { padding: .6rem 1rem; border-radius: 8px; border: 1px solid #8884;
-             cursor: pointer; background: #8882; }
-    #answer { white-space: pre-wrap; border: 1px solid #8884; border-radius: 10px;
-              padding: 1rem; margin: 1rem 0; min-height: 2rem; }
-    .cite { border-bottom: 1px solid #8883; padding: .5rem 0; font-size: .9rem; }
-    .meta { color: #888; font-size: .8rem; }
-  </style>
-</head>
-<body>
-  <h1>Ask your second brain</h1>
-  <p class="meta"><a href="/">transcripts</a> · <a href="/speakers">speakers</a> ·
-     <a href="/graph">graph</a></p>
+{% extends "base.html" %}
+{% block title %}Ask · SecondBrain{% endblock %}
+{% block style %}
+    .h-row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+    #new-chat { font-size: .8rem; padding: .3rem .6rem; }
 
-  <form onsubmit="ask(event)">
-    <input type="text" id="q" placeholder="e.g. What did Dana commit to?" autofocus />
-    <button type="submit">Ask</button>
+    #thread { display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0; }
+    .turn { display: flex; flex-direction: column; gap: .5rem; }
+    .bubble-q { align-self: flex-end; background: var(--soft); max-width: 85%;
+                border-radius: 14px 14px 4px 14px; padding: .5rem .85rem;
+                white-space: pre-wrap; overflow-wrap: anywhere; }
+    .a-card { border: 1px solid var(--line); border-radius: 14px 14px 14px 4px;
+              padding: .8rem 1rem; }
+    .a-card.error { border-left: 3px solid var(--danger); }
+    .a-head { display: flex; gap: .45rem .55rem; align-items: center; flex-wrap: wrap;
+              margin-bottom: .45rem; }
+    /* Right-aligned cluster: time + copy travel together at the row end and stay
+       together if the badges wrap onto their own line at narrow widths. */
+    .a-tools { margin-left: auto; display: inline-flex; gap: .4rem; align-items: center; }
+    .a-copy { font-size: .78rem; padding: .18rem .5rem; line-height: 1.2; }
+    .badge { font-size: .75rem; font-weight: 600; padding: .15rem .55rem;
+             border-radius: 999px; background: var(--soft); white-space: nowrap; }
+    .badge-ok { color: var(--ok); }
+    .badge-warn { color: var(--warn); }
+    .badge-muted { color: var(--muted); font-weight: 400; }
+    .a-time { white-space: nowrap; }
+    .a-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .a-note { margin: .5rem 0 0; font-size: .8rem; }
+    .a-body .gk { background: var(--soft); border-radius: 4px;
+                  padding: 0 .15rem; box-decoration-break: clone; }
+    .cite-n { font-size: .78rem; background: var(--soft); border: 1px solid var(--line);
+              border-radius: 6px; padding: 0 .32rem; text-decoration: none;
+              white-space: nowrap; }
+    .cite-n:hover, .cite-n:focus-visible { text-decoration: underline; }
+    .err-msg { color: var(--danger); }
+
+    .sources { margin-top: .75rem; border-top: 1px solid var(--line); padding-top: .55rem; }
+    .sources h2 { font-size: .78rem; margin: 0 0 .35rem; text-transform: uppercase;
+                  letter-spacing: .04em; color: var(--muted); }
+    .src-list { list-style: none; margin: 0; padding: 0; display: flex;
+                flex-direction: column; gap: .5rem; }
+    .src-text { color: var(--muted); font-size: .85rem; margin-top: .12rem;
+                overflow-wrap: anywhere; }
+
+    .dots { display: inline-flex; gap: .25rem; align-items: center; }
+    .dots i { width: .38rem; height: .38rem; border-radius: 50%; background: var(--muted);
+              animation: sb-bounce 1.2s infinite ease-in-out; }
+    .dots i:nth-child(2) { animation-delay: .15s; }
+    .dots i:nth-child(3) { animation-delay: .3s; }
+    @keyframes sb-bounce { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: .6; } }
+    .cancel-btn { margin-left: auto; font-size: .8rem; padding: .25rem .6rem; }
+    .pending-hint { margin: .2rem 0 0; }
+    .a-body.streaming { margin-top: .55rem; }
+    /* Blinking caret while tokens stream in. */
+    .a-body.streaming::after { content: ""; display: inline-block; width: .55em;
+                               height: 1.05em; margin-left: .12em; vertical-align: -.18em;
+                               background: var(--muted); animation: sb-caret 1s steps(1) infinite; }
+    @keyframes sb-caret { 50% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .a-body.streaming::after { animation: none; } }
+
+    .try-list { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: center;
+                margin-top: .7rem; }
+    .try-q { border-radius: 999px; font-size: .85rem; padding: .35rem .8rem; }
+
+    #ask-form { display: flex; gap: .5rem; margin: 1rem 0 .3rem; }
+    #q { flex: 1; min-width: 0; }
+
+    /* Persistent suggestions: a compact, collapsible row so canned prompts stay
+       reachable after the empty state is gone, without crowding the thread. */
+    #suggest { margin: .1rem 0 .2rem; }
+    #suggest-toggle { font-size: .82rem; padding: .25rem .55rem; color: var(--muted); }
+    #suggest-toggle[aria-expanded="true"] { color: var(--fg); }
+    .suggest-list { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
+    .suggest-list .try-q { font-size: .82rem; padding: .3rem .7rem; }
+{% endblock %}
+{% block content %}
+  <h1>Ask your second brain</h1>
+  <p class="meta h-row">Answers are grounded in your captured conversations and cite their
+    sources — everything runs on-device.
+    <button type="button" id="new-chat" hidden>New conversation</button>
+  </p>
+
+  <!-- role=log (not a live region): tokens stream in char-by-char, which would
+       flood a screen reader with fragments. Completion is announced concisely
+       through #sr-live instead; the finalized answer stays browsable here. -->
+  <div id="thread" role="log" aria-busy="false"></div>
+  <div id="sr-live" class="visually-hidden" role="status" aria-live="polite"></div>
+
+  <div id="ask-empty" class="empty">
+    {% if seg_count %}
+      <strong>Ask about anything you've said or heard</strong>
+      Answers cite the exact transcript lines they came from. Try one of these:
+      <div class="try-list">
+        <button type="button" class="try-q">{{ try_first or 'What did I talk about today?' }}</button>
+        <button type="button" class="try-q">What did I commit to doing?</button>
+        <button type="button" class="try-q">Summarise my recent conversations</button>
+      </div>
+    {% else %}
+      <strong>Nothing captured yet</strong>
+      Once SecondBrain transcribes your first conversations you can ask about them here —
+      e.g. “What did I commit to today?”
+    {% endif %}
+  </div>
+
+  <form id="ask-form">
+    <label class="visually-hidden" for="q">Ask a question</label>
+    <input type="text" id="q" placeholder="e.g. What did Dana commit to?" autofocus
+           autocomplete="off" maxlength="4000" />
+    <button type="submit" class="btn-primary" id="ask-btn">Ask</button>
   </form>
 
-  <div id="answer" class="meta">Answers are grounded in your captured knowledge, with sources.</div>
-  <div id="cites"></div>
+  {% if seg_count %}
+  <!-- Persistent starter prompts: the empty-state chips vanish once a
+       conversation exists, so this compact, collapsed-by-default row keeps them
+       reachable mid-thread. Shown only after the first turn (JS toggles it). -->
+  <div id="suggest" hidden>
+    <button type="button" id="suggest-toggle" class="linklike" aria-expanded="false"
+            aria-controls="suggest-list">Suggestions</button>
+    <div class="suggest-list" id="suggest-list" hidden>
+      <button type="button" class="try-q">{{ try_first or 'What did I talk about today?' }}</button>
+      <button type="button" class="try-q">What did I commit to doing?</button>
+      <button type="button" class="try-q">Summarise my recent conversations</button>
+    </div>
+  </div>
+  {% endif %}
+
+  <p class="meta">Asks {{ llm_model or 'the local model' }} on this Mac — the answer streams
+    in as it's written. Follow-up questions remember this conversation.</p>
 
   <script>
-    async function ask(e) {
-      e.preventDefault();
-      const q = document.getElementById('q').value.trim();
-      if (!q) return;
-      document.getElementById('answer').textContent = 'Thinking…';
-      document.getElementById('cites').innerHTML = '';
-      const r = await fetch('/api/ask', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({question: q})
+    (function () {
+      'use strict';
+      const SERVER_TIMEOUT_S = {{ (llm_timeout_s or 120)|int }};
+      const MODEL = {{ (llm_model or 'the local model')|tojson }};
+      const STORE_KEY = 'sb-ask-thread-v1';
+      // Keep in step with the server: it spells out the last PROSE_TURNS turns
+      // in the prompt and harvests citation ids across HISTORY_TURNS (chat.py
+      // _MAX_HISTORY_TURNS / api._clean_history).
+      const PROSE_TURNS = 3;
+      const HISTORY_TURNS = 12;
+
+      const thread = document.getElementById('thread');
+      const srLive = document.getElementById('sr-live');
+      const emptyBox = document.getElementById('ask-empty');
+      const form = document.getElementById('ask-form');
+      const input = document.getElementById('q');
+      const askBtn = document.getElementById('ask-btn');
+      const newChatBtn = document.getElementById('new-chat');
+      const suggest = document.getElementById('suggest');
+      const suggestToggle = document.getElementById('suggest-toggle');
+      const suggestList = document.getElementById('suggest-list');
+
+      // Concise, polite announcement for screen readers (the thread itself is a
+      // non-live log, so streamed tokens never flood the SR — see #thread).
+      function announce(msg) {
+        if (!srLive) return;
+        srLive.textContent = '';           // reset so identical text re-announces
+        // rAF lets the clear land before the new text, so repeats are spoken.
+        requestAnimationFrame(() => { srLive.textContent = msg; });
+      }
+
+      let turns = [];      // [{q, res, ms}] — successful turns only
+      let inflight = null; // {controller, cancelled, timedOut, streaming}
+
+      try { turns = JSON.parse(sessionStorage.getItem(STORE_KEY) || '[]') || []; }
+      catch (e) { turns = []; }
+      if (!Array.isArray(turns)) turns = [];
+      // Shape-check restored turns: a malformed entry (format drift, tampering)
+      // must not wedge rendering or the follow-up history sent to the server.
+      turns = turns.filter(t =>
+        t && typeof t.q === 'string' && t.res && typeof t.res.answer === 'string');
+
+      function save() {
+        try { sessionStorage.setItem(STORE_KEY, JSON.stringify(turns.slice(-40))); }
+        catch (e) { /* private mode: history just won't survive reload */ }
+      }
+
+      function fmtWhen(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (isNaN(d)) return String(iso).slice(0, 16).replace('T', ' ');
+        return d.toLocaleString(undefined, {month: 'short', day: 'numeric',
+                                            hour: 'numeric', minute: '2-digit'});
+      }
+      function localDay(iso) {
+        const d = new Date(iso);
+        if (isNaN(d)) return '';
+        const p = n => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      }
+      function srcHref(c) {
+        const day = c.start_at ? localDay(c.start_at) : '';
+        return (day ? '/day?date=' + day : '/day') + '#seg-' + c.segment_id;
+      }
+
+      // Escape-first mini-formatter: local models sometimes ignore the
+      // "plain prose" instruction and emit markdown — render the common bits
+      // (**bold**, # headings, list markers) instead of showing raw syntax.
+      function mdLite(escaped) {
+        return escaped.split('\n').map(line => {
+          const h = line.match(/^\s{0,3}#{1,4}\s+(.*)$/);
+          if (h) return '<strong>' + h[1] + '</strong>';
+          return line.replace(/^(\s*)[-*]\s+/, '$1• ');
+        }).join('\n').replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      }
+
+      function answerHtml(res) {
+        let html = mdLite(SB.esc(res.answer || ''));
+        // Subtle highlight on "(general knowledge — not from your data) …" sentences.
+        html = html.replace(/\(general knowledge[^)\n]{0,120}\)[^.\n]*\.?/gi,
+                            m => '<span class="gk">' + m + '</span>');
+        // Inline [123] markers become links to the cited moment in the day view.
+        const byId = {};
+        (res.citations || []).forEach(c => { byId[c.segment_id] = c; });
+        html = html.replace(/\[(?:seg_id=)?(\d+)\]/g, (m, id) => {
+          const c = byId[id];
+          if (!c) return m;
+          const tip = SB.esc((c.speaker || 'Unknown') + ' · ' + fmtWhen(c.start_at));
+          return '<a class="cite-n" href="' + srcHref(c) + '" title="' + tip +
+                 '" aria-label="Source segment ' + id + ': ' + tip + '">' + id + '</a>';
+        });
+        return html;
+      }
+
+      function badgesHtml(res) {
+        const n = (res.citations || []).length;
+        let h = '';
+        if (res.grounded && n) {
+          h += '<span class="badge badge-ok">Grounded · ' + n +
+               (n === 1 ? ' source' : ' sources') + '</span>';
+        } else {
+          h += '<span class="badge badge-muted" title="Nothing in your conversations matched this question">No sources found</span>';
+        }
+        if (res.general_used) {
+          h += '<span class="badge badge-warn">Includes general knowledge</span>';
+        }
+        const tw = res.time_window;
+        if (tw && tw.label) {
+          const range = tw.start_day === tw.end_day ? (tw.start_day || '') :
+                        (tw.start_day + ' to ' + tw.end_day);
+          h += '<span class="badge badge-muted" title="Searched your transcripts from ' +
+               SB.esc(range) + '">Searched ' + SB.esc(tw.label) + '</span>';
+        }
+        return h;
+      }
+
+      // One-line spoken summary for #sr-live: enough to know the answer landed
+      // and how well-grounded it is, without reading the whole thing aloud.
+      function answerSummary(res) {
+        const n = (res.citations || []).length;
+        let s = 'Answer ready';
+        if (res.grounded && n) s += ' — grounded in ' + n + (n === 1 ? ' source' : ' sources');
+        else s += ' — no matching sources found';
+        if (res.general_used) s += ', includes general knowledge';
+        return s + '.';
+      }
+
+      function sourcesHtml(res) {
+        const cites = res.citations || [];
+        if (!cites.length) return '';
+        const items = cites.map(c =>
+          '<li><a class="pill" href="' + srcHref(c) + '">[' + c.segment_id + '] ' +
+          SB.esc(c.speaker || 'Unknown') + ' · ' + SB.esc(fmtWhen(c.start_at)) + '</a>' +
+          '<div class="src-text">“' + SB.esc(c.text || '') + '”</div></li>').join('');
+        return '<section class="sources"><h2>Sources</h2><ul class="src-list">' +
+               items + '</ul></section>';
+      }
+
+      // Clipboard with a graceful fallback: the async API is unavailable in
+      // insecure contexts (and this app may be served over plain http on the
+      // LAN), so fall back to a hidden textarea + execCommand, and only then
+      // give up. Returns whether the copy landed.
+      function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          return navigator.clipboard.writeText(text).then(() => true, () => false);
+        }
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          ta.remove();
+          return Promise.resolve(ok);
+        } catch (e) {
+          return Promise.resolve(false);
+        }
+      }
+      // Copy is offered whenever *some* clipboard path exists; when neither the
+      // async API nor execCommand is available the button is simply omitted.
+      const CAN_COPY = !!(navigator.clipboard || document.queryCommandSupported);
+
+      function turnEl(t) {
+        const el = document.createElement('article');
+        el.className = 'turn';
+        const secs = t.ms ? Math.max(1, Math.round(t.ms / 1000)) + 's' : '';
+        const copyBtn = CAN_COPY
+          ? '<button type="button" class="a-copy linklike" title="Copy this answer">Copy</button>'
+          : '';
+        const tools = (secs || copyBtn)
+          ? '<span class="a-tools">' +
+            (secs ? '<span class="meta a-time" title="Time to answer">' + secs + '</span>' : '') +
+            copyBtn + '</span>'
+          : '';
+        const note = t.truncated
+          ? '<p class="meta a-note">Earlier turns in this long thread aren’t sent in full — ' +
+            'their cited sources still carry over. Start a new conversation for a clean slate.</p>'
+          : '';
+        el.innerHTML =
+          '<div class="bubble-q">' + SB.esc(t.q) + '</div>' +
+          '<div class="a-card"><div class="a-head">' + badgesHtml(t.res) + tools +
+          '</div><div class="a-body">' + answerHtml(t.res) + '</div>' +
+          note + sourcesHtml(t.res) + '</div>';
+        const btn = el.querySelector('.a-copy');
+        if (btn) {
+          btn.addEventListener('click', () => {
+            copyText(t.res.answer || '').then(ok => {
+              if (ok) {
+                btn.textContent = 'Copied';
+                SB.toast('Answer copied', 'success');
+                setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+              } else {
+                SB.toast('Couldn’t copy — select the text to copy it manually.', 'error');
+              }
+            });
+          });
+        }
+        return el;
+      }
+
+      function syncChrome() {
+        const active = turns.length > 0 || !!inflight;
+        emptyBox.hidden = active;
+        newChatBtn.hidden = turns.length === 0 && !inflight;
+        // Persistent suggestions belong to the in-conversation state only — the
+        // empty state already surfaces the same starters more prominently.
+        if (suggest) suggest.hidden = !active;
+      }
+
+      function setBusy(on) {
+        input.disabled = on;
+        askBtn.disabled = on;
+        thread.setAttribute('aria-busy', on ? 'true' : 'false');
+        document.querySelectorAll('.try-q').forEach(b => { b.disabled = on; });
+        newChatBtn.disabled = on;
+        if (suggestToggle) suggestToggle.disabled = on;
+      }
+
+      function renderAll() {
+        thread.textContent = '';
+        turns.forEach(t => thread.appendChild(turnEl(t)));
+        syncChrome();
+      }
+
+      function pendingEl(q) {
+        const el = document.createElement('article');
+        el.className = 'turn';
+        el.innerHTML =
+          '<div class="bubble-q">' + SB.esc(q) + '</div>' +
+          '<div class="a-card pending"><div class="a-head">' +
+          '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>' +
+          '<span data-status>Thinking — asking ' + SB.esc(MODEL) + '…</span>' +
+          '<span class="meta" data-elapsed>0s</span>' +
+          '<button type="button" class="cancel-btn">Stop</button></div>' +
+          '<p class="meta pending-hint">Runs fully on-device — the answer appears here as ' +
+          'it’s written, though a cold model can take a minute to start.</p>' +
+          // aria-hidden: tokens arrive char-by-char; hiding the live text from
+          // assistive tech avoids a flood of fragments. Completion is announced
+          // once, concisely, via #sr-live when the answer is finalized.
+          '<div class="a-body streaming" data-stream hidden aria-hidden="true"></div></div>';
+        return el;
+      }
+
+      function errorEl(q, msg) {
+        const el = document.createElement('article');
+        el.className = 'turn';
+        const card = document.createElement('div');
+        card.className = 'a-card error';
+        card.setAttribute('role', 'alert');
+        card.innerHTML = '<div class="a-head"><span class="err-msg">' + SB.esc(msg) +
+                         '</span></div>';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', () => { el.remove(); ask(q); });
+        card.appendChild(retry);
+        el.innerHTML = '<div class="bubble-q">' + SB.esc(q) + '</div>';
+        el.appendChild(card);
+        return el;
+      }
+
+      function nearBottom() {
+        return window.innerHeight + window.scrollY >= document.body.offsetHeight - 160;
+      }
+
+      async function ask(q) {
+        q = (q || '').trim();
+        if (!q || inflight) { input.focus(); return; }
+        input.value = '';
+
+        const controller = new AbortController();
+        inflight = {controller: controller, cancelled: false, timedOut: false, streaming: false};
+        const me = inflight;
+        const pending = pendingEl(q);
+        thread.appendChild(pending);
+        syncChrome();
+        setBusy(true);
+        pending.scrollIntoView({block: 'nearest'});
+
+        const started = Date.now();
+        const elapsed = pending.querySelector('[data-elapsed]');
+        const hint = pending.querySelector('.pending-hint');
+        const statusEl = pending.querySelector('[data-status]');
+        const streamBody = pending.querySelector('[data-stream]');
+        let hinted = false;
+        const tick = setInterval(() => {
+          const s = Math.round((Date.now() - started) / 1000);
+          elapsed.textContent = s + 's';
+          // >= with a one-shot flag: background tabs throttle timers, so the
+          // exact 45th tick can be skipped entirely.
+          if (!hinted && s >= 45 && !me.streaming) {
+            hinted = true;
+            hint.textContent =
+              'Still working — long answers can take up to ' + SERVER_TIMEOUT_S + 's.';
+          }
+        }, 1000);
+        // Stall watchdog rather than a fixed deadline: a streaming answer may
+        // legitimately run long, but silence means the model is stuck.
+        let deadline = null;
+        function armDeadline() {
+          clearTimeout(deadline);
+          deadline = setTimeout(() => {
+            me.timedOut = true;
+            controller.abort();
+          }, (SERVER_TIMEOUT_S + 15) * 1000);
+        }
+        armDeadline();
+        pending.querySelector('.cancel-btn').addEventListener('click', () => {
+          me.cancelled = true;
+          controller.abort();   // also closes the server->Ollama stream
+        });
+
+        function onDelta(text) {
+          if (!me.streaming) {
+            me.streaming = true;
+            statusEl.textContent = 'Answering…';
+            hint.remove();
+            streamBody.hidden = false;
+          }
+          const pin = nearBottom();
+          streamBody.textContent += text;
+          if (pin) window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        // Send a wider window than the model reads in full: the server spells
+        // out only the last few turns as prose but carries citation ids from all
+        // of them, so grounding from an early turn survives (see _history_block).
+        const history = turns.slice(-HISTORY_TURNS).map(t => ({question: t.q, answer: t.res.answer}));
+        // Note it plainly when turns before the spelled-out window exist: their
+        // sources carry forward, but their wording no longer informs the answer.
+        const truncated = turns.length > PROSE_TURNS;
+        try {
+          const r = await fetch('/api/ask/stream', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: q, history: history}),
+            signal: controller.signal,
+          });
+          if (!r.ok) {
+            let data = null;
+            try { data = await r.json(); } catch (e) { /* non-JSON body */ }
+            const detail = data && typeof data.detail === 'string' ? data.detail : '';
+            throw new Error(detail || 'The server replied with HTTP ' + r.status +
+                            (r.statusText ? ' ' + r.statusText : '') + '.');
+          }
+
+          let result = null;
+          function handleLine(lineText) {
+            if (!lineText.trim()) return;
+            let ev = null;
+            try { ev = JSON.parse(lineText); } catch (e) { return; }
+            if (!ev) return;
+            if (ev.event === 'delta' && typeof ev.text === 'string') onDelta(ev.text);
+            else if (ev.event === 'done' && ev.result) result = ev.result;
+            else if (ev.event === 'error') {
+              throw new Error(ev.detail || 'The model failed mid-answer.');
+            }
+          }
+
+          if (r.body && r.body.getReader) {
+            const reader = r.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            for (;;) {
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              armDeadline();               // progress: push the stall deadline out
+              buf += decoder.decode(chunk.value, {stream: true});
+              const lines = buf.split('\n');
+              buf = lines.pop();
+              lines.forEach(handleLine);
+            }
+            (buf + decoder.decode()).split('\n').forEach(handleLine);
+          } else {
+            // No streaming reader (very old engine): fall back to a buffered read.
+            (await r.text()).split('\n').forEach(handleLine);
+          }
+          if (!result) {
+            throw new Error('The connection dropped before the answer finished — retry.');
+          }
+
+          const turn = {q: q, res: result, ms: Date.now() - started, truncated: truncated};
+          turns.push(turn);
+          save();
+          const done = turnEl(turn);
+          pending.replaceWith(done);
+          done.scrollIntoView({block: 'nearest'});
+          announce(answerSummary(result));  // concise SR notice; full text is in the log
+        } catch (err) {
+          pending.remove();
+          if (me.cancelled) {
+            input.value = q;                 // hand the question back for editing
+            SB.toast('Stopped — the model was told to stop too.', 'info');
+            announce('Answer stopped.');
+          } else if (me.timedOut) {
+            thread.appendChild(errorEl(q, 'No progress for ' + (SERVER_TIMEOUT_S + 15) +
+              's — the model may still be loading. Give it a moment and retry.'));
+          } else if (err instanceof TypeError) {  // fetch network failure
+            thread.appendChild(errorEl(q,
+              'Couldn’t reach SecondBrain — is the server running?'));
+          } else {
+            thread.appendChild(errorEl(q, err.message || 'That didn’t work.'));
+          }
+          // Error cards carry role=alert, which SRs announce on insertion — no
+          // extra announce() needed for the failure branches.
+        } finally {
+          clearInterval(tick);
+          clearTimeout(deadline);
+          inflight = null;
+          setBusy(false);
+          syncChrome();
+          input.focus();
+        }
+      }
+
+      form.addEventListener('submit', e => { e.preventDefault(); ask(input.value); });
+      document.querySelectorAll('.try-q').forEach(b =>
+        b.addEventListener('click', () => ask(b.textContent)));
+      if (suggestToggle && suggestList) {
+        suggestToggle.addEventListener('click', () => {
+          const open = suggestList.hidden;
+          suggestList.hidden = !open;
+          suggestToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+      }
+      newChatBtn.addEventListener('click', () => {
+        turns = [];
+        save();
+        if (suggestList) {  // collapse the starters back to their default
+          suggestList.hidden = true;
+          if (suggestToggle) suggestToggle.setAttribute('aria-expanded', 'false');
+        }
+        renderAll();
+        input.focus();
+        SB.toast('New conversation started.', 'info');
+        announce('New conversation started.');
       });
-      const d = await r.json();
-      document.getElementById('answer').textContent = d.answer;
-      document.getElementById('cites').innerHTML = d.citations.length
-        ? '<h3>Sources</h3>' + d.citations.map(c => `
-            <div class="cite">${escapeHtml(c.text)}
-              <div class="meta">[${c.segment_id}] ${(c.start_at||'').slice(0,19)} — ${escapeHtml(c.speaker||'')}</div>
-            </div>`).join('')
-        : '<p class="meta">No grounded sources for this answer.</p>';
-    }
-    function escapeHtml(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+      renderAll();
+    })();
   </script>
-</body>
-</html>
+{% endblock %}

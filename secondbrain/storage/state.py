@@ -36,3 +36,13 @@ def is_paused(conn: sqlite3.Connection, default: bool = False) -> bool:
 
 def set_paused(conn: sqlite3.Connection, paused: bool) -> None:
     set_state(conn, PAUSED, "1" if paused else "0")
+
+
+def pause_changed_at(conn: sqlite3.Connection) -> str | None:
+    """UTC ISO time the pause toggle last flipped; None if it never has.
+
+    Used as a grace window for capture-staleness reporting: right after a
+    resume the recorder legitimately hasn't written a chunk yet.
+    """
+    row = conn.execute("SELECT updated_at FROM app_state WHERE key=?", (PAUSED,)).fetchone()
+    return row["updated_at"] if row else None

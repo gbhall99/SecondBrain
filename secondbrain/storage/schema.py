@@ -177,7 +177,7 @@ STATEMENTS_0002_CREATE: list[str] = [
 # ADD COLUMN is not idempotent, so apply_base_schema guards via _safe_add_column;
 # the Alembic migration runs the raw ALTERs (clean DB at revision 0001).
 COLUMNS_0002: list[tuple[str, str, str]] = [
-    ("speakers", "kind", "TEXT NOT NULL DEFAULT 'unknown'"),  # owner|known|unknown
+    ("speakers", "kind", "TEXT NOT NULL DEFAULT 'unknown'"),  # owner|known|unknown|ignored
     ("speakers", "display_label", "TEXT"),
     ("speakers", "exemplar_count", "INTEGER NOT NULL DEFAULT 0"),
     ("speakers", "last_seen_at", "TEXT"),

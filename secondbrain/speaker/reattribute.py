@@ -38,6 +38,7 @@ def run_reattribution(conn: sqlite3.Connection, settings: Settings | None = None
     settings = settings or get_settings()
     d = settings.diarization
     relabeled = 0
+    touched: set[int] = set()  # speakers whose cached stats the moves invalidate
     for obs_id in _candidate_observation_ids(conn, d.low_confidence_threshold):
         obs = conn.execute(
             "SELECT speaker_id, embedding, start_at FROM speaker_observations WHERE id=?",
@@ -61,6 +62,13 @@ def run_reattribution(conn: sqlite3.Connection, settings: Settings | None = None
         if kind is None or kind["kind"] not in ("owner", "known"):
             continue  # don't shuffle among unknowns — clustering handles that
 
+        # Snapshot who is losing lines BEFORE the update: the segments' own
+        # speaker_ids can differ from the observation's current speaker.
+        prev_rows = conn.execute(
+            "SELECT DISTINCT speaker_id FROM transcript_segments "
+            "WHERE observation_id=? AND speaker_locked=0 AND speaker_id IS NOT NULL",
+            (obs_id,),
+        ).fetchall()
         conn.execute("UPDATE speaker_observations SET speaker_id=? WHERE id=?", (target, obs_id))
         cur = conn.execute(
             "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=?, "
@@ -68,5 +76,15 @@ def run_reattribution(conn: sqlite3.Connection, settings: Settings | None = None
             (target, round(m.similarity, 4), obs_id),
         )
         relabeled += cur.rowcount or 0
+        touched.add(target)
+        if cur_obs_speaker is not None:
+            touched.add(cur_obs_speaker)
+        touched.update(int(r["speaker_id"]) for r in prev_rows)
+    # Moving lines invalidates the cached speakers.segment_count / last_seen_at
+    # that the People page (and merge confirmations) display. Merge, unmerge and
+    # manual corrections all recount — re-attribution must too, for every voice
+    # that gained or lost lines, or the page contradicts its own success toast.
+    for sid in touched:
+        registry._recount_segments(conn, sid)
     state.set_state(conn, LAST_RUN_KEY, utcnow_iso())
     return relabeled

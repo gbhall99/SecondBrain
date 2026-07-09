@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Health · SecondBrain{% endblock %}
+{% block style %}
+    .sub { color: var(--muted); margin-top: 0; }
+    .status-line { display: flex; align-items: baseline; gap: .45rem; flex-wrap: wrap;
+                   margin: .9rem 0 1.1rem; font-weight: 600; }
+    .status-line.okline { color: var(--ok); }
+    .status-line.badline { color: var(--danger); }
+    .checks th[scope="row"] { text-transform: none; font-size: .95rem; letter-spacing: 0;
+                              color: var(--fg); font-weight: 600; }
+    .chk-ok, .chk-bad { font-weight: 600; white-space: nowrap; }
+    .chk-ok { color: var(--ok); }
+    .chk-bad { color: var(--danger); }
+    .chk-detail { color: var(--muted); font-size: .88rem; overflow-wrap: anywhere; }
+    .pills { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; }
+    .pill-warn { background: transparent; border: 1px solid var(--danger);
+                 color: var(--danger); font-weight: 600; }
+    #jobs { scroll-margin-top: .5rem; }
+    ul.fails { list-style: none; margin: .6rem 0; padding: 0; }
+    .fail-head { margin: 0; display: flex; flex-wrap: wrap; gap: .2rem .5rem;
+                 align-items: baseline; }
+    .fail-err { margin: .45rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .82rem; color: var(--muted); }
+{% endblock %}
+{% block content %}
+  <h1>System health</h1>
+  <p class="sub">Live checks of capture, storage, and the local models — everything runs on
+    this machine. <button type="button" class="linklike" onclick="location.reload()">Re-run checks</button></p>
+
+  {% if health.status == 'ok' %}
+  <p class="status-line okline"><span aria-hidden="true">✓</span>
+    All {{ health.checks|length }} checks passing.</p>
+  {% else %}
+  <p class="status-line badline"><span aria-hidden="true">✕</span>
+    {{ problems|length }} of {{ health.checks|length }} check{{ '' if health.checks|length == 1 else 's' }}
+    need{{ 's' if problems|length == 1 else '' }} attention.</p>
+  {% endif %}
+
+  <h2 id="checks-h">Checks</h2>
+  {% set check_labels = {
+      'migrations': 'Database schema',
+      'disk': 'Disk space',
+      'database': 'Database',
+      'llm': 'Local model (Ollama)',
+      'encryption': 'Database encryption',
+      'secrets': 'Config secrets',
+      'backups': 'Backups',
+      'microphone': 'Microphone',
+      'recording': 'Recording',
+      'daemon': 'Capture daemon',
+  } %}
+  <div class="table-wrap">
+    <table class="checks" aria-labelledby="checks-h">
+      <thead>
+        <tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Detail</th></tr>
+      </thead>
+      <tbody>
+        {% for c in health.checks %}
+        <tr>
+          <th scope="row">{{ check_labels.get(c.name, c.name) }}</th>
+          <td>{% if c.ok %}<span class="chk-ok"><span aria-hidden="true">✓</span> OK</span>
+              {% else %}<span class="chk-bad"><span aria-hidden="true">✕</span> Needs attention</span>{% endif %}</td>
+          <td class="chk-detail">{{ c.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="jobs">Pipeline jobs</h2>
+  <p class="meta">Every recording flows through a local job queue — transcription, speaker
+    diarization, knowledge extraction — and briefs are generated the same way.</p>
+  {% set failed = counts.get('failed', 0) %}
+  <div class="pills">
+    <span class="pill">{{ counts.get('pending', 0) }} pending</span>
+    <span class="pill">{{ counts.get('running', 0) }} running</span>
+    <span class="pill">{{ counts.get('done', 0) }} done</span>
+    <span class="pill{{ ' pill-warn' if failed }}">{{ failed }} failed</span>
+  </div>
+
+  {% if failures %}
+  <h3 id="failures-h">Failed jobs</h3>
+  <p class="meta">A job lands here only after all its retries hit the same error — usually a
+    missing dependency or an unreachable local model, and the error text names it. Each failure
+    affects just its own recording; capture keeps running.</p>
+  <ul class="fails" aria-labelledby="failures-h">
+    {% for f in failures %}
+    <li class="card">
+      <p class="fail-head"><strong>{{ f.type_label }}</strong>
+        <span class="meta">job #{{ f.id }}{% if f.when %} · gave up {{ f.when }}{% endif %}
+          · {{ f.attempts }} of {{ f.max_attempts }} attempts</span></p>
+      {% if f.error %}<pre class="fail-err">{{ f.error }}</pre>
+      {% else %}<p class="fail-err">No error message was recorded for this job.</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if failed > failures|length %}
+  <p class="meta">Showing the {{ failures|length }} most recent of {{ failed }} failed jobs.</p>
+  {% endif %}
+  {% else %}
+  <div class="empty"><strong>No failed jobs</strong>
+    Everything queued has either completed or is still waiting its turn.</div>
+  {% endif %}
+{% endblock %}

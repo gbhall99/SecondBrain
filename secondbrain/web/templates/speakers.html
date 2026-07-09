@@ -1,80 +1,649 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SecondBrain — Speakers</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px;
-           margin: 0 auto; padding: 1.5rem; line-height: 1.5; }
-    a { color: inherit; }
-    h1 { margin-bottom: .25rem; }
-    .card { border: 1px solid #8884; border-radius: 10px; padding: .8rem 1rem;
-            margin: .6rem 0; }
-    .meta { color: #888; font-size: .85rem; }
-    input[type=text] { padding: .45rem; border: 1px solid #8884; border-radius: 8px; }
-    button { padding: .45rem .8rem; border-radius: 8px; border: 1px solid #8884;
-             cursor: pointer; background: #8882; }
-    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-    .clips { margin: .4rem 0; }
+{% extends "base.html" %}
+{% block title %}People · SecondBrain{% endblock %}
+{% block style %}
+    [hidden] { display: none !important; } /* .row's display:flex must not defeat hidden */
+    .row { display: flex; gap: .5rem .6rem; align-items: center; flex-wrap: wrap; }
+    .name-input { flex: 1 1 10rem; min-width: 0; }
+    .clips { margin: .55rem 0 .25rem; }
+    .cliprow { display: flex; gap: .4rem .8rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
+    .cliprow audio { flex: 1 1 15rem; min-width: 0; max-width: 100%; height: 2.4rem; }
+    .cliprow .when { white-space: nowrap; }
     .owner { font-weight: 600; }
-  </style>
-</head>
-<body>
-  <h1>Speakers</h1>
-  <p class="meta"><a href="/">← back to transcripts</a></p>
+    .who { font-size: 1.02rem; margin-right: .2rem; }
+    .grow { flex: 1 1 auto; }
+    .rowactions { gap: .2rem 1rem; margin-top: .3rem; }
+    .rowactions .linklike { color: var(--muted); }
+    .rowactions .linklike:hover { color: var(--fg); }
+    .stats { display: flex; gap: .8rem 2.2rem; flex-wrap: wrap; margin: .25rem 0 .6rem; }
+    .stat b { display: block; font-size: 1.35rem; line-height: 1.25; }
+    .quality-actions { margin-top: .7rem; }
+    select.merge-pick { max-width: 100%; }
+    .name-form .dismissbtn, .clips .linklike { color: var(--muted); }
+    .name-form .dismissbtn:hover, .clips .linklike:hover { color: var(--fg); }
+    .undo-strip { background: var(--soft); }
+    details.ignored-wrap { margin: .9rem 0; }
+    details.ignored-wrap > summary { cursor: pointer; width: fit-content; color: var(--muted);
+                                     padding: .3rem .4rem; margin-left: -.4rem; border-radius: 6px; }
+    details.ignored-wrap > summary:hover { color: var(--fg); background: var(--soft); }
+    details.ignored-wrap[open] > summary { color: var(--fg); }
+{% endblock %}
+{% block content %}
+  <h1>People</h1>
+  <p class="meta">Label the voices SecondBrain hears so conversations are pinned to the right people.
+    {% if speakers %}{{ speakers|length }} voice profile{{ '' if speakers|length == 1 else 's' }}
+      · {{ unknowns|length }} awaiting a name{% if ignored %}
+      · {{ ignored|length }} ignored{% endif %}{% endif %}</p>
 
-  <h2>Who is this? ({{ unknowns|length }})</h2>
-  {% if not unknowns %}<p class="meta">No unknown voices to label. 🎉</p>{% endif %}
+  {% if undo_merge %}
+    {% set un = undo_merge.relabeled %}
+    <div class="card undo-strip">
+      <div class="row">
+        <span>Merged <strong>{{ undo_merge.src_label }}</strong> into
+          <strong>{{ undo_merge.dst_label }}</strong>
+          <span class="meta">— {{ un }} line{{ '' if un == 1 else 's' }} moved
+            · undoable for a few more minutes</span></span>
+        <span class="grow"></span>
+        <button type="button" class="linklike" id="undo-merge-btn">↩ Undo merge</button>
+      </div>
+    </div>
+  {% endif %}
+
+  <h2>Who is this?{% if unknowns %} ({{ unknowns|length }}){% endif %}</h2>
+  {% if not unknowns %}
+    <div class="empty"><strong>No unknown voices right now</strong>
+      When a new voice shows up in a recording, it appears here so you can put a name to it.</div>
+  {% else %}
+    <p class="meta">Play a clip to recognise the voice, then name it — every past and future line
+      is relabeled automatically.</p>
+  {% endif %}
   {% for s in unknowns %}
-    <div class="card" id="spk-{{ s.id }}">
+    <div class="card" id="spk-{{ s.id }}" data-id="{{ s.id }}"
+         data-label="{{ s.display_label }}" data-segs="{{ s.segment_count }}">
       <div class="row">
         <strong>{{ s.display_label }}</strong>
-        <span class="meta">{{ s.segment_count }} segments · last {{ s.last_seen_at or "—" }}</span>
+        <span class="meta"><a href="/person/{{ s.id }}"
+            title="Read {{ s.display_label }}’s transcript lines — handy when clips have expired">{{ s.segment_count }} line{{ '' if s.segment_count == 1 else 's' }}</a>
+          {%- if s.last_seen_at %} · last heard <time data-ts="{{ s.last_seen_at }}">{{ s.last_seen_at }}</time>{% endif %}</span>
       </div>
-      <div class="clips" data-id="{{ s.id }}">
-        <button onclick="loadClips({{ s.id }})">▶ load sample clips</button>
+      <div class="clips">
+        <button type="button" class="clipsbtn"
+                aria-label="Hear sample clips of {{ s.display_label }}">▶ Hear this voice</button>
       </div>
-      <div class="row">
-        <input type="text" id="name-{{ s.id }}" placeholder="Name this person…" />
-        <button onclick="nameSpeaker({{ s.id }})">Save name</button>
-        <button onclick="markOwner({{ s.id }})">This is me</button>
-      </div>
+      <form class="row name-form" data-id="{{ s.id }}">
+        <label class="visually-hidden" for="name-{{ s.id }}">Name for {{ s.display_label }}</label>
+        <input type="text" class="name-input" id="name-{{ s.id }}" maxlength="120"
+               autocomplete="off" placeholder="Who is this? e.g. Sam" />
+        <button type="submit" class="btn-primary">Save name</button>
+        <button type="button" class="ownbtn"
+                aria-label="Mark {{ s.display_label }} as you">This is me</button>
+        {% if speakers|length > 1 %}
+          <button type="button" class="mergebtn"
+                  aria-label="Merge {{ s.display_label }} into another person">Same person as…</button>
+        {% endif %}
+        <button type="button" class="linklike dismissbtn"
+                aria-label="Ignore {{ s.display_label }} — not a person">Not a person</button>
+      </form>
     </div>
   {% endfor %}
 
-  <h2>Known voices</h2>
+  <h2>Known voices{% if known %} ({{ known|length }}){% endif %}</h2>
+  {% if not known %}
+    <div class="empty"><strong>{% if unknowns %}Nobody identified yet{% else %}No voices yet{% endif %}</strong>
+      {% if unknowns %}Name an unknown voice above and it moves down here.
+      {% else %}Voices appear after your first recorded conversation — the recorder listens for
+        who is speaking, not just what is said.{% endif %}</div>
+  {% endif %}
   {% for s in known %}
-    <div class="card">
-      <a href="/person/{{ s.id }}" class="{{ 'owner' if s.is_owner else '' }}">{{ s.name or s.display_label }}</a>
-      <span class="meta">· {{ s.kind }}{% if s.opted_out %} · opted-out{% endif %}
-        · {{ s.segment_count }} segments · <a href="/person/{{ s.id }}">dossier →</a></span>
+    {% set lbl = s.name or s.display_label or 'Speaker #' ~ s.id %}
+    <div class="card" id="known-{{ s.id }}" data-id="{{ s.id }}" data-label="{{ lbl }}"
+         data-name="{{ s.name or '' }}" data-segs="{{ s.segment_count }}"
+         {%- if s.is_owner %} data-owner="1"{% endif %}>
+      <div class="row">
+        <span class="who"><a href="/person/{{ s.id }}" class="{{ 'owner' if s.is_owner else '' }}"
+             title="Open {{ lbl }}’s dossier">{{ lbl }}</a></span>
+        {% if s.is_owner %}<span class="pill">you</span>{% endif %}
+        {% if s.opted_out %}<span class="pill" title="Opted out — their content is redacted">opted out</span>{% endif %}
+        <span class="grow"></span>
+        <span class="meta">{{ s.segment_count }} line{{ '' if s.segment_count == 1 else 's' }}
+          {%- if s.last_seen_at %} · last heard <time data-ts="{{ s.last_seen_at }}">{{ s.last_seen_at }}</time>{% endif %}</span>
+      </div>
+      <form class="row rename-form" data-id="{{ s.id }}" hidden>
+        <label class="visually-hidden" for="rn-{{ s.id }}">New name for {{ lbl }}</label>
+        <input type="text" class="name-input" id="rn-{{ s.id }}" maxlength="120"
+               autocomplete="off" value="{{ s.name or '' }}" />
+        <button type="submit" class="btn-primary">Save</button>
+        <button type="button" class="rename-cancel">Cancel</button>
+      </form>
+      <div class="row rowactions">
+        <button type="button" class="linklike renamebtn" aria-label="Rename {{ lbl }}">✎ Rename</button>
+        {% if not s.opted_out %}
+          <button type="button" class="linklike clipsbtn"
+                  aria-label="Hear sample clips of {{ lbl }}">▶ Hear voice</button>
+        {% endif %}
+        {% if not s.is_owner %}
+          {% if speakers|length > 1 %}
+            <button type="button" class="linklike mergebtn"
+                    aria-label="Merge {{ lbl }} into another person">Same person as…</button>
+          {% endif %}
+          <button type="button" class="linklike makeownerbtn"
+                  aria-label="Make {{ lbl }} the owner voice">Make owner</button>
+        {% endif %}
+      </div>
+      <div class="clips" hidden></div>
     </div>
   {% endfor %}
+
+  {% if ignored %}
+    <details id="ignored-voices" class="ignored-wrap">
+      <summary>Ignored voices ({{ ignored|length }})</summary>
+      <p class="meta">Dismissed as not-a-person — TVs, videos, one-off strangers. Their lines stay
+        in your transcripts, but they're never asked about or offered in pickers. Restore one if
+        it turns out to be a real person.</p>
+      {% for s in ignored %}
+        <div class="card" id="ign-{{ s.id }}" data-id="{{ s.id }}" data-label="{{ s.display_label }}"
+             data-segs="{{ s.segment_count }}">
+          <div class="row">
+            <span>{{ s.display_label }}</span>
+            <span class="meta"><a href="/person/{{ s.id }}"
+                title="Read {{ s.display_label }}’s transcript lines">{{ s.segment_count }} line{{ '' if s.segment_count == 1 else 's' }}</a>
+              {%- if s.last_seen_at %} · last heard <time data-ts="{{ s.last_seen_at }}">{{ s.last_seen_at }}</time>{% endif %}</span>
+            <span class="grow"></span>
+            <button type="button" class="linklike clipsbtn"
+                    aria-label="Hear sample clips of {{ s.display_label }}">▶ Hear voice</button>
+            <button type="button" class="linklike restorebtn"
+                    aria-label="Restore {{ s.display_label }} to the unknown queue">↩ Restore</button>
+          </div>
+          <div class="clips" hidden></div>
+        </div>
+      {% endfor %}
+    </details>
+  {% endif %}
+
+  {% if known or unknowns or ignored %}
+  {% set q = quality %}
+  <h2>Profile quality</h2>
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><b>{{ q.speakers }}</b>
+        <span class="meta">voice{{ '' if q.speakers == 1 else 's' }} tracked</span></div>
+      <div class="stat"><b>{{ q.exemplars }}</b>
+        <span class="meta">voice sample{{ '' if q.exemplars == 1 else 's' }} learned</span></div>
+      <div class="stat"><b>{{ q.locked_segments }}</b>
+        <span class="meta">line{{ '' if q.locked_segments == 1 else 's' }} you corrected</span></div>
+      <div class="stat"><b>{{ q.low_confidence_segments }}</b>
+        <span class="meta">uncertain line{{ '' if q.low_confidence_segments == 1 else 's' }}</span></div>
+    </div>
+    <p class="meta">
+      {% if q.attributed_segments == 0 %}
+        No transcript lines have a voice attached yet — attribution catches up shortly after each
+        conversation ends, and improves as you name people above.
+      {% elif q.low_confidence_segments == 0 %}
+        All {{ q.attributed_segments }} voice-attributed lines clear the {{ low_pct }}% confidence
+        bar — nothing needs your attention.
+      {% else %}
+        {{ q.low_confidence_segments }} of {{ q.attributed_segments }} voice-attributed lines sit
+        below the {{ low_pct }}% confidence bar. Naming voices above and re-running attribution
+        usually fixes them{% if q.locked_segments %} — your
+        {{ q.locked_segments }} manual correction{{ '' if q.locked_segments == 1 else 's' }}
+        {{ 'is' if q.locked_segments == 1 else 'are' }} never touched{% endif %}.
+      {% endif %}
+    </p>
+    <div class="row quality-actions">
+      <button type="button" id="reattr-btn" data-locked="{{ q.locked_segments }}">Re-run attribution</button>
+      <a class="pill" href="/day?review=1">Review uncertain lines →</a>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if speakers|length > 1 %}
+    <select id="merge-template" hidden tabindex="-1" aria-hidden="true">
+      <option value="">Same person as…</option>
+      {% for s in speakers %}
+        {% set lbl = s.name or s.display_label or 'Speaker #' ~ s.id %}
+        <option value="{{ s.id }}" data-label="{{ lbl }}" data-segs="{{ s.segment_count }}"
+                data-opted="{{ 1 if s.opted_out else 0 }}" data-named="{{ 1 if s.name else 0 }}">
+          {{ lbl }}{% if s.is_owner %} (you){% endif %} · {{ s.segment_count }} line{{ '' if s.segment_count == 1 else 's' }}</option>
+      {% endfor %}
+    </select>
+  {% endif %}
+
+  <p id="sr-status" class="visually-hidden" role="status" aria-live="polite"></p>
 
   <script>
-    async function loadClips(id) {
-      const box = document.querySelector(`.clips[data-id="${id}"]`);
-      const r = await fetch(`/api/speakers/${id}/samples`);
-      const data = await r.json();
-      if (!data.samples.length) { box.innerHTML = '<span class="meta">no clips available</span>'; return; }
-      box.innerHTML = data.samples.map(s =>
-        `<audio controls preload="none" src="/api/speakers/${id}/clip/${s.id}"></audio>`).join(' ');
-    }
-    async function nameSpeaker(id) {
-      const name = document.getElementById('name-' + id).value.trim();
-      if (!name) return;
-      await fetch(`/api/speakers/${id}/name`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name})
+    (function () {
+      'use strict';
+
+      var OWNER = {{ ({'id': owner.id, 'label': owner.name or owner.display_label or 'Me'} if owner else None) | tojson }};
+
+      function plural(n, word) { n = Number(n) || 0; return n + ' ' + word + (n === 1 ? '' : 's'); }
+      function announce(msg) {
+        var el = document.getElementById('sr-status');
+        if (el) el.textContent = msg;
+      }
+
+      // --- stored UTC timestamps → friendly local time -----------------------
+      function fmtWhen(iso) {
+        var d = new Date(iso);
+        if (isNaN(d)) return null;
+        var now = new Date();
+        var t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        var days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) -
+                               new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5);
+        if (days === 0) return 'today ' + t;
+        if (days === 1) return 'yesterday ' + t;
+        var opts = { day: 'numeric', month: 'short' };
+        if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+        return d.toLocaleDateString([], opts) + ', ' + t;
+      }
+      document.querySelectorAll('time[data-ts]').forEach(function (t) {
+        var pretty = fmtWhen(t.getAttribute('data-ts'));
+        if (!pretty) return;
+        t.textContent = pretty;
+        t.title = new Date(t.getAttribute('data-ts')).toLocaleString();
       });
-      document.getElementById('spk-' + id).remove();
-    }
-    async function markOwner(id) {
-      await fetch(`/api/speakers/${id}/owner`, {method: 'POST'});
-      document.getElementById('spk-' + id).remove();
-    }
+
+      // --- sample clips (expired audio degrades to an explanation) -----------
+      function fmtDur(s) {
+        s = Number(s);
+        if (!isFinite(s) || s <= 0) return null;
+        // "10s" for full-length clips, "2.2s"/"0.7s" so short ones are honest.
+        return (s >= 9.5 ? Math.round(s) : Math.round(s * 10) / 10) + 's';
+      }
+
+      function clipNote(i, text) {
+        var span = document.createElement('span');
+        span.className = 'meta';
+        span.textContent = 'Clip ' + i + ' — ' + text;
+        return span;
+      }
+
+      function expiredNote(i) {
+        return clipNote(i, 'audio expired (cleaned up by your retention policy)');
+      }
+
+      function clipRow(sample, i, id, label) {
+        var row = document.createElement('div');
+        row.className = 'cliprow';
+        var dur = fmtDur(sample.duration_s);
+        if (sample.audio_status === 'deleted') {
+          row.appendChild(expiredNote(i + 1));
+        } else {
+          var a = document.createElement('audio');
+          a.controls = true;
+          a.preload = 'none';
+          a.src = '/api/speakers/' + id + '/clip/' + sample.id;
+          a.setAttribute('aria-label', 'Sample clip ' + (i + 1) + ' of ' + label +
+                                       (dur ? ', ' + dur : ''));
+          a.addEventListener('error', function () {
+            if (!a.isConnected) return;
+            // The <audio> element hides the HTTP status, so re-ask the server
+            // whether this is retention (404/410) or a fixable install gap
+            // (503). GET, not HEAD: FastAPI GET routes 405 a HEAD probe.
+            fetch(a.src, { cache: 'no-store' })
+              .then(function (r) { return r.status; }, function () { return 0; })
+              .then(function (status) {
+                if (!a.isConnected) return;
+                if (status === 503) {
+                  a.replaceWith(clipNote(i + 1,
+                    'can’t play on this install: the audio add-on (soundfile) is missing'));
+                  announce('Clip ' + (i + 1) + ' for ' + label +
+                           ' can’t play: the audio add-on (soundfile) isn’t installed.');
+                } else {
+                  // The file vanished between listing and playing — explain.
+                  a.replaceWith(expiredNote(i + 1));
+                  announce('Clip ' + (i + 1) + ' for ' + label + ' is no longer available.');
+                }
+              });
+          });
+          row.appendChild(a);
+        }
+        var when = fmtWhen(sample.start_at);
+        var bits = [];
+        if (when) bits.push('heard ' + when);
+        if (dur) bits.push(dur);
+        if (bits.length) {
+          var m = document.createElement('span');
+          m.className = 'meta when';
+          m.textContent = bits.join(' · ');
+          row.appendChild(m);
+        }
+        return row;
+      }
+
+      async function loadClips(btn) {
+        var card = btn.closest('.card');
+        var box = card.querySelector('.clips');
+        var id = card.dataset.id, label = card.dataset.label;
+        // Remember where keyboard focus is BEFORE SB.api busy-disables the
+        // button (disabling drops focus to <body>): rendering removes the
+        // button, so focus must move into the results, not back to the top.
+        var hadFocus = document.activeElement === btn || box.contains(document.activeElement);
+        var data;
+        try {
+          data = await SB.api('/api/speakers/' + id + '/samples', { button: btn });
+        } catch (e) {
+          if (hadFocus && btn.isConnected) btn.focus(); // failed: keep their place
+          return; /* SB.api already toasted; button restored */
+        }
+        box.hidden = false;
+        box.textContent = '';
+        var samples = (data && data.samples) || [];
+        if (!samples.length) {
+          var none = document.createElement('span');
+          none.className = 'meta';
+          none.textContent = 'No voice clips for ' + label +
+            ' yet — samples are captured as they keep talking. ';
+          box.appendChild(none);
+          // Keep a retry affordance: clips often appear a few minutes after a
+          // conversation, and losing the button until a manual reload is rude.
+          var again = document.createElement('button');
+          again.type = 'button';
+          again.className = 'linklike clipsbtn';
+          again.textContent = '↻ Check again';
+          again.setAttribute('aria-label', 'Check again for voice clips of ' + label);
+          box.appendChild(again);
+          if (btn.isConnected && !box.contains(btn)) btn.remove();
+          if (hadFocus) again.focus();
+          announce('No clips available for ' + label + ' yet.');
+          return;
+        }
+        var playable = 0;
+        samples.forEach(function (s, i) {
+          box.appendChild(clipRow(s, i, id, label));
+          if (s.audio_status !== 'deleted') playable++;
+        });
+        if (!playable) {
+          // Every clip's audio expired — the transcript is the remaining way
+          // to work out who this voice is.
+          var read = document.createElement('div');
+          read.className = 'meta';
+          var a = document.createElement('a');
+          a.href = '/person/' + id;
+          a.textContent = 'Read their lines instead →';
+          read.appendChild(a);
+          box.appendChild(read);
+        }
+        if (btn.isConnected && !box.contains(btn)) btn.remove();
+        if (hadFocus) { box.tabIndex = -1; box.focus(); }
+        announce(playable
+          ? plural(playable, 'sample clip') + ' loaded for ' + label + '.'
+          : 'All sample audio for ' + label + ' has expired. A link to their transcript lines was added.');
+      }
+
+      // --- naming (unknown queue) + renaming (known rows) ---------------------
+      async function saveName(form, submitter) {
+        var id = form.dataset.id;
+        var input = form.querySelector('input');
+        var name = input.value.trim();
+        if (!name) { SB.toast('Type a name first.', 'error'); input.focus(); return; }
+        var renaming = form.classList.contains('rename-form');
+        try {
+          var res = await SB.api('/api/speakers/' + id + '/name',
+                                 { method: 'POST', body: { name: name }, button: submitter });
+          var msg = res && res.redacted_segments > 0
+            ? 'Saved — “' + name + '” is on your opt-out list, so ' +
+              plural(res.redacted_segments, 'line') + ' were redacted.'
+            : renaming
+              ? 'Renamed to “' + name + '”.'
+              : 'Saved — “' + name + '” will be recognised from now on.';
+          if (res && res.duplicate_of) {
+            msg += ' Heads-up: another voice is already named “' + res.duplicate_of.name +
+                   '” — if they’re the same person, use “Same person as…” to merge them.';
+          }
+          SB.reload(msg, 'success');
+        } catch (e) { input.focus(); }
+      }
+
+      function toggleRename(card, show) {
+        var form = card.querySelector('.rename-form');
+        var actions = card.querySelector('.rowactions');
+        if (!form) return;
+        form.hidden = !show;
+        if (actions) actions.hidden = show;
+        if (show) {
+          var input = form.querySelector('input');
+          input.focus();
+          input.select();
+        } else {
+          var btn = card.querySelector('.renamebtn');
+          if (btn) btn.focus();
+        }
+      }
+
+      // --- owner ---------------------------------------------------------------
+      async function markOwner(card, btn) {
+        var id = Number(card.dataset.id);
+        var label = card.dataset.label;
+        if (OWNER && OWNER.id !== id) {
+          // A second "me" voice is almost always the same person → merge is the fix.
+          var msg = 'You’re already set up as “' + OWNER.label + '”.\n\n' +
+            'If “' + label + '” is also your voice, merge it into “' + OWNER.label + '”: its ' +
+            plural(card.dataset.segs, 'line') + ' will be relabeled and the two voice profiles become one.\n\n' +
+            '(To replace the owner instead, cancel — name this voice, then use “Make owner” under Known voices.)';
+          if (!window.confirm(msg)) return;
+          try {
+            var res = await SB.api('/api/speakers/merge',
+                                   { method: 'POST', body: { src: id, dst: OWNER.id }, button: btn });
+            SB.reload('Merged into “' + OWNER.label + '” — ' +
+                      plural(res.relabeled_segments, 'line') + ' relabeled.' +
+                      (res.undo_available ? ' Undo is at the top of the page.' : ''), 'success');
+          } catch (e) { /* toasted */ }
+          return;
+        }
+        // First-time owner setup: give the voice a name too (defaults to "Me").
+        // One request: the server names + marks owner atomically, so a failure
+        // can never leave a named-but-not-owner half state.
+        var name = window.prompt('Marking “' + label + '” as you. What should this voice be called?', 'Me');
+        if (name === null) return;
+        name = name.trim() || 'Me';
+        try {
+          await SB.api('/api/speakers/' + id + '/owner',
+                       { method: 'POST', body: { name: name }, button: btn });
+          SB.reload('That’s you — “' + name + '” is now the owner voice.', 'success');
+        } catch (e) { /* toasted */ }
+      }
+
+      async function makeOwner(card, btn) {
+        var id = Number(card.dataset.id);
+        var label = card.dataset.label;
+        var msg = OWNER
+          ? 'Replace “' + OWNER.label + '” as the owner?\n\n“' + label + '” becomes the owner voice; “' +
+            OWNER.label + '” stays as a regular known voice.\n(If both are your voice, use “Same person as…” to merge them instead.)'
+          : 'Mark “' + label + '” as you? Their lines will count as the owner voice.';
+        if (!window.confirm(msg)) return;
+        try {
+          await SB.api('/api/speakers/' + id + '/owner', { method: 'POST', button: btn });
+          SB.reload('“' + label + '” is now the owner voice.', 'success');
+        } catch (e) { /* toasted */ }
+      }
+
+      // --- merging duplicates --------------------------------------------------
+      var mergeTmpl = document.getElementById('merge-template');
+
+      function openMerge(btn) {
+        var card = btn.closest('.card');
+        if (!mergeTmpl || !card) return;
+        var sel = mergeTmpl.cloneNode(true);
+        sel.hidden = false;
+        sel.className = 'merge-pick';
+        sel.removeAttribute('id');
+        sel.removeAttribute('aria-hidden');
+        sel.removeAttribute('tabindex');
+        var self = sel.querySelector('option[value="' + card.dataset.id + '"]');
+        if (self) self.remove();
+        if (sel.options.length <= 1) { SB.toast('No one else to merge with yet.', 'info'); return; }
+        sel.setAttribute('aria-label', 'Merge ' + card.dataset.label + ' into…');
+        btn.replaceWith(sel);
+        sel.focus();
+        try { if (typeof sel.showPicker === 'function') sel.showPicker(); } catch (err) { /* focus is enough */ }
+        var restored = false;
+        function restore(refocus) {
+          if (restored) return;
+          restored = true;
+          if (sel.parentNode) sel.replaceWith(btn);
+          if (refocus) btn.focus();
+        }
+        sel.addEventListener('change', function () { confirmMerge(sel, card, restore); });
+        sel.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') ev.preventDefault(); // don't submit an enclosing form
+          if (ev.key === 'Escape' && !sel.disabled) restore(true);
+        });
+        sel.addEventListener('blur', function () {
+          if (!sel.value && !sel.disabled) restore(false);
+        });
+      }
+
+      async function confirmMerge(sel, card, restore) {
+        var opt = sel.options[sel.selectedIndex];
+        if (!opt || !opt.value) return;
+        var srcLabel = card.dataset.label;
+        var dstLabel = opt.dataset.label;
+        var msg = 'Merge “' + srcLabel + '” into “' + dstLabel + '”?\n\n' +
+          '“' + dstLabel + '” (' + plural(opt.dataset.segs, 'line') + ') absorbs “' + srcLabel + '” (' +
+          plural(card.dataset.segs, 'line') + '): every line and voice sample is relabeled, and the ' +
+          'two voice profiles become one.';
+        var srcName = card.dataset.name || '';
+        if (srcName && opt.dataset.named === '0') {
+          // Named voice → unnamed target: reassure that the name survives the merge.
+          msg += '\n\n“' + dstLabel + '” has no name yet, so the merged voice keeps the name “' +
+                 srcName + '”.';
+        }
+        if (opt.dataset.opted === '1') {
+          msg += '\n\nNote: “' + dstLabel + '” is opted out — merged lines will be redacted, ' +
+                 'and that can’t be undone.';
+        } else {
+          msg += '\n\nChanged your mind afterwards? You can undo this merge for a few minutes.';
+        }
+        if (!window.confirm(msg)) { sel.value = ''; restore(true); return; }
+        sel.disabled = true;
+        try {
+          var res = await SB.api('/api/speakers/merge',
+            { method: 'POST', body: { src: Number(card.dataset.id), dst: Number(opt.value) } });
+          SB.reload('Merged “' + srcLabel + '” into “' + dstLabel + '” — ' +
+                    plural(res.relabeled_segments, 'line') + ' relabeled.' +
+                    (res.kept_name ? ' The voice keeps the name “' + res.kept_name + '”.' : '') +
+                    (res.undo_available ? ' Undo is at the top of the page.' : ''), 'success');
+        } catch (e) {
+          sel.disabled = false;
+          sel.value = '';
+          restore(true);
+        }
+      }
+
+      // --- dismiss / restore junk voices (TVs, one-off strangers) -------------
+      async function dismissVoice(card, btn) {
+        var label = card.dataset.label;
+        var msg = 'Ignore “' + label + '”?\n\n' +
+          'Good for TVs, videos, and one-off voices that aren’t worth naming. Its ' +
+          plural(card.dataset.segs, 'line') + ' stay in your transcripts, but SecondBrain ' +
+          'stops asking who this is.\n\nYou can bring it back any time from “Ignored voices”.';
+        if (!window.confirm(msg)) return;
+        try {
+          await SB.api('/api/speakers/' + card.dataset.id + '/dismiss',
+                       { method: 'POST', button: btn });
+          SB.reload('“' + label + '” ignored — it’s under “Ignored voices” if you change your mind.',
+                    'success');
+        } catch (e) { /* toasted */ }
+      }
+
+      async function restoreVoice(card, btn) {
+        try {
+          await SB.api('/api/speakers/' + card.dataset.id + '/restore',
+                       { method: 'POST', button: btn });
+          SB.reload('“' + card.dataset.label + '” is back in “Who is this?”.', 'success');
+        } catch (e) { /* toasted */ }
+      }
+
+      // Deep links into the collapsed ignored section (e.g. from a person page)
+      // must actually reveal the card they point at.
+      var ignoredWrap = document.getElementById('ignored-voices');
+      if (ignoredWrap && /^#(ign-\d+|ignored-voices)$/.test(location.hash)) {
+        ignoredWrap.open = true;
+        var hashTarget = document.getElementById(location.hash.slice(1));
+        if (hashTarget && hashTarget.scrollIntoView) hashTarget.scrollIntoView();
+      }
+
+      // --- undo the last merge (server keeps a short-lived snapshot) ----------
+      var undoBtn = document.getElementById('undo-merge-btn');
+      if (undoBtn) {
+        undoBtn.addEventListener('click', async function () {
+          try {
+            var res = await SB.api('/api/speakers/merge/undo',
+                                   { method: 'POST', button: undoBtn });
+            SB.reload('Merge undone — “' + res.src.label + '” is its own voice again (' +
+                      plural(res.restored_segments, 'line') + ' restored).', 'success');
+          } catch (e) {
+            // Window closed or state changed: re-render so the stale strip goes away.
+            if (e && (e.status === 404 || e.status === 409 || e.status === 410)) {
+              SB.reload(e.message, 'error');
+            }
+          }
+        });
+      }
+
+      // --- re-run attribution ----------------------------------------------------
+      var reattr = document.getElementById('reattr-btn');
+      if (reattr) {
+        reattr.addEventListener('click', async function () {
+          var locked = Number(reattr.dataset.locked) || 0;
+          var msg = 'Re-check uncertain lines against today’s voice profiles?\n\n' +
+            'Only unlocked lines below the confidence bar are reconsidered' +
+            (locked ? ' — it never touches the ' + plural(locked, 'line') + ' you corrected yourself' : '') +
+            '. This can take a moment on a large history.';
+          if (!window.confirm(msg)) return;
+          try {
+            var res = await SB.api('/api/speakers/reattribute', { method: 'POST', button: reattr });
+            var n = (res && res.relabeled) || 0;
+            if (n > 0) {
+              SB.reload(plural(n, 'line') + ' relabeled using the improved voice profiles.', 'success');
+            } else {
+              SB.toast('Checked every uncertain line — none could be confidently relabeled yet. Naming more voices helps.', 'info');
+              announce('Re-attribution finished: no lines relabeled.');
+            }
+          } catch (e) { /* toasted */ }
+        });
+      }
+
+      // Only one clip plays at a time: comparing voices means flipping between
+      // clips, not two people talking over each other. The 'play' event doesn't
+      // bubble, so listen in the capture phase.
+      document.addEventListener('play', function (e) {
+        var playing = e.target;
+        if (!playing || playing.tagName !== 'AUDIO') return;
+        document.querySelectorAll('audio').forEach(function (a) {
+          if (a !== playing && !a.paused) a.pause();
+        });
+      }, true);
+
+      // --- wiring ------------------------------------------------------------
+      document.addEventListener('click', function (e) {
+        if (!e.target || !e.target.closest) return;
+        var t;
+        if ((t = e.target.closest('.clipsbtn'))) loadClips(t);
+        else if ((t = e.target.closest('.ownbtn'))) markOwner(t.closest('.card'), t);
+        else if ((t = e.target.closest('.makeownerbtn'))) makeOwner(t.closest('.card'), t);
+        else if ((t = e.target.closest('.mergebtn'))) openMerge(t);
+        else if ((t = e.target.closest('.dismissbtn'))) dismissVoice(t.closest('.card'), t);
+        else if ((t = e.target.closest('.restorebtn'))) restoreVoice(t.closest('.card'), t);
+        else if ((t = e.target.closest('.renamebtn'))) toggleRename(t.closest('.card'), true);
+        else if ((t = e.target.closest('.rename-cancel'))) toggleRename(t.closest('.card'), false);
+      });
+
+      document.addEventListener('submit', function (e) {
+        var form = e.target;
+        if (!form.classList) return;
+        if (form.classList.contains('name-form') || form.classList.contains('rename-form')) {
+          e.preventDefault();
+          var submitter = e.submitter || form.querySelector('button[type="submit"]');
+          saveName(form, submitter);
+        }
+      });
+
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        var form = e.target && e.target.closest && e.target.closest('.rename-form');
+        if (form && !form.hidden) toggleRename(form.closest('.card'), false);
+      });
+    })();
   </script>
-</body>
-</html>
+{% endblock %}

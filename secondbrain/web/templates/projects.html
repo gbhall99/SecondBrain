@@ -1,23 +1,181 @@
 {% extends "base.html" %}
-{% block title %}SecondBrain — Projects{% endblock %}
+{% block title %}Projects · SecondBrain{% endblock %}
+{% block style %}
+    [hidden] { display: none !important; } /* flex containers must not defeat hidden */
+    /* Six columns need room; inside .table-wrap this scrolls instead of
+       squishing into a cramped grid at phone widths. */
+    .projects-table { min-width: 36rem; }
+    /* Room for real names before breaking; only truly long ones ever wrap. */
+    .projects-table td:first-child { min-width: 10rem; max-width: 18rem;
+                                     overflow-wrap: anywhere; }
+    .projects-table time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .zero { color: var(--muted); }
+    .controls { display: flex; align-items: center; flex-wrap: wrap;
+                gap: .5rem .9rem; margin: .9rem 0 .7rem; }
+    .controls input[type="search"] { flex: 1 1 10rem; min-width: 0; max-width: 15rem;
+                                     padding: .4rem .6rem; font-size: .92rem; }
+    #proj-count { margin-left: auto; }
+    td.num, th.h-num { text-align: right; }
+    td.num { font-variant-numeric: tabular-nums; }
+    th .sortbtn { background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+                  font: inherit; color: inherit; letter-spacing: inherit;
+                  text-transform: inherit; border-radius: 3px; }
+    th .sortbtn:hover { color: var(--fg); border: 0; }
+    th abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; }
+    th[aria-sort] .sortbtn { color: var(--fg); }
+    th .sortbtn::after { content: ""; display: inline-block; width: .75em; }
+    th[aria-sort="ascending"] .sortbtn::after { content: " ↑"; width: auto; }
+    th[aria-sort="descending"] .sortbtn::after { content: " ↓"; width: auto; }
+    .foot { margin-top: .55rem; }
+{% endblock %}
 {% block content %}
   <h1>Projects</h1>
-  <p class="meta">Projects from your knowledge graph, ranked by activity.</p>
-  {% if not projects %}<p class="meta">No projects extracted yet.</p>{% endif %}
-  {% if projects %}
-  <table>
-    <tr><th>Project</th><th>Conversations</th><th>Mentions</th><th>Goals</th>
-      <th>Open items</th><th>Last seen</th></tr>
+  <p class="meta">Projects picked out of your conversations by the knowledge graph,
+    ranked by activity — most talked-about first.</p>
+
+  {% if not projects %}
+    <div class="empty"><strong>No projects yet</strong>
+      Projects are picked out automatically as the local model processes your recorded
+      conversations — no setup needed. Once one is mentioned, it appears here with its
+      decisions, action items, and the people involved.<br>
+      See what's been captured so far on the <a href="/timeline">Timeline</a>.</div>
+  {% else %}
+
+  <div class="controls">
+    <label class="visually-hidden" for="proj-filter">Filter projects by name</label>
+    <input type="search" id="proj-filter" placeholder="Filter projects…" autocomplete="off" />
+    <span class="meta" id="proj-count" aria-live="polite">{{ projects | length }}
+      project{{ '' if projects | length == 1 else 's' }}</span>
+  </div>
+
+  <div class="table-wrap" id="proj-wrap">
+  <table class="projects-table" id="proj-table">
+    <caption class="visually-hidden">Projects ranked by activity, with conversation,
+      mention, goal and open action-item counts; use the column header buttons to
+      re-sort</caption>
+    <thead>
+      <tr>
+        <th scope="col"><button type="button" class="sortbtn" data-key="project"
+            data-type="text" title="Sort by name">Project</button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="conversations" data-type="num" title="Sort by conversations">
+            <abbr title="Distinct conversations where this project came up">Conversations</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="mentions" data-type="num" title="Sort by mentions">
+            <abbr title="Extracted facts, decisions and action items that touch this project">Mentions</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="goals" data-type="num" title="Sort by linked goals">
+            <abbr title="Goals linked to this project">Goals</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="open" data-type="num" title="Sort by open items">
+            <abbr title="Action items not yet done">Open items</abbr></button></th>
+        <th scope="col"><button type="button" class="sortbtn" data-key="seen"
+            data-type="date" title="Sort by last seen">Last seen</button></th>
+      </tr>
+    </thead>
+    <tbody>
     {% for p in projects %}
-    <tr>
-      <td><a href="/project/{{ p.node_id }}">{{ p.label }}</a></td>
-      <td>{{ p.conversations }}</td>
-      <td>{{ p.edges }}</td>
-      <td>{{ p.linked_goals }}</td>
-      <td>{{ p.open_action_items }}</td>
-      <td>{{ (p.last_seen or '')[:10] or '—' }}</td>
+    <tr data-search="{{ p.label | lower }}">
+      <td data-v="{{ p.label | lower }}"><a href="/project/{{ p.node_id }}"
+          title="Open the {{ p.label }} dossier">{{ p.label }}</a></td>
+      <td class="num{{ ' zero' if not p.conversations }}" data-v="{{ p.conversations }}">{{ p.conversations }}</td>
+      <td class="num{{ ' zero' if not p.edges }}" data-v="{{ p.edges }}">{{ p.edges }}</td>
+      <td class="num{{ ' zero' if not p.linked_goals }}" data-v="{{ p.linked_goals }}">{{ p.linked_goals }}</td>
+      <td class="num{{ ' zero' if not p.open_action_items }}" data-v="{{ p.open_action_items }}">{{ p.open_action_items }}</td>
+      <td class="num" data-v="{{ p.last_seen or '' }}">
+        {%- if p.last_seen -%}
+          <time datetime="{{ p.last_seen }}" title="{{ p.last_seen | localdt or p.last_seen }}">
+            {{- p.last_seen | relago or (p.last_seen | localdt) -}}</time>
+        {%- else %}<span class="zero" title="No dated mention yet">—</span>{% endif -%}
+      </td>
     </tr>
     {% endfor %}
+    </tbody>
   </table>
+  </div>
+
+  <div class="empty" id="proj-nomatch" hidden><strong>No project matches</strong>
+    Try a different name, or
+    <button type="button" class="linklike" id="proj-reset">show all projects</button>.</div>
+
+  <p class="meta foot">Every project links to a dossier: decisions, action items, facts,
+    people, and the conversations they came from. Click a column header to re-sort.</p>
+
+  <script>
+    (function () {
+      'use strict';
+      var table = document.getElementById('proj-table');
+      if (!table || !table.tBodies.length) return;
+      var tbody = table.tBodies[0];
+      var rows = Array.prototype.slice.call(tbody.rows);
+      var wrap = document.getElementById('proj-wrap');
+      var filter = document.getElementById('proj-filter');
+      var count = document.getElementById('proj-count');
+      var nomatch = document.getElementById('proj-nomatch');
+      var reset = document.getElementById('proj-reset');
+
+      function label(n) { return n + (n === 1 ? ' project' : ' projects'); }
+
+      function apply() {
+        var q = (filter && filter.value || '').trim().toLowerCase();
+        var shown = 0;
+        rows.forEach(function (tr) {
+          var ok = !q || (tr.getAttribute('data-search') || '').indexOf(q) !== -1;
+          tr.hidden = !ok;
+          if (ok) shown++;
+        });
+        if (count) {
+          count.textContent = (shown === rows.length)
+            ? label(shown)
+            : label(shown) + ' of ' + rows.length;
+        }
+        if (nomatch) nomatch.hidden = shown !== 0;
+        if (wrap) wrap.hidden = shown === 0;
+      }
+
+      if (filter) filter.addEventListener('input', apply);
+      if (reset) {
+        reset.addEventListener('click', function () {
+          if (filter) filter.value = '';
+          apply();
+          if (filter) filter.focus();
+        });
+      }
+
+      // --- column sorting (server order = activity rank) ---------------------
+      var current = { key: null, dir: 0 };
+
+      function cellValue(tr, idx, type) {
+        var td = tr.cells[idx];
+        var v = td ? td.getAttribute('data-v') : null;
+        if (v === null) v = td ? td.textContent : '';
+        if (type === 'num') { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
+        return v.trim().toLowerCase();
+      }
+
+      table.tHead.addEventListener('click', function (e) {
+        var btn = e.target.closest && e.target.closest('.sortbtn');
+        if (!btn) return;
+        var th = btn.closest('th');
+        var idx = th.cellIndex;
+        var type = btn.getAttribute('data-type');
+        var key = btn.getAttribute('data-key');
+        // Names sort A→Z first; counts and dates sort biggest/newest first.
+        var dir = (current.key === key) ? -current.dir : (type === 'text' ? 1 : -1);
+        current = { key: key, dir: dir };
+        rows.sort(function (a, b) {
+          var av = cellValue(a, idx, type), bv = cellValue(b, idx, type);
+          if (av < bv) return -dir;
+          if (av > bv) return dir;
+          return 0;
+        });
+        rows.forEach(function (tr) { tbody.appendChild(tr); });
+        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (h) {
+          h.removeAttribute('aria-sort');
+        });
+        th.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
+      });
+    })();
+  </script>
   {% endif %}
 {% endblock %}
