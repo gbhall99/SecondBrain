@@ -135,11 +135,34 @@ def test_prune_backups_keeps_newest(conn, settings):
         (backups_dir / n).write_bytes(b"x")
 
     removed = service.prune_backups(settings=settings, keep=2)
-    assert removed == 3
+    assert removed == 2  # pre-restore safety snapshots don't count against keep
     remaining = sorted(p.name for p in backups_dir.glob("secondbrain-*.db"))
     assert remaining == [
+        "secondbrain-20260103-000000.db",
         "secondbrain-20260104-000000.db",
         "secondbrain-20260105-000000-pre-restore.db",
+    ]
+
+
+def test_prune_backups_never_deletes_pre_restore_snapshots(conn, settings):
+    backups_dir = settings.data_path / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    # the pre-restore safety snapshot is the OLDEST — it must still survive
+    names = [
+        "secondbrain-20260101-000000-pre-restore.db",
+        "secondbrain-20260102-000000.db",
+        "secondbrain-20260103-000000.db",
+        "secondbrain-20260104-000000.db",
+    ]
+    for n in names:
+        (backups_dir / n).write_bytes(b"x")
+
+    removed = service.prune_backups(settings=settings, keep=1)
+    assert removed == 2
+    remaining = sorted(p.name for p in backups_dir.glob("secondbrain-*.db"))
+    assert remaining == [
+        "secondbrain-20260101-000000-pre-restore.db",
+        "secondbrain-20260104-000000.db",
     ]
 
 
@@ -265,6 +288,42 @@ def test_encrypted_backup_restore_round_trip(tmp_path):
     c2 = init_db(settings=s)
     assert c2.execute("SELECT COUNT(*) FROM speakers").fetchone()[0] == 1
     c2.close()
+
+
+def test_backup_database_verifies_snapshot(conn, settings, tmp_path):
+    _seed(conn)
+    out = backup.backup_database(settings=settings, dest=tmp_path / "verified.db")
+    assert out.exists()  # a passing quick_check leaves the snapshot in place
+
+
+def test_verify_snapshot_rejects_garbage(settings, tmp_path):
+    bogus = tmp_path / "garbage.db"
+    bogus.write_bytes(b"this is not a sqlite database at all" * 100)
+    with pytest.raises(backup.BackupError):
+        backup._verify_snapshot(bogus, settings)
+
+
+def test_backup_failing_verification_is_removed(conn, settings, tmp_path, monkeypatch):
+    _seed(conn)
+    dest = tmp_path / "corrupt.db"
+
+    def boom(path, s):
+        raise backup.BackupError("snapshot failed integrity check: malformed")
+
+    monkeypatch.setattr(backup, "_verify_snapshot", boom)
+    with pytest.raises(backup.BackupError):
+        backup.backup_database(settings=settings, dest=dest)
+    assert not dest.exists()  # a corrupt snapshot is never left in place
+
+
+def test_restore_is_atomic_no_temp_left_behind(conn, settings, tmp_path):
+    _seed(conn)
+    snap = service.backup_database(settings=settings, dest=tmp_path / "snap.db")
+    conn.close()
+    restored = service.restore_database(settings=settings, src=snap)
+    assert restored == settings.db_path and settings.db_path.exists()
+    leftovers = list(settings.db_path.parent.glob("*.restore-tmp*"))
+    assert leftovers == []
 
 
 def test_restore_replaces_live_db_and_backs_up_current(conn, settings, tmp_path):

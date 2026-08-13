@@ -185,6 +185,92 @@ def test_sweep_removes_derived_segment_clips(conn, settings, tmp_path):
     assert kept_clip.exists()       # live source -> cache stays valid
 
 
+def test_sweep_expires_failed_chunks_past_grace(conn, settings, tmp_path):
+    """Dead-lettered ('failed') chunks must not keep raw audio forever."""
+    settings.consent.raw_audio_retention_hours = 168
+    audio = tmp_path / "failed-old.flac"
+    audio.write_bytes(b"\x00")
+    af_id = models.insert_audio_file(
+        conn,
+        AudioFile(path=str(audio), started_at="2000-01-01T00:00:00.000Z",
+                  sample_rate=16000, status="failed"),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 1
+    assert not audio.exists()
+    assert models.get_audio_file(conn, af_id)["status"] == "deleted"
+
+
+def test_sweep_keeps_recent_failed_chunks(conn, settings, tmp_path):
+    """A recently-failed chunk keeps its audio (retries may still succeed)."""
+    settings.consent.raw_audio_retention_hours = 168
+    audio = tmp_path / "failed-new.flac"
+    audio.write_bytes(b"\x00")
+    models.insert_audio_file(
+        conn,
+        AudioFile(path=str(audio), started_at=models.utcnow_iso(),
+                  sample_rate=16000, status="failed"),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 0
+    assert audio.exists()
+
+
+def test_sweep_expires_stuck_recorded_chunks_after_generous_grace(conn, settings, tmp_path):
+    settings.consent.raw_audio_retention_hours = 0  # aggressive retention…
+    old = tmp_path / "recorded-old.flac"
+    old.write_bytes(b"\x00")
+    af_old = models.insert_audio_file(
+        conn,
+        AudioFile(path=str(old), started_at="2000-01-01T00:00:00.000Z",
+                  sample_rate=16000, status="recorded"),
+    )
+    fresh = tmp_path / "recorded-new.flac"
+    fresh.write_bytes(b"\x00")
+    models.insert_audio_file(
+        conn,
+        AudioFile(path=str(fresh), started_at=models.utcnow_iso(),
+                  sample_rate=16000, status="recorded"),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 1
+    assert not old.exists()                          # dead-lettered years ago → swept
+    assert fresh.exists()                            # …but a backlog is never raced
+    assert models.get_audio_file(conn, af_old)["status"] == "deleted"
+
+
+def test_sweep_keeps_failed_chunks_when_retention_forever(conn, settings, tmp_path):
+    settings.consent.raw_audio_retention_hours = -1
+    audio = tmp_path / "failed-keep.flac"
+    audio.write_bytes(b"\x00")
+    models.insert_audio_file(
+        conn,
+        AudioFile(path=str(audio), started_at="2000-01-01T00:00:00.000Z",
+                  sample_rate=16000, status="failed"),
+    )
+    assert retention.sweep_expired_audio(conn, settings) == 0
+    assert audio.exists()
+
+
+def test_sweep_removes_stale_diarization_scratch_files(conn, settings, tmp_path):
+    import os
+    import time
+
+    clip_dir = settings.audio_processed_dir
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    stale_legacy = clip_dir / "conv_concat.wav"
+    stale_legacy.write_bytes(b"RIFF")
+    stale_unique = clip_dir / "conv_concat_1234.wav"
+    stale_unique.write_bytes(b"RIFF")
+    old = time.time() - 2 * 24 * 3600
+    os.utime(stale_legacy, (old, old))
+    os.utime(stale_unique, (old, old))
+    fresh = clip_dir / "conv_concat_5678.wav"  # may belong to a running diarization
+    fresh.write_bytes(b"RIFF")
+
+    retention.sweep_expired_audio(conn, settings)
+    assert not stale_legacy.exists()
+    assert not stale_unique.exists()
+    assert fresh.exists()
+
+
 def test_sweep_keeps_unexpired_audio(conn, settings, tmp_path):
     audio = tmp_path / "fresh.flac"
     audio.write_bytes(b"\x00")

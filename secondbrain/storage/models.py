@@ -42,6 +42,8 @@ class AudioFile:
     has_speech: bool | None = None
     status: str = "recorded"
     retention_delete_after: str | None = None
+    rms_level: float | None = None
+    overflow_count: int | None = None
     id: int | None = None
 
 
@@ -79,8 +81,8 @@ def insert_audio_file(conn: sqlite3.Connection, af: AudioFile) -> int:
         """
         INSERT INTO audio_files
             (path, started_at, ended_at, sample_rate, channels, duration_s,
-             has_speech, status, retention_delete_after)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             has_speech, status, retention_delete_after, rms_level, overflow_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             af.path,
@@ -92,6 +94,8 @@ def insert_audio_file(conn: sqlite3.Connection, af: AudioFile) -> int:
             None if af.has_speech is None else int(af.has_speech),
             af.status,
             af.retention_delete_after,
+            af.rms_level,
+            af.overflow_count,
         ),
     )
     af.id = int(cur.lastrowid)

@@ -58,6 +58,9 @@ class TranscriptionConfig(BaseModel):
     whisper_model: str = "mlx-community/whisper-large-v3-turbo"
     parakeet_model: str = "mlx-community/parakeet-tdt-0.6b-v2"
     language: str = ""
+    # Skip transcription when VAD found less total speech than this (seconds).
+    # 0.0 keeps the historical behavior (any speech at all is transcribed).
+    min_speech_seconds: float = 0.0
 
     @field_validator("backend")
     @classmethod
@@ -149,6 +152,12 @@ class SecurityConfig(BaseModel):
     # a passphrase; put the passphrase in config.local.toml or SB_SECURITY__DB_PASSPHRASE).
     encrypt_db: bool = False
     db_passphrase: str = ""
+
+
+class BackupConfig(BaseModel):
+    # Automatic daily DB snapshots from the daemon's maintenance loop.
+    auto_enabled: bool = True
+    keep: int = 7          # prune to the newest N snapshots after each auto backup
 
 
 class LoggingConfig(BaseModel):
@@ -281,6 +290,7 @@ class Settings(BaseSettings):
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)

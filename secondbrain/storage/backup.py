@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,8 +23,39 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
 
+class BackupError(Exception):
+    """Raised when a snapshot fails post-write verification."""
+
+
+def _verify_snapshot(path: Path, settings: Settings) -> None:
+    """Run SQLite's integrity checks on a freshly-written snapshot.
+
+    ``quick_check`` covers page/btree corruption at a fraction of the cost of a
+    full ``integrity_check``; a backup of an already-corrupt live DB (or a
+    truncated write) fails here instead of being discovered at restore time.
+    Raises :class:`BackupError` on any problem.
+    """
+    try:
+        c = connect(path, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - unreadable snapshot is a failed backup
+        raise BackupError(f"snapshot unreadable: {exc}") from exc
+    try:
+        res = c.execute("PRAGMA quick_check").fetchone()[0]
+    except Exception as exc:  # noqa: BLE001
+        raise BackupError(f"snapshot verification failed: {exc}") from exc
+    finally:
+        c.close()
+    if res != "ok":
+        raise BackupError(f"snapshot failed integrity check: {res}")
+
+
 def backup_database(settings: Settings | None = None, dest: Path | None = None) -> Path:
-    """Write a consistent snapshot of the database to ``dest``. Returns the path."""
+    """Write a consistent snapshot of the database to ``dest``. Returns the path.
+
+    The snapshot is verified (PRAGMA quick_check) after writing; on failure it
+    is removed and :class:`BackupError` is raised, so a corrupt snapshot is
+    never left in place masquerading as a good backup.
+    """
     settings = settings or get_settings()
     dest = Path(dest) if dest else settings.data_path / "backups" / f"secondbrain-{_stamp()}.db"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -36,8 +68,16 @@ def backup_database(settings: Settings | None = None, dest: Path | None = None) 
             src.backup(out)
         finally:
             out.close()
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
     finally:
         src.close()
+    try:
+        _verify_snapshot(dest, settings)
+    except BackupError:
+        dest.unlink(missing_ok=True)
+        raise
     return dest
 
 
@@ -64,9 +104,10 @@ def list_backups(settings: Settings | None = None) -> list[dict]:
 def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
     """Keep the newest ``keep`` backup snapshots; delete older ones. Returns count removed.
 
-    Operates on ``<data>/backups/secondbrain-*.db`` (both regular and
-    pre-restore snapshots), newest by filename timestamp. ``keep <= 0`` is a
-    no-op guard so an accidental 0 never wipes every backup.
+    Operates on ``<data>/backups/secondbrain-*.db``, newest by filename
+    timestamp. ``*-pre-restore.db`` safety snapshots (taken automatically before
+    a restore) are never deleted. ``keep <= 0`` is a no-op guard so an
+    accidental 0 never wipes every backup.
     """
     settings = settings or get_settings()
     if keep <= 0:
@@ -74,7 +115,11 @@ def prune_backups(settings: Settings | None = None, keep: int = 10) -> int:
     backups_dir = settings.data_path / "backups"
     if not backups_dir.is_dir():
         return 0
-    snaps = sorted(backups_dir.glob("secondbrain-*.db"), reverse=True)
+    snaps = sorted(
+        (p for p in backups_dir.glob("secondbrain-*.db")
+         if not p.name.endswith("-pre-restore.db")),
+        reverse=True,
+    )
     removed = 0
     for old in snaps[keep:]:
         try:
@@ -134,23 +179,31 @@ def restore_database(
             dest=db_path.parent / "backups" / f"secondbrain-{_stamp()}-pre-restore.db",
         )
 
-    # Remove the live DB and its WAL sidecars, then write a clean single-file
-    # copy from the snapshot via the online backup API.
-    for suffix in ("", "-wal", "-shm"):
-        p = Path(str(db_path) + suffix)
-        p.unlink(missing_ok=True)
+    # Atomic replacement: write a clean single-file copy of the snapshot into a
+    # temp file NEXT TO the live DB (same filesystem), then os.replace() it into
+    # place — a crash mid-restore never leaves a missing/half-written live DB.
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = db_path.parent / (db_path.name + ".restore-tmp")
+    for suffix in ("", "-wal", "-shm"):  # clear leftovers from a crashed restore
+        Path(str(tmp) + suffix).unlink(missing_ok=True)
     # Both sides via the configured driver + key, so an encrypted snapshot restores
     # to an encrypted live DB (and never writes an unreadable plaintext file).
     source = connect(src, settings=settings)
     try:
-        out = connect(db_path, settings=settings)
+        out = connect(tmp, settings=settings)
         try:
             source.backup(out)
         finally:
             out.close()
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     finally:
         source.close()
+    # Drop stale WAL sidecars (they belong to the old DB) before swapping in.
+    for suffix in ("-wal", "-shm"):
+        Path(str(db_path) + suffix).unlink(missing_ok=True)
+    os.replace(tmp, db_path)
     return db_path
 
 

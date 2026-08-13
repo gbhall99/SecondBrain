@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0007_perf_indexes"
+SCHEMA_VERSION = "0008_reliability"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -35,7 +35,7 @@ STATEMENTS: list[str] = [
         duration_s           REAL,
         has_speech           INTEGER,                  -- VAD result: 0/1/NULL(unknown)
         status               TEXT NOT NULL DEFAULT 'recorded',
-                             -- recorded | transcribing | transcribed | failed | deleted
+                             -- recorded | transcribing | transcribed | failed | missing | deleted
         retention_delete_after TEXT,                   -- raw-audio auto-delete deadline
         created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
@@ -450,6 +450,23 @@ STATEMENTS_0007_CREATE: list[str] = [
 ]
 
 
+# --- Phase 10: pipeline reliability (migration 0008) ---------------------------
+# Capture/queue observability columns + a job-pruning index. All additive.
+STATEMENTS_0008_CREATE: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_jobs_state_finished ON jobs(state, finished_at)",
+]
+
+COLUMNS_0008: list[tuple[str, str, str]] = [
+    ("audio_files", "speech_seconds", "REAL"),   # VAD speech total for the chunk
+    ("audio_files", "rms_level", "REAL"),        # per-chunk RMS (dead-mic detection)
+    ("audio_files", "overflow_count", "INTEGER"),  # input-stream overflows while recording
+]
+
+ALTERS_0008: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0008
+]
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
@@ -510,6 +527,14 @@ def apply_phase9_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase10_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0008 additions idempotently (columns + jobs index)."""
+    for table, column, ddl in COLUMNS_0008:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0008_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -525,6 +550,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase6_schema(conn)
     apply_phase7_schema(conn)
     apply_phase9_schema(conn)
+    apply_phase10_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

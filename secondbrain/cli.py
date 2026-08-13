@@ -162,12 +162,20 @@ def project(node_id: int = typer.Argument(..., help="Project kg node id.")) -> N
 @app.command()
 def queue(
     reclaim: bool = typer.Option(False, help="Re-queue jobs stuck in 'running'."),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-queue dead-lettered ('failed') jobs for a fresh run."
+    ),
 ) -> None:
     """Show job-queue counts and recent failures (optionally reclaim stuck jobs)."""
+    from secondbrain.pipeline import queue as q
+
     with db_session(settings=get_settings()) as conn:
         if reclaim:
             n = service.reclaim_stale_jobs(conn)
             typer.echo(f"Reclaimed {n} stuck job(s).")
+        if retry_failed:
+            n = q.requeue_failed(conn)
+            typer.echo(f"Re-queued {n} failed job(s).")
         typer.echo(json.dumps(service.queue_overview(conn), indent=2))
 
 
@@ -778,14 +786,28 @@ def doctor(
                 if a.fixed:
                     typer.echo(f"  fixed {a.name}: {a.detail}")
         checks = health.run_checks(conn, settings)
-    failed = 0
+    errors = 0
+    warnings = 0
     for c in checks:
-        mark = "✓" if c.ok else "✗"
-        if not c.ok:
-            failed += 1
+        if c.ok:
+            mark = "✓"
+        elif c.severity == "warn":
+            warnings += 1
+            mark = "!"
+        else:
+            errors += 1
+            mark = "✗"
         typer.echo(f"  {mark} {c.name}: {c.detail}")
-    typer.echo(f"\n{'All checks passed.' if not failed else f'{failed} check(s) failed.'}")
-    if failed:
+    if not errors and not warnings:
+        typer.echo("\nAll checks passed.")
+    else:
+        parts = []
+        if errors:
+            parts.append(f"{errors} check(s) failed")
+        if warnings:
+            parts.append(f"{warnings} warning(s)")
+        typer.echo("\n" + ", ".join(parts) + ".")
+    if errors:
         raise typer.Exit(1)
 
 

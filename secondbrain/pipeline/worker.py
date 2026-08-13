@@ -23,7 +23,7 @@ from secondbrain.pipeline.vad import Vad, get_vad
 from secondbrain.proactive import engine
 from secondbrain.search import semantic
 from secondbrain.speaker import attribution
-from secondbrain.storage import models, retention
+from secondbrain.storage import db, models, retention
 
 log = logging.getLogger("secondbrain.worker")
 
@@ -31,12 +31,17 @@ JOB_TRANSCRIBE = "transcribe"
 JOB_CLUSTER = "cluster_speakers"
 JOB_REATTRIBUTE = "reattribute_speakers"
 
+# Transcribe jobs outrank the heavy batch jobs (diarize/extract/cluster, all
+# priority 0) so one slow diarization can't starve live transcription.
+TRANSCRIBE_PRIORITY = 10
+
 
 def enqueue_transcription(conn: sqlite3.Connection, audio_file_id: int) -> int | None:
     return q.enqueue(
         conn,
         JOB_TRANSCRIBE,
         {"audio_file_id": audio_file_id},
+        priority=TRANSCRIBE_PRIORITY,
         dedupe_key="audio_file_id",
     )
 
@@ -59,31 +64,63 @@ def process_audio_file(
     row = models.get_audio_file(conn, audio_file_id)
     if row is None:
         return 0
+
+    # Idempotency: a transcript row means a previous attempt already committed
+    # (e.g. the worker crashed after the transaction but before job completion).
+    # Re-running would duplicate every segment — treat as success instead.
+    prior = conn.execute(
+        "SELECT id FROM transcripts WHERE audio_file_id=? LIMIT 1", (audio_file_id,)
+    ).fetchone()
+    if prior is not None:
+        log.info("audio_file %s already transcribed; skipping duplicate work", audio_file_id)
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM transcript_segments WHERE transcript_id=?",
+            (prior["id"],),
+        ).fetchone()["n"]
+
     audio_path = Path(row["path"])
     delete_after = retention.compute_delete_after(settings)
 
-    # 1. VAD gate — never transcribe (or keep) silence.
-    if settings.vad.enabled and audio_path.exists():
-        vres = vad.detect(audio_path)
-        if not vres.has_speech:
+    # 0. A vanished file (deleted/moved out-of-band) would only make the backend
+    #    raise an opaque error into retries — mark the chunk cleanly instead.
+    if not audio_path.exists():
+        log.warning("audio file %s missing at %s; marking chunk 'missing'",
+                    audio_file_id, audio_path)
+        models.set_audio_status(conn, audio_file_id, "missing")
+        return 0
+
+    # 1. VAD gate — never transcribe (or keep) silence. A VAD failure must not
+    #    fail the chunk: fall through to transcription instead.
+    if settings.vad.enabled:
+        vres = None
+        try:
+            vres = vad.detect(audio_path)
+        except Exception:  # noqa: BLE001 - VAD is an optimization, not a gate on correctness
+            log.warning("VAD failed for audio_file %s; transcribing anyway",
+                        audio_file_id, exc_info=True)
+        if vres is not None:
+            speech_s = vres.speech_seconds
             conn.execute(
-                "UPDATE audio_files SET has_speech=0, status='transcribed', "
-                "retention_delete_after=? WHERE id=?",
-                (delete_after, audio_file_id),
+                "UPDATE audio_files SET speech_seconds=? WHERE id=?",
+                (speech_s, audio_file_id),
             )
-            return 0
+            if not vres.has_speech or speech_s < settings.transcription.min_speech_seconds:
+                conn.execute(
+                    "UPDATE audio_files SET has_speech=0, status='transcribed', "
+                    "retention_delete_after=? WHERE id=?",
+                    (delete_after, audio_file_id),
+                )
+                return 0
 
     # 2. Transcribe.
     models.set_audio_status(conn, audio_file_id, "transcribing")
     result = transcriber.transcribe(audio_path, language=settings.transcription.language or None)
-    transcript_id = models.insert_transcript(
-        conn, audio_file_id, result.backend, result.model, result.language
-    )
 
-    # 3. Persist segments with absolute timestamps + provenance.
+    # 3. Persist transcript + segments + status atomically, so a crash mid-write
+    #    can never leave a transcript without its segments (or vice versa).
     segs = [
         models.Segment(
-            transcript_id=transcript_id,
+            transcript_id=0,  # patched below once the transcript row exists
             audio_file_id=audio_file_id,
             start_offset_s=s.start_offset_s,
             end_offset_s=s.end_offset_s,
@@ -94,18 +131,23 @@ def process_audio_file(
         for s in result.segments
         if s.text.strip()
     ]
-    if segs:
-        models.insert_segments(conn, segs)
-
     # 4. Mark transcribed. When diarization is enabled, DEFER the retention
     #    deadline (NULL) so the raw audio survives until the chunk's conversation
     #    is diarized; attribution sets the deadline afterward.
     deferred = None if settings.diarization.enabled else delete_after
-    conn.execute(
-        "UPDATE audio_files SET has_speech=1, status='transcribed', "
-        "retention_delete_after=? WHERE id=?",
-        (deferred, audio_file_id),
-    )
+    with db.transaction(conn):
+        transcript_id = models.insert_transcript(
+            conn, audio_file_id, result.backend, result.model, result.language
+        )
+        for s in segs:
+            s.transcript_id = transcript_id
+        if segs:
+            models.insert_segments(conn, segs)
+        conn.execute(
+            "UPDATE audio_files SET has_speech=1, status='transcribed', "
+            "retention_delete_after=? WHERE id=?",
+            (deferred, audio_file_id),
+        )
 
     # 4b. Group the chunk into a conversation (diarized as a whole later).
     if settings.diarization.enabled:
@@ -185,6 +227,9 @@ def run_once(
             raise ValueError(f"unknown job type {job.type!r}")
         q.complete(conn, job.id)
     except Exception as exc:  # noqa: BLE001 - record and let queue retry
+        # Full traceback to the log — the DB failure record only keeps repr(exc).
+        log.exception("job %s (%s, attempt %d/%d) failed",
+                      job.id, job.type, job.attempts, job.max_attempts)
         if job.type == JOB_TRANSCRIBE:
             models.set_audio_status(conn, int(job.payload.get("audio_file_id", 0)), "failed")
         elif job.type == conversation.JOB_DIARIZE:

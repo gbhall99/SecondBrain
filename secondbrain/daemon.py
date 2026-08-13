@@ -3,7 +3,10 @@
 Runs three cooperating loops, each with its own SQLite connection:
   1. capture  — the rolling recorder (room audio -> FLAC chunks -> queue)
   2. worker   — drains transcription jobs (VAD -> transcribe -> store -> index)
-  3. maintenance — periodic raw-audio retention sweep
+  3. maintenance — periodic raw-audio retention sweep, daily backup, job hygiene
+
+A watchdog in ``run_forever`` restarts any loop whose thread dies (with a
+growing backoff), so one crashed loop can't silently disable the daemon.
 
 The local web API is run separately via ``sb serve`` (or its own launchd job) so
 capture keeps running even if the UI is restarted.
@@ -15,6 +18,7 @@ import logging
 import signal
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from secondbrain.capture.recorder import Recorder
@@ -29,13 +33,24 @@ log = logging.getLogger("secondbrain.daemon")
 
 WORKER_IDLE_SLEEP = 2.0
 RETENTION_INTERVAL_S = 3600
+# Maintenance ticks on a short cadence so conversation-stale-closing (and the
+# heartbeat) stay fresh; the heavy sweeps only run once per RETENTION_INTERVAL_S.
+MAINTENANCE_TICK_S = 60.0
+DONE_JOB_KEEP_DAYS = 30
+BACKUP_RUN_KEY = "backup:last_run"
+# Watchdog: restart a dead loop after a growing delay (never gives up).
+RESTART_BACKOFF_S = 5.0
+RESTART_BACKOFF_MAX_S = 300.0
 
 
 class Daemon:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
+        self._loops: dict[str, Callable[[], None]] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._restart_delay: dict[str, float] = {}
+        self._next_restart_at: dict[str, float] = {}
         self._recorder: Recorder | None = None
 
     # --- loops ---------------------------------------------------------------
@@ -67,25 +82,68 @@ class Daemon:
 
     def _maintenance_loop(self) -> None:
         conn = init_db(settings=self.settings)
+        next_hourly = 0.0  # run the hourly block immediately on startup
         try:
             while not self._stop.is_set():
                 state.set_state(conn, "heartbeat:maintenance", utcnow_iso())
-                try:
-                    n = retention.sweep_expired_audio(conn, self.settings)
-                    if n:
-                        log.info("retention: deleted %d expired raw-audio files", n)
-                    reclaimed = q.reclaim_stale(conn)
-                    if reclaimed:
-                        log.warning("reclaimed %d stale 'running' job(s)", reclaimed)
-                except Exception:  # noqa: BLE001
-                    log.exception("retention/reclaim failed")
+                # Short cadence (~60s): close idle conversations promptly so
+                # their diarization doesn't wait for the next hourly sweep.
                 if self.settings.diarization.enabled:
-                    self._diarization_maintenance(conn)
-                if self.settings.proactive.enabled:
-                    self._proactive_maintenance(conn)
-                self._stop.wait(RETENTION_INTERVAL_S)
+                    self._conversation_maintenance(conn)
+                if time.monotonic() >= next_hourly:
+                    next_hourly = time.monotonic() + RETENTION_INTERVAL_S
+                    self._hourly_maintenance(conn)
+                self._stop.wait(MAINTENANCE_TICK_S)
         finally:
             conn.close()
+
+    def _conversation_maintenance(self, conn) -> None:
+        """Close idle conversations for diarization (runs every maintenance tick)."""
+        from secondbrain.pipeline import conversation
+
+        try:
+            closed = conversation.close_stale_conversations(conn, self.settings)
+            if closed:
+                log.info("closed %d idle conversation(s) for diarization", closed)
+        except Exception:  # noqa: BLE001
+            log.exception("conversation close failed")
+
+    def _hourly_maintenance(self, conn) -> None:
+        """The heavy periodic work: sweeps, job hygiene, daily jobs, backup."""
+        try:
+            n = retention.sweep_expired_audio(conn, self.settings)
+            if n:
+                log.info("retention: deleted %d expired raw-audio files", n)
+            reclaimed = q.reclaim_stale(conn)
+            if reclaimed:
+                log.warning("reclaimed %d stale 'running' job(s)", reclaimed)
+            pruned = q.prune_done_jobs(conn, keep_days=DONE_JOB_KEEP_DAYS)
+            if pruned:
+                log.info("pruned %d completed job row(s)", pruned)
+        except Exception:  # noqa: BLE001
+            log.exception("retention/reclaim failed")
+        if self.settings.diarization.enabled:
+            self._diarization_maintenance(conn)
+        if self.settings.proactive.enabled:
+            self._proactive_maintenance(conn)
+        if self.settings.backup.auto_enabled:
+            self._backup_maintenance(conn)
+
+    def _backup_maintenance(self, conn) -> None:
+        """Daily DB snapshot + prune, date-gated so it runs once per day."""
+        from secondbrain.storage import backup
+
+        today = utcnow_iso()[:10]
+        last = (state.get_state(conn, BACKUP_RUN_KEY) or "")[:10]
+        if last == today:
+            return
+        try:
+            path = backup.backup_database(settings=self.settings)
+            backup.prune_backups(settings=self.settings, keep=self.settings.backup.keep)
+            state.set_state(conn, BACKUP_RUN_KEY, utcnow_iso())
+            log.info("daily backup written to %s", path)
+        except Exception:  # noqa: BLE001
+            log.exception("scheduled backup failed")
 
     def _proactive_maintenance(self, conn) -> None:
         """Enqueue the daily morning brief and the weekly review when due."""
@@ -106,16 +164,14 @@ class Daemon:
             log.exception("proactive enqueue failed")
 
     def _diarization_maintenance(self, conn) -> None:
-        """Close idle conversations for diarization; enqueue clustering daily."""
-        from secondbrain.pipeline import conversation, worker
+        """Enqueue the daily clustering/reattribution + extraction catch-up.
+
+        (Idle-conversation closing runs on the faster maintenance tick via
+        :meth:`_conversation_maintenance`.)
+        """
+        from secondbrain.pipeline import worker
         from secondbrain.speaker import cluster
 
-        try:
-            closed = conversation.close_stale_conversations(conn, self.settings)
-            if closed:
-                log.info("closed %d idle conversation(s) for diarization", closed)
-        except Exception:  # noqa: BLE001
-            log.exception("conversation close failed")
         try:
             today = utcnow_iso()[:10]
             last = (state.get_state(conn, cluster.LAST_RUN_KEY) or "")[:10]
@@ -166,11 +222,35 @@ class Daemon:
                         log.warning("self-heal: %s — %s", a.name, a.detail)
         except Exception:  # noqa: BLE001 - repair is best-effort; never block startup
             log.warning("self-heal step failed", exc_info=True)
-        for target in (self._capture_loop, self._worker_loop, self._maintenance_loop):
-            t = threading.Thread(target=target, name=target.__name__, daemon=True)
-            t.start()
-            self._threads.append(t)
+        self._loops = {
+            "capture": self._capture_loop,
+            "worker": self._worker_loop,
+            "maintenance": self._maintenance_loop,
+        }
+        for name in self._loops:
+            self._spawn(name)
         log.info("SecondBrain daemon started (%d loops)", len(self._threads))
+
+    def _spawn(self, name: str) -> None:
+        t = threading.Thread(target=self._loops[name], name=name, daemon=True)
+        t.start()
+        self._threads[name] = t
+
+    def _check_threads(self) -> None:
+        """Watchdog: restart any dead loop thread (with a growing backoff)."""
+        if self._stop.is_set():
+            return
+        now = time.monotonic()
+        for name, t in list(self._threads.items()):
+            if t.is_alive():
+                continue
+            if now < self._next_restart_at.get(name, 0.0):
+                continue  # still backing off
+            delay = self._restart_delay.get(name, RESTART_BACKOFF_S)
+            log.error("%s loop thread died — restarting (next backoff %.0fs)", name, delay)
+            self._next_restart_at[name] = now + delay
+            self._restart_delay[name] = min(RESTART_BACKOFF_MAX_S, delay * 2.0)
+            self._spawn(name)
 
     def stop(self) -> None:
         log.info("stopping daemon…")
@@ -182,6 +262,7 @@ class Daemon:
         self.start()
         try:
             while not self._stop.is_set():
+                self._check_threads()
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass

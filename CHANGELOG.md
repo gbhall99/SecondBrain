@@ -166,3 +166,50 @@ Fixes found by re-auditing the install.sh AI block, plus guardrails:
 - **CI:** added a `shellcheck` job for `deploy/*.sh`.
 - DEPLOY.md: explicit microphone-check (TCC) caveat + an on-device verification
   checklist, since the macOS-only paths can't be exercised in CI.
+
+## Pipeline reliability hardening
+Queue, worker, capture, daemon, backup, retention, and repair all get sturdier so
+transient failures degrade gracefully instead of silently losing work.
+- **Queue:** `sb queue --retry-failed` re-queues dead-lettered jobs
+  (`queue.requeue_failed`); longer backoff schedule (1m → 5m → 30m) and extra
+  attempts for transient-prone job types (diarize/extract) so an Ollama/HF outage
+  doesn't dead-letter meetings; `prune_done_jobs` sweeps old completed rows from
+  the daemon (new `jobs(state, finished_at)` index, migration `0008_reliability`);
+  transcribe jobs enqueue at priority 10 so a slow diarization can't starve live
+  transcription.
+- **Worker:** transcription is idempotent (an existing transcript short-circuits a
+  retried job) and transactional (transcript + segments + status commit atomically);
+  a VAD failure falls through to transcription instead of failing the chunk; a
+  vanished audio file is marked `missing` cleanly; VAD speech totals persist to
+  `audio_files.speech_seconds` with a configurable
+  `[transcription].min_speech_seconds` gate (default 0.0 = old behavior); job
+  failures log the full traceback, not just `repr(exc)`.
+- **Capture:** a configured input device that can't be found now *refuses* to
+  record (never silently falls back to the default mic), raising an
+  `alarm:input_device` app_state alarm surfaced by health checks; pause takes
+  effect within ~1s mid-chunk (partial buffers are discarded); input-stream
+  overflows are counted and stored (`overflow_count`); per-chunk RMS is stored
+  (`rms_level`) for dead/muted-mic detection; blocked-capture reasons are logged
+  (rate-limited to once/minute/reason); the recorder writes a `heartbeat:capture`.
+- **Daemon:** a watchdog restarts any dead capture/worker/maintenance thread with
+  a growing backoff; scheduled daily DB backup + prune (`[backup] auto_enabled`,
+  `keep`); conversation-stale-closing now runs on a ~60s cadence, separate from
+  the hourly retention sweep.
+- **Health/doctor:** checks carry a severity (`error`/`warn`); advisory checks
+  (stale backups, unreachable LLM, backlog, failed jobs) are warnings and no
+  longer fail `sb doctor` (exit 1 only on errors); new checks for capture
+  freshness, failed-job count, queue backlog/oldest-pending age, tiered heartbeat
+  staleness (warn 15m / error 2h, now including capture), the input-device alarm,
+  and near-zero-RMS mic detection; "no backups yet" degrades to a warning once
+  transcripts are older than a week.
+- **Backups:** snapshots are verified with `PRAGMA quick_check` after writing (a
+  corrupt snapshot is deleted and raises); restore writes to a temp file next to
+  the live DB and `os.replace()`s it into place (atomic); `prune_backups` never
+  deletes `*-pre-restore.db` safety snapshots.
+- **Retention:** raw audio for dead-lettered chunks is eventually swept ('failed'
+  past retention + grace; 'recorded' past a generous 7-day grace); stale
+  diarization scratch files (`conv_concat*.wav` older than a day) are cleaned up.
+- **Repair:** re-enqueues 'recorded' chunks with no live job and conversations
+  stuck in 'closed'/'diarizing' with no live diarize job; `config.local.toml`
+  seeding resolves against the repo root (not the CWD); the corruption message
+  names the newest backup and its age.
