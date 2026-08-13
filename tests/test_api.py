@@ -2366,8 +2366,9 @@ HTML = {"accept": "text/html"}
 def test_shared_shell_on_every_page(client, conn):
     conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (9, 'Dana', 'known', 0)")
     conn.execute("INSERT INTO kg_nodes (id, type, name) VALUES (11, 'project', 'Atlas')")
-    for path in ("/", "/timeline", "/speakers", "/relationships", "/projects", "/graph",
-                 "/chat", "/brief", "/goals", "/tasks", "/day", "/person/9", "/project/11"):
+    for path in ("/", "/timeline", "/speakers", "/relationships", "/projects", "/decisions",
+                 "/graph", "/chat", "/brief", "/goals", "/tasks", "/day", "/person/9",
+                 "/project/11"):
         r = client.get(path)
         assert r.status_code == 200, path
         assert 'class="nav"' in r.text, f"{path} missing shared nav"
@@ -3137,3 +3138,200 @@ def test_cross_origin_writes_are_rejected(client):
     assert client.get(
         "/api/status", headers={"Origin": "https://evil.example"}
     ).status_code == 200
+
+
+# --- Phase 11: search metadata, chat scope, graph curation ---------------------
+
+
+def test_search_response_carries_total_and_rank(client, conn):
+    body = client.get("/api/search", params={"q": "onboarding"}).json()
+    assert body["scope"] == "transcripts"
+    assert body["total"] >= body["count"] >= 1
+    assert body["total_capped"] is False
+    assert body["results"][0]["rank"] == 1
+    # semantic index metadata rides along for the footer note
+    si = body["semantic_index"]
+    assert si["available"] is False and si["total_segments"] >= 1
+    assert si["model_mismatch"] is False
+
+
+def test_search_not_speaker_excludes_a_voice(client, conn):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (3, 'Me', 'owner', 1)")
+    conn.execute("UPDATE transcript_segments SET speaker_id=3 WHERE id=1")
+    af = models.insert_audio_file(
+        conn, AudioFile(path="/x.flac", started_at="2026-06-16T10:00:00.000Z", sample_rate=16000)
+    )
+    t = models.insert_transcript(conn, af, "mock", "mock", "en")
+    models.insert_segments(
+        conn, [Segment(t, af, 0.0, 2.0, "someone else mentioned onboarding",
+                       start_at="2026-06-16T10:00:00.000Z")]
+    )
+    body = client.get("/api/search", params={"q": "onboarding", "not_speaker": 3}).json()
+    assert body["count"] == 1
+    assert "someone else" in body["results"][0]["text"]
+    assert body["not_speaker"] == 3
+    # '' = no filter; junk and unknown voices are rejected like `speaker`
+    assert client.get(
+        "/api/search", params={"q": "x", "not_speaker": ""}
+    ).status_code == 200
+    assert client.get(
+        "/api/search", params={"q": "x", "not_speaker": "abc"}
+    ).status_code == 422
+    assert client.get(
+        "/api/search", params={"q": "x", "not_speaker": 999}
+    ).status_code == 422
+
+
+def test_ask_scope_validation(client):
+    # malformed scope dates are a clean 422, not a silent no-filter
+    r = client.post("/api/ask", json={"question": "x", "since": "notadate"})
+    assert r.status_code == 422
+    r = client.post("/api/ask", json={"question": "x", "speaker_id": 10**20})
+    assert r.status_code == 422
+    # a scoped ask works end-to-end (mock LLM)
+    r = client.post("/api/ask", json={"question": "onboarding?", "since": "2026-06-16",
+                                      "until": "2026-06-16"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "context_empty" in body and "uncited" in body
+
+
+def test_chat_page_offers_scope_controls(client, conn):
+    conn.execute(
+        "INSERT INTO speakers (id, name, kind, is_owner, segment_count) "
+        "VALUES (5, 'Dana', 'known', 0, 3)"
+    )
+    html = client.get("/chat").text
+    assert 'id="scope-speaker"' in html and ">Dana</option>" in html
+    assert 'id="scope-since"' in html and 'id="scope-until"' in html
+
+
+def test_graph_node_pagination_per_kind(client, conn):
+    from secondbrain.knowledge import graph
+
+    nid = graph.create_node(conn, type="project", name="Atlas", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    for i in range(5):
+        graph.upsert_edge(conn, src_node_id=nid, dst_node_id=None, predicate=f"p{i}",
+                          kind="fact", object_text=f"fact {i}", confidence=0.5,
+                          when=f"2026-06-{10 + i:02d}T09:00:00.000Z")
+    d = client.get(f"/api/graph/node/{nid}", params={"per_kind": 2}).json()
+    assert d["kind_totals"]["fact"] == 5
+    assert len(d["edges"]) == 2
+    # most recent first (recency, not confidence)
+    assert [e["object_text"] for e in d["edges"]] == ["fact 4", "fact 3"]
+    # the "show more" page walks the tail of one kind
+    d2 = client.get(f"/api/graph/node/{nid}",
+                    params={"per_kind": 2, "kind": "fact", "kind_offset": 2}).json()
+    assert [e["object_text"] for e in d2["edges"]] == ["fact 2", "fact 1"]
+    # invalid paging params are rejected
+    assert client.get(f"/api/graph/node/{nid}",
+                      params={"kind": "banana"}).status_code == 422
+    assert client.get(f"/api/graph/node/{nid}",
+                      params={"kind_offset": -1}).status_code == 422
+
+
+def test_graph_node_exposes_superseded_history(client, conn):
+    from secondbrain.knowledge import graph
+
+    nid = graph.create_node(conn, type="project", name="Atlas", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    old = graph.upsert_edge(conn, src_node_id=nid, dst_node_id=None, predicate="decision",
+                            kind="decision", object_text="ship the beta in June",
+                            confidence=0.9, when="2026-06-01T09:00:00.000Z")
+    new = graph.upsert_edge(conn, src_node_id=nid, dst_node_id=None, predicate="decision",
+                            kind="decision", object_text="ship the beta in July",
+                            confidence=0.9, when="2026-07-01T09:00:00.000Z")
+    d = client.get(f"/api/graph/node/{nid}").json()
+    by_id = {e["id"]: e for e in d["edges"]}
+    assert by_id[old]["is_superseded"] is True
+    assert by_id[old]["superseded_by"] == new
+    assert by_id[old]["superseded_on"]  # local day of the superseding decision
+    assert by_id[new]["is_superseded"] is False
+    # only the current decision counts as an active connection
+    assert d["edge_count"] == 1 and d["kind_totals"]["decision"] == 2
+    # a user-invalidated edge stays hidden (not "superseded history")
+    client.post(f"/api/graph/edges/{new}/invalidate")
+    d = client.get(f"/api/graph/node/{nid}").json()
+    assert new not in {e["id"] for e in d["edges"]}
+
+
+def test_graph_node_merge_rename_and_alias_removal(client, conn):
+    from secondbrain.knowledge import graph
+
+    a = graph.create_node(conn, type="project", name="Atlas", embedding=None,
+                          confidence=0.9, extraction_id=None)
+    b = graph.create_node(conn, type="project", name="Atlas Platform", embedding=None,
+                          confidence=0.9, extraction_id=None)
+    graph.upsert_edge(conn, src_node_id=a, dst_node_id=None, predicate="uses",
+                      kind="fact", object_text="Postgres", confidence=0.9)
+
+    # rename writes the display label only
+    r = client.post(f"/api/graph/nodes/{b}/rename", json={"name": "Atlas (platform)"})
+    assert r.json()["ok"] is True
+    d = client.get(f"/api/graph/node/{b}").json()
+    assert d["node"]["label"] == "Atlas (platform)" and d["node"]["name"] == "Atlas Platform"
+    assert client.post(f"/api/graph/nodes/{b}/rename", json={"name": "  "}).status_code == 400
+    assert client.post("/api/graph/nodes/99999/rename", json={"name": "X"}).status_code == 404
+
+    # merge a → b: edges move, old name becomes an alias, old id resolves
+    r = client.post(f"/api/graph/nodes/{a}/merge", json={"into_id": b})
+    body = r.json()
+    assert body["ok"] is True and body["moved_edges"] == 1
+    assert body["into"]["id"] == b
+    d = client.get(f"/api/graph/node/{a}").json()  # merged id → canonical node
+    assert d["node"]["id"] == b
+    assert "Atlas" in d["aliases"]
+    # alias items expose ids; removing one deletes it
+    item = next(x for x in d["alias_items"] if x["alias"] == "Atlas")
+    r = client.post(f"/api/graph/nodes/{b}/aliases/{item['id']}/remove")
+    assert r.json()["ok"] is True
+    assert "Atlas" not in client.get(f"/api/graph/node/{b}").json()["aliases"]
+    assert client.post(
+        f"/api/graph/nodes/{b}/aliases/{item['id']}/remove"
+    ).status_code == 404
+
+    # merge validation: same node / unknown nodes
+    assert client.post(f"/api/graph/nodes/{b}/merge", json={"into_id": b}).status_code == 400
+    assert client.post(f"/api/graph/nodes/{a}/merge", json={"into_id": b}).status_code == 400
+    assert client.post("/api/graph/nodes/99999/merge", json={"into_id": b}).status_code == 404
+    assert client.post(
+        f"/api/graph/nodes/{10**20}/merge", json={"into_id": b}
+    ).status_code == 422
+
+
+def test_decisions_nav_entry_before_graph(client):
+    html = client.get("/").text
+    assert '<a href="/decisions"' in html
+    assert html.index('href="/decisions"') < html.index('href="/graph"')
+
+
+def test_action_items_carry_direction_and_needs_review(client, conn):
+    from secondbrain.knowledge import graph
+    from secondbrain.knowledge.extract import NEEDS_REVIEW_PREDICATE
+    from secondbrain.query import service
+
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (3, 'Me', 'owner', 1)")
+    me = graph.create_node(conn, type="person", name="Me", embedding=None,
+                           confidence=1.0, extraction_id=None, speaker_id=3)
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=1.0, extraction_id=None)
+    graph.upsert_edge(conn, src_node_id=me, dst_node_id=dana, predicate="action_item",
+                      kind="action_item", object_text="send deck", confidence=0.9,
+                      due_date="July 3rd", due_date_norm="2026-07-03")
+    graph.upsert_edge(conn, src_node_id=dana, dst_node_id=me, predicate="action_item",
+                      kind="action_item", object_text="send figures", confidence=0.9)
+    graph.upsert_edge(conn, src_node_id=me, dst_node_id=None,
+                      predicate=NEEDS_REVIEW_PREDICATE, kind="action_item",
+                      object_text="unclear owner", confidence=0.4)
+    items = {a["object_text"]: a for a in service.list_action_items(conn)}
+    assert items["send deck"]["owed_direction"] == "owed_by_me"
+    assert items["send deck"]["counterparty"]["name"] == "Dana"
+    assert items["send deck"]["due_date_norm"] == "2026-07-03"
+    assert items["send figures"]["owed_direction"] == "owed_to_me"
+    assert items["send figures"]["counterparty"]["name"] == "Dana"
+    assert items["unclear owner"]["needs_review"] is True
+    assert items["send deck"]["needs_review"] is False
+    # normalized due date drives ordering (dated first)
+    ordered = [a["object_text"] for a in service.list_action_items(conn)]
+    assert ordered[0] == "send deck"

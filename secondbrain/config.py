@@ -343,6 +343,9 @@ class ExtractionConfig(BaseModel):
     chat_max_hops: int = 1
     chat_max_facts: int = 40
     chat_max_context_chars: int = 32000
+    # How many retrieval hits feed the chat context (each expanded with a few
+    # neighboring lines from the same conversation, within the char budget).
+    chat_max_excerpts: int = 24
 
 
 class Settings(BaseSettings):

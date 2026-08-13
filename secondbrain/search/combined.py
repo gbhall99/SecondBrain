@@ -65,18 +65,23 @@ def search(
     since_utc: str | None = None,
     until_utc: str | None = None,
     speaker_id: int | None = None,
+    exclude_speaker_id: int | None = None,
 ) -> list[SearchHit]:
-    """Fused search. Optional filters (UTC time window, merge-resolved speaker)
-    are pushed down into both engines — SQL WHERE for FTS, candidate widening
-    for KNN — so a filtered page is exact rather than a post-filter over a
-    capped pool that silently drops matches once the corpus outgrows it.
-    Opted-out voices are excluded the same way (unattributed lines stay)."""
+    """Fused search. Optional filters (UTC time window, merge-resolved speaker,
+    an excluded voice — e.g. "everyone but me") are pushed down into both
+    engines — SQL WHERE for FTS, candidate widening for KNN — so a filtered
+    page is exact rather than a post-filter over a capped pool that silently
+    drops matches once the corpus outgrows it. Opted-out voices are excluded
+    the same way (unattributed lines stay)."""
     settings = settings or get_settings()
+    excluded = set(registry.opted_out_speaker_ids(conn, settings))
+    if exclude_speaker_id is not None:
+        excluded.add(exclude_speaker_id)
     flt = {
         "since_utc": since_utc,
         "until_utc": until_utc,
         "speaker_id": speaker_id,
-        "exclude_speaker_ids": registry.opted_out_speaker_ids(conn, settings),
+        "exclude_speaker_ids": frozenset(excluded),
     }
 
     if mode == "fulltext":

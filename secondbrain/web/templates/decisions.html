@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Decisions · SecondBrain{% endblock %}
+{% block style %}
+    .controls { display: flex; align-items: flex-end; flex-wrap: wrap;
+                gap: .5rem .9rem; margin: .9rem 0 .7rem; }
+    .controls label { display: flex; flex-direction: column; gap: .2rem;
+                      font-size: .8rem; color: var(--muted); }
+    .controls input[type="search"] { min-width: 12rem; }
+    .controls input[type="date"] { font-size: .92rem; padding: .35rem .5rem; }
+    .controls .linklike { padding-bottom: .45rem; color: var(--muted); }
+    .controls .linklike:hover { color: var(--fg); }
+    .dcount { margin: .2rem 0 .8rem; }
+    .decision { padding: .65rem 0; border-bottom: 1px solid var(--line); }
+    .decision:last-child { border-bottom: 0; }
+    .dtext { margin: 0; overflow-wrap: anywhere; }
+    .decision.superseded .dtext { text-decoration: line-through; color: var(--muted); }
+    .dline { margin: .2rem 0 0; display: flex; flex-wrap: wrap; gap: .25rem .6rem;
+             align-items: baseline; }
+    .badge { font-size: .75rem; font-weight: 600; padding: .1rem .55rem;
+             border-radius: 999px; background: var(--soft); white-space: nowrap; }
+    .badge-old { color: var(--warn); }
+    .badge-new { color: var(--ok); }
+    .about { font-size: .8rem; }
+    .pager { display: flex; gap: 1rem; margin: 1rem 0; }
+{% endblock %}
+{% block content %}
+  <h1>Decisions</h1>
+  <p class="meta">Every decision heard in your conversations, newest first — what was decided,
+    about what, when, and the line it came from. Replaced decisions stay visible, struck
+    through, with a pointer to what superseded them.</p>
+
+  <form class="controls" method="get" action="/decisions">
+    <label for="q">Search decisions
+      <input type="search" id="q" name="q" value="{{ q }}" maxlength="200"
+             placeholder="e.g. pricing, launch date…" autocomplete="off" />
+    </label>
+    <label for="since">From
+      <input type="date" id="since" name="since" value="{{ since }}" />
+    </label>
+    <label for="until">To
+      <input type="date" id="until" name="until" value="{{ until }}" />
+    </label>
+    {% if node %}<input type="hidden" name="node" value="{{ node }}" />{% endif %}
+    <button type="submit" class="btn-primary">Filter</button>
+    {% if filtered %}<a class="linklike" href="/decisions">Clear</a>{% endif %}
+  </form>
+
+  {% if node_label %}
+    <p class="meta">Showing decisions about
+      <a class="pill" href="/graph#node={{ node }}">{{ node_label }}</a>
+      · <a href="/decisions{% if q %}?q={{ q | urlencode }}{% endif %}">all decisions</a></p>
+  {% endif %}
+
+  {% if not decisions %}
+    <div class="empty"><strong>{% if filtered %}No decisions match{% else %}No decisions yet{% endif %}</strong>
+      {% if filtered %}Try different words or a wider date range.{% else %}
+      Decisions are picked out automatically as the local model processes your recorded
+      conversations. Once one is heard ("we decided to…"), it appears here with its source.
+      {% endif %}</div>
+  {% else %}
+    <p class="meta dcount" role="status">
+      {%- if total > decisions | length -%}
+        Showing {{ offset + 1 }}–{{ offset + decisions | length }} of {{ total }} decisions
+      {%- else -%}
+        {{ total }} decision{{ '' if total == 1 else 's' }}
+      {%- endif -%}
+    </p>
+    <ol class="hits" style="list-style:none;margin:0;padding:0">
+      {% for d in decisions %}
+      <li class="decision{{ ' superseded' if d.is_superseded }}" id="edge-{{ d.edge_id }}">
+        <p class="dtext">{{ d.object_text }}</p>
+        <p class="dline meta">
+          {% if d.node and d.node.label %}
+            {% if d.node.type == 'project' %}
+              <a class="pill about" href="/project/{{ d.node.id }}"
+                 title="Open the {{ d.node.label }} dossier">{{ d.node.label }}</a>
+            {% else %}
+              <a class="pill about" href="/graph#node={{ d.node.id }}"
+                 title="Open {{ d.node.label }} in the knowledge graph">{{ d.node.label }}</a>
+            {% endif %}
+          {% endif %}
+          {% if d.day %}
+            {% if d.source_day and d.source_seg %}
+              <a href="/day?date={{ d.source_day }}#seg-{{ d.source_seg }}"
+                 title="Open the moment this was decided">{{ d.day | prettyday }}</a>
+            {% else %}<span>{{ d.day | prettyday }}</span>{% endif %}
+          {% endif %}
+          {% if d.is_superseded %}
+            <span class="badge badge-old"
+                  title="{% if d.superseded_by_text %}Replaced by: {{ d.superseded_by_text }}{% else %}A newer decision replaced this one{% endif %}">
+              superseded{% if d.superseded_by_day %} on {{ d.superseded_by_day | prettyday }}{% endif %}</span>
+            {% if d.superseded_by %}<a class="meta" href="#edge-{{ d.superseded_by }}">newer decision ↓</a>{% endif %}
+          {% endif %}
+          {% if d.supersedes %}
+            <span class="badge badge-new"
+                  title="This replaced {{ d.supersedes | length }} earlier decision{{ '' if d.supersedes | length == 1 else 's' }}">supersedes →</span>
+            {% for s in d.supersedes %}
+              <a class="meta" href="#edge-{{ s.edge_id }}"
+                 title="{{ s.object_text }}">earlier decision</a>
+            {% endfor %}
+          {% endif %}
+          {% if d.confidence is not none and d.confidence < 0.75 %}
+            <span class="num">· {{ (d.confidence * 100) | round | int }}% confidence</span>
+          {% endif %}
+        </p>
+        {% if d.quotes %}
+          <details class="quote">
+            <summary class="meta" style="cursor:pointer">Show the source quote{{ '' if d.quotes | length == 1 else 's' }}</summary>
+            {% for qq in d.quotes %}
+              <blockquote class="meta" style="margin:.25rem 0 0;padding:.25rem .75rem;border-left:3px solid var(--line)">
+                “{{ qq.text }}”{% if qq.speaker %} — {{ qq.speaker }}{% endif %}
+                {% if qq.day %} · <a href="/day?date={{ qq.day }}#seg-{{ qq.segment_id }}">{{ qq.day | prettyday }}</a>{% endif %}
+              </blockquote>
+            {% endfor %}
+          </details>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+
+    {% if offset > 0 or has_more %}
+      <nav class="pager meta" aria-label="Decision pages">
+        {% if offset > 0 %}
+          <a href="/decisions?{{ base_qs }}offset={{ prev_offset }}">← Newer</a>
+        {% endif %}
+        {% if has_more %}
+          <a href="/decisions?{{ base_qs }}offset={{ next_offset }}">Older →</a>
+        {% endif %}
+      </nav>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -20,6 +20,19 @@ from secondbrain.speaker import registry
 
 log = logging.getLogger(__name__)
 
+# Aliases too generic to identify anything — attaching them to a node would
+# make alias search match half the graph ("the team" on every project).
+_ALIAS_STOPLIST = frozenset({
+    "the team", "team", "everyone", "everybody", "me", "us", "we", "they",
+    "them", "it", "he", "she", "you", "all", "the group", "the company",
+})
+
+
+def alias_ok(alias: str) -> bool:
+    """Whether an alias is specific enough to attach (length + stoplist gate)."""
+    norm = graph.normalize_name(alias)
+    return len(norm) >= 3 and norm not in _ALIAS_STOPLIST
+
 
 def embed_name(text: str, settings: Settings) -> list[float] | None:
     embedder = semantic.get_embedder(settings)
@@ -70,11 +83,27 @@ def _llm_same(llm: LLM, node_type: str, a: str, b: str) -> bool:
         )
         return bool(parse_json(resp.text).get("same"))
     except LLMJSONError as exc:
-        log.warning("entity disambiguation returned invalid JSON: %s", exc)
+        log.warning(
+            "entity disambiguation returned invalid JSON for %r vs %r: %s", a, b, exc
+        )
         return False
     except Exception:  # noqa: BLE001 - conservative on any LLM/transport failure
-        log.warning("entity disambiguation LLM call failed", exc_info=True)
+        log.warning(
+            "entity disambiguation LLM call failed for %r vs %r", a, b, exc_info=True
+        )
         return False
+
+
+def _candidates(
+    conn: sqlite3.Connection, node_type: str, cache: dict | None
+) -> list[sqlite3.Row]:
+    """graph.candidates(), loaded once per type per extraction run when a
+    ``cache`` dict is threaded through (instead of once per entity)."""
+    if cache is None:
+        return graph.candidates(conn, node_type)
+    if node_type not in cache:
+        cache[node_type] = graph.candidates(conn, node_type)
+    return cache[node_type]
 
 
 def resolve_entity(
@@ -86,6 +115,7 @@ def resolve_entity(
     llm: LLM | None = None,
     settings: Settings | None = None,
     speaker_hint: int | None = None,
+    cache: dict | None = None,
 ) -> int:
     settings = settings or get_settings()
     norm = graph.normalize_name(ent.name)
@@ -114,7 +144,7 @@ def resolve_entity(
             emb = embed_name(ent.name, settings)
             if emb is not None:
                 best_id, best_sim = None, -1.0
-                for cand in graph.candidates(conn, ent.type):
+                for cand in _candidates(conn, ent.type, cache):
                     cvec = registry.deserialize_embedding(cand["embedding"])
                     if not cvec:
                         continue
@@ -140,11 +170,16 @@ def resolve_entity(
                     speaker_id=None,
                     when=when,
                 )
+                if cache is not None:  # new node must be matchable next time
+                    cache.pop(ent.type, None)
 
-    # existing node: record alias + freshness, bind speaker if Person
+    # existing node: record alias + freshness, bind speaker if Person. Generic
+    # or too-short aliases ("the team", "me") are never attached — they'd make
+    # alias matching meaningless.
     graph.add_alias(conn, node_id, ent.name)
     for alias in ent.aliases:
-        graph.add_alias(conn, node_id, alias)
+        if alias_ok(alias):
+            graph.add_alias(conn, node_id, alias)
     graph.touch_node_seen(conn, node_id, when)
     if ent.type == "person" and speaker_hint is not None:
         graph.set_node_speaker(conn, node_id, speaker_hint)

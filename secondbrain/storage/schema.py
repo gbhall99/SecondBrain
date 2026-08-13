@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0008_reliability"
+SCHEMA_VERSION = "0009_decisions"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -467,6 +467,64 @@ ALTERS_0008: list[str] = [
 ]
 
 
+# --- Phase 11: decision tracking + edge search (migration 0009) ----------------
+# FTS5 over kg_edges.object_text (decisions/commitments become searchable) kept
+# in sync by triggers, mirroring the transcript_segments_fts pattern, plus a
+# normalized due-date column for action items. All additive.
+STATEMENTS_0009_CREATE: list[str] = [
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS kg_edges_fts USING fts5(
+        object_text,
+        content='kg_edges',
+        content_rowid='id',
+        tokenize='porter unicode61'
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_kg_edges_ai AFTER INSERT ON kg_edges BEGIN
+        INSERT INTO kg_edges_fts(rowid, object_text)
+        VALUES (new.id, COALESCE(new.object_text, ''));
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_kg_edges_ad AFTER DELETE ON kg_edges BEGIN
+        INSERT INTO kg_edges_fts(kg_edges_fts, rowid, object_text)
+        VALUES ('delete', old.id, COALESCE(old.object_text, ''));
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_kg_edges_au AFTER UPDATE OF object_text ON kg_edges BEGIN
+        INSERT INTO kg_edges_fts(kg_edges_fts, rowid, object_text)
+        VALUES ('delete', old.id, COALESCE(old.object_text, ''));
+        INSERT INTO kg_edges_fts(rowid, object_text)
+        VALUES (new.id, COALESCE(new.object_text, ''));
+    END
+    """,
+]
+
+COLUMNS_0009: list[tuple[str, str, str]] = [
+    # ISO YYYY-MM-DD parsed from the raw spoken due_date at extraction time
+    # ("March 3" → 2026-03-03); NULL when unparseable. Raw due_date is kept.
+    ("kg_edges", "due_date_norm", "TEXT"),
+]
+
+ALTERS_0009: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0009
+]
+
+
+def backfill_kg_edges_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild kg_edges_fts when it is out of sync with kg_edges (idempotent).
+
+    Needed once after the FTS table is first created over an existing graph
+    (the triggers only cover writes made after creation). Cheap when in sync.
+    """
+    n_edges = conn.execute("SELECT COUNT(*) AS n FROM kg_edges").fetchone()[0]
+    n_fts = conn.execute("SELECT COUNT(*) AS n FROM kg_edges_fts").fetchone()[0]
+    if n_edges != n_fts:
+        conn.execute("INSERT INTO kg_edges_fts(kg_edges_fts) VALUES('rebuild')")
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any((r[1] if not isinstance(r, sqlite3.Row) else r["name"]) == column for r in rows)
@@ -535,6 +593,15 @@ def apply_phase10_schema(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def apply_phase11_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0009 additions idempotently (edge FTS + due_date_norm)."""
+    for table, column, ddl in COLUMNS_0009:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0009_CREATE:
+        conn.execute(stmt)
+    backfill_kg_edges_fts(conn)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -551,6 +618,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase7_schema(conn)
     apply_phase9_schema(conn)
     apply_phase10_schema(conn)
+    apply_phase11_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

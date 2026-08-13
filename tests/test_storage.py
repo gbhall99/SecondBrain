@@ -102,7 +102,7 @@ def test_upgrade_from_old_db(tmp_path):
     apply_base_schema(c)
     tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
-    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_reliability"
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0009_decisions"
     c.close()
 
 
@@ -135,7 +135,7 @@ def test_apply_base_schema_is_idempotent(conn):
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0008_reliability"
+    assert ver == "0009_decisions"
 
 
 def test_pause_state_roundtrip(conn):

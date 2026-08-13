@@ -9,19 +9,30 @@ from low-confidence speaker attributions are downgraded to 'mention'.
 
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
-from datetime import UTC
+from datetime import UTC, date, datetime
+
+from pydantic import ValidationError
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.knowledge import graph, resolve
 from secondbrain.knowledge.schema import OWNER_REF, ExtractionResult, extraction_json_schema
 from secondbrain.llm.client import LLM, get_llm
-from secondbrain.llm.jsonout import parse_json
+from secondbrain.llm.jsonout import REPROMPT, LLMJSONError, parse_json
 from secondbrain.speaker import registry
 from secondbrain.storage.db import transaction
 from secondbrain.storage.models import utcnow_iso
 
+log = logging.getLogger(__name__)
+
 JOB_EXTRACT = "extract_knowledge"
+
+# Predicate marking an action item whose owed_by couldn't be resolved to a
+# person: the item is kept (attributed to the owner node as a placeholder) but
+# flagged for review instead of silently reading as the owner's commitment.
+NEEDS_REVIEW_PREDICATE = "action_item_needs_review"
 
 _SYSTEM = (
     "You extract structured knowledge from a diarized meeting transcript. "
@@ -100,11 +111,25 @@ def _render(segments: list[dict]) -> str:
 
 
 def _speaker_hint(conn: sqlite3.Connection, name: str) -> int | None:
+    """Speaker whose stored name matches ``name`` — exactly, or as an
+    unambiguous first-name prefix ("Dana" → the one "Dana Whitfield")."""
     norm = graph.normalize_name(name)
+    if not norm:
+        return None
     row = conn.execute(
         "SELECT id FROM speakers WHERE merged_into IS NULL AND lower(name)=? LIMIT 1", (norm,)
     ).fetchone()
-    return int(row["id"]) if row else None
+    if row:
+        return int(row["id"])
+    escaped = norm.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    prefix = conn.execute(
+        "SELECT id FROM speakers WHERE merged_into IS NULL "
+        "AND lower(name) LIKE ? ESCAPE '\\' LIMIT 2",
+        (f"{escaped} %",),
+    ).fetchall()
+    if len(prefix) == 1:  # unique match required — two Danas stay unlinked
+        return int(prefix[0]["id"])
+    return None
 
 
 def _owner_node(conn: sqlite3.Connection, extraction_id: int, when: str) -> int:
@@ -131,6 +156,64 @@ def _owner_node(conn: sqlite3.Connection, extraction_id: int, when: str) -> int:
     )
 
 
+# Spoken due-date forms parsed into ISO at extraction time. Year-less forms
+# resolve to the next occurrence at or after the conversation date (a due date
+# points forward). Anything else stays NULL — conservative by design.
+_DUE_ISO = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+_DUE_ORDINAL = re.compile(r"(\d)(st|nd|rd|th)\b", re.I)
+_DUE_FORMATS_YEAR = ("%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y", "%m/%d/%Y", "%m/%d/%y")
+_DUE_FORMATS_BARE = ("%B %d", "%b %d", "%d %B", "%d %b", "%m/%d")
+
+
+def normalize_due_date(raw: str | None, ref: date) -> str | None:
+    """Best-effort ISO (YYYY-MM-DD) form of a spoken due date, else None.
+
+    Handles ISO dates, month-name forms ("March 3", "Mar 3rd, 2026") and
+    slashed M/D[/Y]. ``ref`` (the conversation's date) resolves year-less
+    forms to their next occurrence. The raw string is always kept alongside.
+    """
+    if not raw:
+        return None
+    s = " ".join(raw.strip().split())
+    m = _DUE_ISO.match(s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except ValueError:
+            return None
+    cleaned = _DUE_ORDINAL.sub(r"\1", s).replace(",", "")
+    for fmt in _DUE_FORMATS_YEAR:
+        try:
+            return datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            continue
+    for fmt in _DUE_FORMATS_BARE:
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        try:
+            candidate = date(ref.year, parsed.month, parsed.day)
+            if candidate < ref:
+                candidate = date(ref.year + 1, parsed.month, parsed.day)
+        except ValueError:  # e.g. Feb 29 in a non-leap year
+            return None
+        return candidate.isoformat()
+    return None
+
+
+def _conversation_date(chunk: list[dict]) -> date:
+    """The chunk's conversation date (UTC day of its first stamped segment)."""
+    for seg in chunk:
+        ts = seg.get("start_at") or ""
+        if len(ts) >= 10:
+            try:
+                return date.fromisoformat(ts[:10])
+            except ValueError:
+                continue
+    return datetime.now(UTC).date()
+
+
 def _min_conf(segments_by_id: dict[int, dict], seg_ids: list[int]) -> float | None:
     confs = [
         segments_by_id[s]["speaker_confidence"]
@@ -152,6 +235,7 @@ def _write_chunk(
     low: float,
     settings: Settings,
     llm: LLM,
+    cand_cache: dict | None = None,
 ) -> int:
     """Persist one chunk's extraction (record + entities + edges) and return the
     edge count. Meant to run inside the caller's transaction for atomicity."""
@@ -166,6 +250,7 @@ def _write_chunk(
         segment_id_high=chunk[-1]["id"],
         raw_json=resp.text,
     )
+    conv_date = _conversation_date(chunk)
 
     # 1. entities → node ids
     node_ids: list[int] = []
@@ -174,6 +259,7 @@ def _write_chunk(
             resolve.resolve_entity(
                 conn, ent, extraction_id=ext_id, when=when, llm=llm, settings=settings,
                 speaker_hint=_speaker_hint(conn, ent.name) if ent.type == "person" else None,
+                cache=cand_cache,
             )
         )
 
@@ -207,23 +293,52 @@ def _write_chunk(
             source_segment_ids=clean_segs(f.source_segment_ids), when=when,
         )
 
-    # 3. action items
+    # 3. action items. An unresolvable owed_by must not silently become the
+    # owner's commitment: the item is kept (owner node as placeholder subject)
+    # but confidence is halved and the predicate flags it for review.
     for a in result.action_items:
-        src = ref(a.owed_by_ref) or _owner_node(conn, ext_id, when)
+        src = ref(a.owed_by_ref)
+        predicate = "action_item"
+        confidence = a.confidence
+        if src is None:
+            src = _owner_node(conn, ext_id, when)
+            if a.owed_by_ref is not None:  # named someone we couldn't resolve
+                predicate = NEEDS_REVIEW_PREDICATE
+                confidence = (confidence or 0.5) * 0.5
         graph.upsert_edge(
-            conn, src_node_id=src, dst_node_id=ref(a.owed_to_ref), predicate="action_item",
+            conn, src_node_id=src, dst_node_id=ref(a.owed_to_ref), predicate=predicate,
             kind=kind_for("action_item", a.source_segment_ids), object_text=a.description,
-            due_date=a.due_date, confidence=a.confidence, extraction_id=ext_id,
+            due_date=a.due_date,
+            due_date_norm=normalize_due_date(a.due_date, conv_date),
+            confidence=confidence, extraction_id=ext_id,
             conversation_id=conversation_id, when=when,
             source_segment_ids=clean_segs(a.source_segment_ids),
         )
         written += 1
 
-    # 4. decisions + ideas
+    # 4. decisions + ideas. The subject prefers a non-person participant (the
+    # project/topic the decision is ABOUT) so "we decided to ship Atlas in Q3"
+    # lands on Atlas, not on whoever spoke first.
+    def subject_for(it) -> int | None:
+        resolved: list[tuple[int, str]] = []
+        for p in it.participant_refs:
+            node = ref(p)
+            if node is None:
+                continue
+            etype = (
+                result.entities[p].type
+                if 0 <= p < len(result.entities)
+                else "person"  # OWNER_REF and out-of-range refs read as person
+            )
+            resolved.append((node, etype))
+        for node, etype in resolved:
+            if etype != "person":
+                return node
+        return resolved[0][0] if resolved else None
+
     for kind, items in (("decision", result.decisions), ("idea", result.ideas)):
         for it in items:
-            parts = [ref(p) for p in it.participant_refs]
-            src = next((p for p in parts if p is not None), None)
+            src = subject_for(it)
             if src is None:
                 src = _owner_node(conn, ext_id, when)
             graph.upsert_edge(
@@ -235,6 +350,20 @@ def _write_chunk(
             )
             written += 1
     return written
+
+
+def _extract_chunk(llm: LLM, chunk: list[dict]) -> tuple[ExtractionResult, object]:
+    """One chunk's LLM call + parse/validation, with a single reprompt when the
+    reply isn't usable JSON (mirrors llm.jsonout.complete_json, but keeps the
+    raw LLMResponse — provenance needs resp.model/backend/text)."""
+    prompt = _render(chunk)
+    schema = extraction_json_schema()
+    resp = llm.complete(system=_SYSTEM, prompt=prompt, schema=schema)
+    try:
+        return ExtractionResult.model_validate(parse_json(resp.text)), resp
+    except (LLMJSONError, ValidationError):
+        resp = llm.complete(system=_SYSTEM, prompt=f"{prompt}\n\n{REPROMPT}", schema=schema)
+        return ExtractionResult.model_validate(parse_json(resp.text)), resp
 
 
 def run_extraction(
@@ -258,19 +387,36 @@ def run_extraction(
     seg_by_id = {s["id"]: s for s in segments}
 
     edges_written = 0
-    for chunk_index, chunk in enumerate(_chunk(segments, settings)):
+    cand_cache: dict = {}  # graph.candidates() loaded once per type per run
+    chunks = _chunk(segments, settings)
+    failures: list[Exception] = []
+    for chunk_index, chunk in enumerate(chunks):
+        # Per-chunk failure isolation: one bad chunk (unusable JSON, a schema
+        # mismatch, a transient model hiccup) records a warning and the rest of
+        # the conversation still lands. The whole job only fails when EVERY
+        # chunk failed (then the queue's retry is worth it).
         when = utcnow_iso()
-        resp = llm.complete(
-            system=_SYSTEM, prompt=_render(chunk), schema=extraction_json_schema()
-        )
-        result = ExtractionResult.model_validate(parse_json(resp.text))
+        try:
+            result, resp = _extract_chunk(llm, chunk)
+        except Exception as exc:  # noqa: BLE001 - isolate per chunk, see above
+            log.warning(
+                "extraction chunk %d/%d failed for conversation %d: %s",
+                chunk_index + 1, len(chunks), conversation_id, exc,
+            )
+            failures.append(exc)
+            continue
         # The slow llm.complete already ran above (outside the transaction); the
         # per-chunk DB writes below are atomic so a crash can't leave a half-chunk.
         with transaction(conn):
             edges_written += _write_chunk(
                 conn, conversation_id, chunk, chunk_index, result, resp, when,
-                seg_by_id, low, settings, llm,
+                seg_by_id, low, settings, llm, cand_cache,
             )
+    if failures and len(failures) == len(chunks):
+        raise RuntimeError(
+            f"knowledge extraction failed for all {len(chunks)} chunk(s) of "
+            f"conversation {conversation_id}"
+        ) from failures[-1]
 
     conn.execute(
         "UPDATE conversations SET knowledge_status='extracted' WHERE id=?", (conversation_id,)

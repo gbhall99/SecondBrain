@@ -66,6 +66,31 @@
     details.quote blockquote + blockquote { margin-top: .45rem; }
     .backlink { margin: 1rem 0 0; }
     @media (max-width: 719px) { .detail-hint { display: none; } }
+
+    /* Curation affordances: rename / merge / alias ✕ / edge "✕ wrong". */
+    .manage-row { margin: .35rem 0 0; }
+    .manage-row .linklike { color: var(--muted); }
+    .manage-row .linklike:hover { color: var(--fg); }
+    .mini-form { display: flex; flex-wrap: wrap; gap: .45rem; margin: .5rem 0 .2rem;
+                 align-items: center; }
+    .mini-form input[type="text"], .mini-form input[type="search"] {
+      flex: 1 1 11rem; min-width: 0; font-size: .92rem; padding: .4rem .55rem; }
+    .mini-form select { font-size: .92rem; padding: .4rem .45rem; max-width: 100%; }
+    .alias-x, .edge-x { background: none; border: 0; padding: 0 .2rem; cursor: pointer;
+                        color: var(--muted); font: inherit; font-size: .85rem;
+                        border-radius: 4px; }
+    .alias-x:hover, .edge-x:hover { color: var(--danger); }
+    .edge-x { margin-left: .35rem; white-space: nowrap; }
+    .edges > li.gone { color: var(--muted); font-style: italic; }
+    .edges > li.superseded .fct { text-decoration: line-through; color: var(--muted); }
+    .sup-note { color: var(--warn); font-size: .78rem; white-space: nowrap; }
+    .sup-note .linklike { color: inherit; font-size: inherit; }
+    .edges > li.flash { animation: sb-flash 1.6s ease-out; }
+    @keyframes sb-flash { 0% { background: var(--soft); } 100% { background: transparent; } }
+    @media (prefers-reduced-motion: reduce) { .edges > li.flash { animation: none; } }
+    .kickrow { display: flex; align-items: baseline; gap: .6rem; }
+    .kickrow .linklike { font-size: .8rem; color: var(--muted); }
+    .kickrow .linklike:hover { color: var(--fg); }
 {% endblock %}
 {% block content %}
   <h1>Knowledge graph</h1>
@@ -573,6 +598,21 @@
           bits += ' <span class="meta num">· ' + Math.round(e.confidence * 100)
             + '% confidence</span>';
         }
+        // An old decision/fact replaced by a newer one: struck through, dated,
+        // with a jump to what superseded it (when it's on this pane).
+        if (e.is_superseded) {
+          bits += ' <span class="sup-note">superseded'
+            + (e.superseded_on ? ' on ' + esc(fmtDay(e.superseded_on)) : '')
+            + (e.superseded_by
+               ? ' · <button type="button" class="linklike" data-goto-edge="'
+                 + (Number(e.superseded_by) || 0) + '">see newer</button>'
+               : '')
+            + '</span>';
+        } else {
+          bits += ' <button type="button" class="edge-x" data-invalidate="'
+            + (Number(e.id) || 0)
+            + '" title="Mark this as wrong — it disappears from every view (undoable)">✕ wrong</button>';
+        }
         // Every citable transcript line behind this fact, each timestamp
         // linking to its own line in the day view (`quotes`; `quote` is the
         // legacy first-only field, kept as a fallback).
@@ -603,10 +643,15 @@
                                     : 'Show the ' + qs.length + ' source quotes';
           quote = '<details class="quote"><summary>' + sum + '</summary>' + body + '</details>';
         }
-        return '<li><p class="fct">' + subj + (pred ? ' ' + pred : '')
+        return '<li id="edge-' + (Number(e.id) || 0) + '"'
+          + (e.is_superseded ? ' class="superseded"' : '') + '><p class="fct">'
+          + subj + (pred ? ' ' + pred : '')
           + (obj ? ' ' + obj : '') + bits + '</p>'
           + '<p class="prov meta">' + provenanceHtml(e) + '</p>' + quote + '</li>';
       }
+
+      // Per-kind paging state for the open entity ("show more" offsets).
+      var detailState = { id: 0, node: null, shown: {}, totals: {} };
 
       function renderDetail(d) {
         var n = d.node;
@@ -619,11 +664,43 @@
           if (first) meta.push('first heard ' + first);
           if (last) meta.push('last heard ' + last);
         }
+        detailState = { id: n.id, node: n, shown: {}, totals: d.kind_totals || {} };
         var html = '<h2>' + esc(label) + ' <span class="tag">' + esc(n.type) + '</span></h2>'
           + '<p class="meta">' + esc(meta.join(' · ')) + '</p>';
-        if (d.aliases && d.aliases.length) {
-          html += '<p class="meta">Also known as ' + d.aliases.map(esc).join(', ') + '</p>';
+        var aliasItems = d.alias_items
+          || (d.aliases || []).map(function (a) { return { id: 0, alias: a }; });
+        if (aliasItems.length) {
+          html += '<p class="meta">Also known as ' + aliasItems.map(function (a) {
+            var x = a.id
+              ? ' <button type="button" class="alias-x" data-remove-alias="' + a.id
+                + '" title="Remove the alias “' + esc(a.alias)
+                + '” (it stops matching in search)" aria-label="Remove alias '
+                + esc(a.alias) + '">✕</button>'
+              : '';
+            return esc(a.alias) + x;
+          }).join(', ') + '</p>';
         }
+        // Curation: rename (display label) + merge-into (dedupe), mirroring
+        // the People page affordances.
+        html += '<p class="meta manage-row">'
+          + '<button type="button" class="linklike" id="rename-toggle" aria-expanded="false"'
+          + ' aria-controls="rename-form">✎ Rename</button>'
+          + ' · <button type="button" class="linklike" id="merge-toggle" aria-expanded="false"'
+          + ' aria-controls="merge-form">⇄ Merge into…</button></p>'
+          + '<form class="mini-form" id="rename-form" hidden>'
+          + '<label class="visually-hidden" for="rename-name">New display name</label>'
+          + '<input type="text" id="rename-name" maxlength="120" autocomplete="off" value="'
+          + esc(label) + '" />'
+          + '<button type="submit" class="btn-primary">Save</button>'
+          + '<button type="button" id="rename-cancel">Cancel</button></form>'
+          + '<form class="mini-form" id="merge-form" hidden>'
+          + '<label class="visually-hidden" for="merge-q">Search for the entity to keep</label>'
+          + '<input type="search" id="merge-q" placeholder="Search for the entity to keep…"'
+          + ' autocomplete="off" />'
+          + '<label class="visually-hidden" for="merge-target">Entity to merge into</label>'
+          + '<select id="merge-target" hidden></select>'
+          + '<button type="submit" class="btn-primary" id="merge-btn" disabled>Merge</button>'
+          + '<button type="button" id="merge-cancel">Cancel</button></form>';
         var pills = [];
         if (n.speaker_id != null) {
           pills.push('<a class="pill" href="/person/' + (Number(n.speaker_id) || 0)
@@ -633,6 +710,8 @@
           pills.push('<a class="pill" href="/project/' + (Number(n.id) || 0)
             + '">Project dossier →</a>');
         }
+        pills.push('<a class="pill" href="/decisions?node=' + (Number(n.id) || 0)
+          + '">Decisions about this →</a>');
         if (pills.length) html += '<div class="dossier">' + pills.join('') + '</div>';
 
         if (!d.edges.length) {
@@ -647,10 +726,20 @@
               return KIND_ORDER.indexOf(k) < 0;
             }).sort());
           kinds.forEach(function (k) {
+            var total = Number(detailState.totals[k]) || groups[k].length;
+            detailState.shown[k] = groups[k].length;
             var title = KIND_LABEL[k]
               || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, ' ');
-            html += '<h3 class="kicker">' + esc(title) + ' · ' + groups[k].length + '</h3>'
-              + '<ul class="edges">'
+            var more = total > groups[k].length
+              ? '<button type="button" class="linklike" data-more-kind="' + esc(k)
+                + '">Show more</button>'
+              : '';
+            html += '<div class="kickrow"><h3 class="kicker" id="kick-' + esc(k) + '">'
+              + esc(title) + ' · <span data-kind-count="' + esc(k) + '">'
+              + (total > groups[k].length
+                 ? groups[k].length + ' of ' + total : String(total))
+              + '</span></h3>' + more + '</div>'
+              + '<ul class="edges" id="edges-' + esc(k) + '">'
               + groups[k].map(function (e) { return edgeHtml(e, n.id); }).join('')
               + '</ul>';
           });
@@ -658,7 +747,191 @@
         html += '<p class="backlink meta"><a href="'
           + esc(buildHash(cur.q, 0, cur.type) || '#') + '">← Back to the entity list</a></p>';
         detailBox.innerHTML = html;
+        wireDetailForms(n, label);
       }
+
+      // ---- entity curation (rename / merge / aliases / wrong edges) --------
+
+      function wireDetailForms(n, label) {
+        function wireToggle(toggleId, formId, cancelId, focusSel) {
+          var toggle = document.getElementById(toggleId);
+          var form = document.getElementById(formId);
+          if (!toggle || !form) return;
+          function setOpen(show) {
+            form.hidden = !show;
+            toggle.setAttribute('aria-expanded', show ? 'true' : 'false');
+            if (show) {
+              var el = form.querySelector(focusSel);
+              if (el) { el.focus(); if (el.select) el.select(); }
+            } else { toggle.focus(); }
+          }
+          toggle.addEventListener('click', function () { setOpen(form.hidden); });
+          var cancel = document.getElementById(cancelId);
+          if (cancel) cancel.addEventListener('click', function () { setOpen(false); });
+        }
+        wireToggle('rename-toggle', 'rename-form', 'rename-cancel', 'input');
+        wireToggle('merge-toggle', 'merge-form', 'merge-cancel', 'input');
+
+        var renameForm = document.getElementById('rename-form');
+        if (renameForm) {
+          renameForm.addEventListener('submit', async function (ev) {
+            ev.preventDefault();
+            var name = document.getElementById('rename-name').value.trim();
+            if (!name) return;
+            try {
+              await SB.api('/api/graph/nodes/' + n.id + '/rename',
+                           { method: 'POST', body: { name: name }, button: ev.submitter });
+              SB.toast('Renamed to “' + name + '”.', 'success');
+              openNode(n.id, { force: true });
+              runSearch(cur.q, cur.type, { force: true });
+            } catch (err) { /* SB.api already toasted */ }
+          });
+        }
+
+        var mergeForm = document.getElementById('merge-form');
+        var mergeQ = document.getElementById('merge-q');
+        var mergeSel = document.getElementById('merge-target');
+        var mergeBtn = document.getElementById('merge-btn');
+        if (mergeForm && mergeQ && mergeSel && mergeBtn) {
+          var mdeb = 0;
+          mergeQ.addEventListener('input', function () {
+            clearTimeout(mdeb);
+            mdeb = setTimeout(async function () {
+              var q = mergeQ.value.trim();
+              mergeSel.hidden = true;
+              mergeBtn.disabled = true;
+              if (!q) return;
+              try {
+                var r = await SB.api('/api/graph/search?q=' + encodeURIComponent(q),
+                                     { quiet: true });
+                var opts = (r.nodes || []).filter(function (c) { return c.id !== n.id; });
+                if (!opts.length) return;
+                mergeSel.innerHTML = opts.map(function (c) {
+                  return '<option value="' + (Number(c.id) || 0) + '">'
+                    + esc(c.label || c.name) + ' (' + esc(c.type) + ')</option>';
+                }).join('');
+                mergeSel.hidden = false;
+                mergeBtn.disabled = false;
+              } catch (err) { /* quiet: typing continues */ }
+            }, 250);
+          });
+          mergeForm.addEventListener('submit', async function (ev) {
+            ev.preventDefault();
+            var into = parseInt(mergeSel.value, 10);
+            if (!into) return;
+            var intoLabel = mergeSel.options[mergeSel.selectedIndex].text;
+            if (!window.confirm('Merge “' + label + '” into ' + intoLabel + '? '
+                + 'All its facts move over and “' + label + '” becomes an alias. '
+                + 'This can’t be undone here.')) return;
+            try {
+              var res = await SB.api('/api/graph/nodes/' + n.id + '/merge',
+                                     { method: 'POST', body: { into_id: into },
+                                       button: ev.submitter });
+              SB.toast('Merged into ' + (res.into && res.into.label || 'the entity') + '.',
+                       'success');
+              setHash(cur.q, into, cur.type, false);
+              cur.node = 0;                 // force a reload of the canonical node
+              openNode(into, { force: true });
+              runSearch(cur.q, cur.type, { force: true });
+            } catch (err) { /* SB.api already toasted */ }
+          });
+        }
+      }
+
+      async function loadMoreKind(kind, btn) {
+        var id = detailState.id;
+        var shown = detailState.shown[kind] || 0;
+        try {
+          var d = await SB.api('/api/graph/node/' + id + '?kind=' + encodeURIComponent(kind)
+                               + '&kind_offset=' + shown, { button: btn });
+          if (detailState.id !== id) return;   // switched entity meanwhile
+          var ul = document.getElementById('edges-' + kind);
+          if (!ul) return;
+          var fresh = (d.edges || []).filter(function (e) {
+            return !document.getElementById('edge-' + (Number(e.id) || 0));
+          });
+          if (fresh.length) {
+            ul.insertAdjacentHTML('beforeend', fresh.map(function (e) {
+              return edgeHtml(e, detailState.node ? detailState.node.id : 0);
+            }).join(''));
+          }
+          detailState.shown[kind] = shown + (d.edges || []).length;
+          detailState.totals = d.kind_totals || detailState.totals;
+          var total = Number(detailState.totals[kind]) || 0;
+          var countEl = detailBox.querySelector('[data-kind-count="' + kind + '"]');
+          var done = detailState.shown[kind] >= total || !(d.edges || []).length;
+          if (countEl) {
+            countEl.textContent = done ? String(total)
+              : detailState.shown[kind] + ' of ' + total;
+          }
+          if (done && btn) btn.remove();
+        } catch (err) { /* SB.api already toasted */ }
+      }
+
+      async function invalidateEdge(edgeId, btn) {
+        var li = document.getElementById('edge-' + edgeId);
+        if (!window.confirm('Mark this as wrong? It disappears from every view. '
+            + 'You can undo right after.')) return;
+        try {
+          await SB.api('/api/graph/edges/' + edgeId + '/invalidate',
+                       { method: 'POST', button: btn });
+          if (li) {
+            li.className = 'gone';
+            li.innerHTML = 'Marked wrong — it won’t appear again. '
+              + '<button type="button" class="linklike" data-revalidate="' + edgeId
+              + '">Undo</button>';
+            var undo = li.querySelector('[data-revalidate]');
+            if (undo) undo.focus();
+          }
+          SB.toast('Marked wrong.', 'success');
+        } catch (err) { /* SB.api already toasted */ }
+      }
+
+      async function revalidateEdge(edgeId, btn) {
+        try {
+          await SB.api('/api/graph/edges/' + edgeId + '/revalidate',
+                       { method: 'POST', button: btn });
+          SB.toast('Restored.', 'success');
+          openNode(detailState.id || cur.node, { force: true });
+        } catch (err) { /* SB.api already toasted */ }
+      }
+
+      // Delegated: survives every detail re-render.
+      detailBox.addEventListener('click', function (ev) {
+        var t = ev.target;
+        if (!t || !t.closest) return;
+        var more = t.closest('[data-more-kind]');
+        if (more) { loadMoreKind(more.getAttribute('data-more-kind'), more); return; }
+        var inv = t.closest('[data-invalidate]');
+        if (inv) { invalidateEdge(Number(inv.getAttribute('data-invalidate')), inv); return; }
+        var rev = t.closest('[data-revalidate]');
+        if (rev) { revalidateEdge(Number(rev.getAttribute('data-revalidate')), rev); return; }
+        var ax = t.closest('[data-remove-alias]');
+        if (ax) {
+          var aliasId = Number(ax.getAttribute('data-remove-alias'));
+          if (!window.confirm('Remove this alias? It stops matching in graph search.')) return;
+          SB.api('/api/graph/nodes/' + detailState.id + '/aliases/' + aliasId + '/remove',
+                 { method: 'POST', button: ax })
+            .then(function () {
+              SB.toast('Alias removed.', 'success');
+              openNode(detailState.id, { force: true });
+            })
+            .catch(function () { /* SB.api already toasted */ });
+          return;
+        }
+        var go = t.closest('[data-goto-edge]');
+        if (go) {
+          var target = document.getElementById('edge-' + go.getAttribute('data-goto-edge'));
+          if (target) {
+            target.classList.remove('flash');
+            void target.offsetWidth;         // restart the highlight animation
+            target.classList.add('flash');
+            target.scrollIntoView({ block: 'center' });
+          } else {
+            SB.toast('The newer decision isn’t on this pane — try “Show more”.', 'info');
+          }
+        }
+      });
 
       // ---- navigation wiring -------------------------------------------------
 

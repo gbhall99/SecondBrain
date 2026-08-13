@@ -66,6 +66,21 @@
     #ask-form { display: flex; gap: .5rem; margin: 1rem 0 .3rem; }
     #q { flex: 1; min-width: 0; }
 
+    /* Optional retrieval scope (person / date range), mirrored from the
+       search page's collapsible filter row. */
+    #scope { margin: .1rem 0 .2rem; }
+    #scope summary { cursor: pointer; width: max-content; padding: .15rem .3rem;
+                     border-radius: 6px; }
+    #scope summary:hover, #scope[open] summary { color: var(--fg); }
+    .scope-row { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: flex-end;
+                 margin: .5rem 0 .2rem; }
+    .scope-row label { display: flex; flex-direction: column; gap: .2rem;
+                       font-size: .8rem; color: var(--muted); }
+    .scope-row select, .scope-row input { font-size: .92rem; padding: .35rem .5rem; }
+    .scope-row .linklike { padding-bottom: .45rem; color: var(--muted); }
+    .scope-row .linklike:hover { color: var(--fg); }
+    .cite-low { color: var(--warn); font-size: .78rem; }
+
     /* Persistent suggestions: a compact, collapsible row so canned prompts stay
        reachable after the empty state is gone, without crowding the thread. */
     #suggest { margin: .1rem 0 .2rem; }
@@ -110,6 +125,29 @@
     <button type="submit" class="btn-primary" id="ask-btn">Ask</button>
   </form>
 
+  <details class="filters" id="scope">
+    <summary id="scope-sum" class="meta">Scope</summary>
+    <div class="scope-row">
+      {% if speakers %}
+      <label for="scope-speaker">Person
+        <select id="scope-speaker">
+          <option value="" selected>Anyone</option>
+          {% for sp in speakers %}
+          <option value="{{ sp.id }}">{{ sp.name or sp.display_label or 'Speaker ' ~ sp.id }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
+      <label for="scope-since">From
+        <input type="date" id="scope-since" />
+      </label>
+      <label for="scope-until">To
+        <input type="date" id="scope-until" />
+      </label>
+      <button type="button" class="linklike" id="scope-reset">Reset scope</button>
+    </div>
+  </details>
+
   {% if seg_count %}
   <!-- Persistent starter prompts: the empty-state chips vanish once a
        conversation exists, so this compact, collapsed-by-default row keeps them
@@ -150,6 +188,39 @@
       const suggest = document.getElementById('suggest');
       const suggestToggle = document.getElementById('suggest-toggle');
       const suggestList = document.getElementById('suggest-list');
+      const scopeBox = document.getElementById('scope');
+      const scopeSum = document.getElementById('scope-sum');
+      const scopeSpeaker = document.getElementById('scope-speaker');
+      const scopeSince = document.getElementById('scope-since');
+      const scopeUntil = document.getElementById('scope-until');
+      const scopeReset = document.getElementById('scope-reset');
+
+      // Optional retrieval scope sent with every question (person/date range).
+      function readScope() {
+        const out = {};
+        if (scopeSpeaker && /^\d+$/.test(scopeSpeaker.value)) {
+          out.speaker_id = parseInt(scopeSpeaker.value, 10);
+        }
+        if (scopeSince && scopeSince.value) out.since = scopeSince.value;
+        if (scopeUntil && scopeUntil.value) out.until = scopeUntil.value;
+        return out;
+      }
+      function syncScopeSum() {
+        if (!scopeSum) return;
+        const on = Object.keys(readScope()).length > 0;
+        scopeSum.textContent = on ? 'Scope · on' : 'Scope';
+      }
+      [scopeSpeaker, scopeSince, scopeUntil].forEach(el => {
+        if (el) el.addEventListener('change', syncScopeSum);
+      });
+      if (scopeReset) {
+        scopeReset.addEventListener('click', () => {
+          if (scopeSpeaker) scopeSpeaker.value = '';
+          if (scopeSince) scopeSince.value = '';
+          if (scopeUntil) scopeUntil.value = '';
+          syncScopeSum();
+        });
+      }
 
       // Concise, polite announcement for screen readers (the thread itself is a
       // non-live log, so streamed tokens never flood the SR — see #thread).
@@ -216,7 +287,9 @@
         html = html.replace(/\[(?:seg_id=)?(\d+)\]/g, (m, id) => {
           const c = byId[id];
           if (!c) return m;
-          const tip = SB.esc((c.speaker || 'Unknown') + ' · ' + fmtWhen(c.start_at));
+          const tip = SB.esc((c.speaker || 'Unknown') +
+                             (c.speaker_low_confidence ? ' (uncertain speaker)' : '') +
+                             ' · ' + fmtWhen(c.start_at));
           return '<a class="cite-n" href="' + srcHref(c) + '" title="' + tip +
                  '" aria-label="Source segment ' + id + ': ' + tip + '">' + id + '</a>';
         });
@@ -229,8 +302,18 @@
         if (res.grounded && n) {
           h += '<span class="badge badge-ok">Grounded · ' + n +
                (n === 1 ? ' source' : ' sources') + '</span>';
+        } else if (res.uncited) {
+          // Context WAS retrieved but the model cited none of it — different
+          // failure from "nothing matched"; the answer deserves suspicion.
+          h += '<span class="badge badge-warn" title="Relevant context was found, but the model didn’t cite any of it">' +
+               'Answer wasn’t grounded in citations — treat with care</span>';
         } else {
           h += '<span class="badge badge-muted" title="Nothing in your conversations matched this question">No sources found</span>';
+        }
+        if (res.dangling_citations) {
+          h += '<span class="badge badge-warn" title="The model referenced sources that don’t exist; those markers were removed">' +
+               res.dangling_citations + ' unresolvable citation' +
+               (res.dangling_citations === 1 ? '' : 's') + ' removed</span>';
         }
         if (res.general_used) {
           h += '<span class="badge badge-warn">Includes general knowledge</span>';
@@ -262,9 +345,26 @@
         const items = cites.map(c =>
           '<li><a class="pill" href="' + srcHref(c) + '">[' + c.segment_id + '] ' +
           SB.esc(c.speaker || 'Unknown') + ' · ' + SB.esc(fmtWhen(c.start_at)) + '</a>' +
+          (c.speaker_low_confidence
+            ? ' <span class="cite-low" title="The voice on this line was a low-confidence guess">(uncertain speaker)</span>'
+            : '') +
           '<div class="src-text">“' + SB.esc(c.text || '') + '”</div></li>').join('');
         return '<section class="sources"><h2>Sources</h2><ul class="src-list">' +
                items + '</ul></section>';
+      }
+
+      // Answer + a plain-text "Sources:" list, so a pasted answer carries its
+      // evidence (day + time + speaker) instead of bare [id] markers.
+      function copyPayload(res) {
+        let text = res.answer || '';
+        const cites = res.citations || [];
+        if (cites.length) {
+          text += '\n\nSources:\n' + cites.map(c =>
+            '- [' + c.segment_id + '] ' + (c.speaker || 'Unknown') +
+            (c.speaker_low_confidence ? ' (uncertain speaker)' : '') +
+            ' · ' + fmtWhen(c.start_at) + ' — “' + (c.text || '') + '”').join('\n');
+        }
+        return text;
       }
 
       // Clipboard with a graceful fallback: the async API is unavailable in
@@ -318,10 +418,11 @@
         const btn = el.querySelector('.a-copy');
         if (btn) {
           btn.addEventListener('click', () => {
-            copyText(t.res.answer || '').then(ok => {
+            copyText(copyPayload(t.res)).then(ok => {
               if (ok) {
                 btn.textContent = 'Copied';
-                SB.toast('Answer copied', 'success');
+                SB.toast((t.res.citations || []).length
+                  ? 'Answer copied with sources' : 'Answer copied', 'success');
                 setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
               } else {
                 SB.toast('Couldn’t copy — select the text to copy it manually.', 'error');
@@ -467,7 +568,7 @@
           const r = await fetch('/api/ask/stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({question: q, history: history}),
+            body: JSON.stringify(Object.assign({question: q, history: history}, readScope())),
             signal: controller.signal,
           });
           if (!r.ok) {
