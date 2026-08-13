@@ -215,6 +215,94 @@ def test_shared_observation_exemplar_kept_while_another_segment_vouches(conn, se
     assert _corrections(conn, alice) == 0 and _corrections(conn, bob) == 1
 
 
+def _sibling_segment(conn, seg_id, *, locked=0, text="hello again"):
+    """Another transcript line sharing seg_id's observation (same diarized turn)."""
+    return int(
+        conn.execute(
+            "INSERT INTO transcript_segments (transcript_id, audio_file_id, start_offset_s, "
+            "end_offset_s, text, start_at, speaker_id, speaker_confidence, observation_id, "
+            "speaker_locked) "
+            "SELECT transcript_id, audio_file_id, start_offset_s + 2, end_offset_s + 2, "
+            "?, start_at, speaker_id, speaker_confidence, observation_id, ? "
+            "FROM transcript_segments WHERE id=?",
+            (text, locked, seg_id),
+        ).lastrowid
+    )
+
+
+def test_reassign_propagates_to_sibling_segments(conn, settings):
+    # One diarized turn = one voice: correcting a line moves its non-locked
+    # siblings (same observation) too, and the observation itself — mirroring
+    # re-attribution. Locked lines are the user's word and stay put.
+    alice = _known(conn, "Alice", [1.0, 0.0, 0.0, 0.0])
+    unknown = registry.create_unknown_speaker(conn)
+    seg1, obs = _segment_with_obs(conn, unknown, [0.0, 1.0, 0.0, 0.0], confidence=0.2)
+    free_sib = _sibling_segment(conn, seg1, locked=0)
+    locked_sib = _sibling_segment(conn, seg1, locked=1)
+
+    assert correct.reassign_segment(conn, seg1, alice, settings)
+
+    rows = {
+        r["id"]: r
+        for r in conn.execute(
+            "SELECT id, speaker_id, speaker_locked, speaker_source, speaker_confidence "
+            "FROM transcript_segments"
+        ).fetchall()
+    }
+    assert rows[seg1]["speaker_id"] == alice and rows[seg1]["speaker_locked"] == 1
+    assert rows[free_sib]["speaker_id"] == alice          # propagated
+    assert rows[free_sib]["speaker_locked"] == 0          # but not locked
+    assert rows[free_sib]["speaker_source"] == "user"
+    assert rows[locked_sib]["speaker_id"] == unknown      # locked line untouched
+    # the observation moved with the correction
+    assert conn.execute(
+        "SELECT speaker_id FROM speaker_observations WHERE id=?", (obs,)
+    ).fetchone()["speaker_id"] == alice
+    # affected speakers recounted once, after all moves
+    counts = {
+        r["id"]: r["segment_count"]
+        for r in conn.execute("SELECT id, segment_count FROM speakers").fetchall()
+    }
+    assert counts[alice] == 2 and counts[unknown] == 1
+
+
+def test_reassign_propagate_off_moves_only_the_line(conn, settings):
+    alice = _known(conn, "Alice", [1.0, 0.0, 0.0, 0.0])
+    unknown = registry.create_unknown_speaker(conn)
+    seg1, obs = _segment_with_obs(conn, unknown, [0.0, 1.0, 0.0, 0.0], confidence=0.2)
+    sib = _sibling_segment(conn, seg1, locked=0)
+
+    assert correct.reassign_segment(conn, seg1, alice, settings, propagate=False)
+
+    assert conn.execute(
+        "SELECT speaker_id FROM transcript_segments WHERE id=?", (sib,)
+    ).fetchone()["speaker_id"] == unknown  # sibling untouched
+    assert conn.execute(
+        "SELECT speaker_id FROM speaker_observations WHERE id=?", (obs,)
+    ).fetchone()["speaker_id"] == unknown  # observation stays too
+
+
+def test_reassign_rolls_back_atomically_on_failure(conn, settings, monkeypatch):
+    # The multi-step correction is one transaction: if a late step blows up,
+    # no half-applied relabel may remain.
+    alice = _known(conn, "Alice", [1.0, 0.0, 0.0, 0.0])
+    unknown = registry.create_unknown_speaker(conn)
+    seg1, _ = _segment_with_obs(conn, unknown, [0.0, 1.0, 0.0, 0.0], confidence=0.2)
+
+    def boom(*a, **k):
+        raise RuntimeError("recount exploded")
+
+    monkeypatch.setattr(registry, "_recount_segments", boom)
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        correct.reassign_segment(conn, seg1, alice, settings)
+    row = conn.execute(
+        "SELECT speaker_id, speaker_locked FROM transcript_segments WHERE id=?", (seg1,)
+    ).fetchone()
+    assert row["speaker_id"] == unknown and row["speaker_locked"] == 0  # rolled back
+
+
 # --- overlap helper ----------------------------------------------------------
 
 

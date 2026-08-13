@@ -39,6 +39,11 @@ def run_reattribution(conn: sqlite3.Connection, settings: Settings | None = None
     d = settings.diarization
     relabeled = 0
     touched: set[int] = set()  # speakers whose cached stats the moves invalidate
+    # Load candidate profiles + exemplars ONCE for the whole batch: the nightly
+    # job stays O(observations) instead of re-reading every exemplar per match.
+    # The snapshot is taken at run start; embeddings never change mid-run, and
+    # any regrouping this run causes is picked up by the next one.
+    profiles = registry.load_profile_index(conn)
     for obs_id in _candidate_observation_ids(conn, d.low_confidence_threshold):
         obs = conn.execute(
             "SELECT speaker_id, embedding, start_at FROM speaker_observations WHERE id=?",
@@ -49,7 +54,7 @@ def run_reattribution(conn: sqlite3.Connection, settings: Settings | None = None
         emb = registry.deserialize_embedding(obs["embedding"])
         if not emb:
             continue
-        m = registry.match_embedding(conn, emb, settings)
+        m = registry.match_embedding(conn, emb, settings, profiles=profiles)
         if m.speaker_id is None or m.similarity < d.reattribute_threshold:
             continue
         target = registry.resolve_speaker_id(conn, m.speaker_id)

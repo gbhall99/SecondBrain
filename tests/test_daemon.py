@@ -50,6 +50,25 @@ def test_diarization_maintenance_reenqueues_after_day_rolls_over(conn, tmp_path)
     assert len(_pending_types(conn)) > n_after_first
 
 
+def test_extraction_catchup_selects_only_pending_finished_conversations(conn, tmp_path):
+    d = Daemon(settings=_settings(tmp_path, extraction={"enabled": True}))
+    rows = [
+        ("diarized", "pending"),            # → enqueued
+        ("skipped_incomplete", "pending"),  # diarization skipped; still extractable
+        ("diarized", "extracted"),          # already done
+        ("diarized", "skipped"),            # sub-threshold: must NOT be re-picked
+        ("open", "pending"),                # not finished yet
+    ]
+    for status, kstatus in rows:
+        conn.execute(
+            "INSERT INTO conversations (started_at, status, knowledge_status) "
+            "VALUES ('2026-06-16T09:00:00.000Z', ?, ?)",
+            (status, kstatus),
+        )
+    d._extraction_catchup(conn)
+    assert _pending_types(conn).count("extract_knowledge") == 2
+
+
 def test_proactive_maintenance_disabled_by_default_enqueues_when_due(conn, tmp_path):
     # proactive enabled; digest_hour=0 so it's always "due" by hour
     d = Daemon(settings=_settings(tmp_path, proactive={"enabled": True, "digest_hour": 0}))

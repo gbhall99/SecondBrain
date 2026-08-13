@@ -1009,6 +1009,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_reassign_segment(
         segment_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         speaker_id: int = Body(..., embed=True, ge=1, le=_SQLITE_MAX_INT),
+        # Default ON: the correction flows to the other non-locked lines of the
+        # same diarized turn. Pass false to correct just this one line.
+        propagate: bool = Body(True, embed=True),
     ):
         with db() as conn:
             seg = service.get_segment(conn, segment_id)
@@ -1022,7 +1025,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # but the API must enforce it too).
             if service.is_opted_out(conn, speaker_id, settings):
                 raise HTTPException(403, "speaker opted out")
-            ok = service.reassign_segment(conn, segment_id, speaker_id, settings)
+            ok = service.reassign_segment(
+                conn, segment_id, speaker_id, settings, propagate=propagate
+            )
             if not ok:
                 raise HTTPException(404, "segment not found")
         # Extra fields are additive; "ok" keeps its original shape for the CLI.

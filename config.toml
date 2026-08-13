@@ -144,6 +144,9 @@ chat_max_context_chars = 32000
 # the open conversation.
 max_gap_minutes = 5.0
 min_conversation_seconds = 5.0
+# A chunk that would stretch a conversation past this closes it and starts a
+# new one, so an all-day open mic can't accrete one giant "meeting".
+max_conversation_minutes = 120.0
 
 [diarization]
 # Speaker diarization + voice-profile learning (Phase 2). Fully local.
@@ -163,6 +166,11 @@ centroid_update_threshold = 0.75
 cluster_distance_threshold = 0.30
 low_confidence_threshold = 0.5
 min_cluster_speech_s = 1.0
+# A near-tie between two candidate voices (top1−top2 similarity below this) is
+# labeled but flagged low-confidence instead of confidently auto-labeled.
+min_match_margin = 0.05
+# Owner enrollment needs at least this much total speech across the clips.
+min_enroll_speech_s = 10.0
 # Phase 7 — voice-profile quality / self-correction
 exemplar_k = 3
 max_exemplars_per_speaker = 50

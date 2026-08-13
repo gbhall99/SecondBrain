@@ -1826,11 +1826,14 @@ def set_owner(conn: sqlite3.Connection, speaker_id: int) -> None:
 
 
 def reassign_segment(
-    conn, segment_id: int, speaker_id: int, settings: Settings | None = None
+    conn, segment_id: int, speaker_id: int, settings: Settings | None = None,
+    *, propagate: bool = True,
 ) -> bool:
     from secondbrain.speaker import correct
 
-    return correct.reassign_segment(conn, segment_id, speaker_id, settings or get_settings())
+    return correct.reassign_segment(
+        conn, segment_id, speaker_id, settings or get_settings(), propagate=propagate
+    )
 
 
 def unassign_segment(conn, segment_id: int, settings: Settings | None = None) -> bool:

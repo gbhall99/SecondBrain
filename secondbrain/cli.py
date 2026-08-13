@@ -457,8 +457,16 @@ def speaker_enroll_owner(
                 p = settings.audio_processed_dir / f"enroll_{i}.flac"
                 record_clip(p, seconds, settings)
                 paths.append(p)
-    with db_session(settings=settings) as conn:
-        owner_id = enroll_owner_from_files(conn, paths, settings=settings, name=name)
+    try:
+        with db_session(settings=settings) as conn:
+            # Fresh recordings replace the prior enrollment exemplars (a redo),
+            # instead of piling on top of a possibly-bad first profile.
+            owner_id = enroll_owner_from_files(
+                conn, paths, settings=settings, name=name, replace=rerecord
+            )
+    except ValueError as exc:  # quality gate: too little speech in the clips
+        typer.echo(f"Enrollment failed: {exc}")
+        raise typer.Exit(1) from exc
     typer.echo(f"Enrolled owner '{name}' (speaker #{owner_id}) from {len(paths)} clip(s).")
 
 

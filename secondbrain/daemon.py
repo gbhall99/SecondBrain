@@ -87,9 +87,10 @@ class Daemon:
             while not self._stop.is_set():
                 state.set_state(conn, "heartbeat:maintenance", utcnow_iso())
                 # Short cadence (~60s): close idle conversations promptly so
-                # their diarization doesn't wait for the next hourly sweep.
-                if self.settings.diarization.enabled:
-                    self._conversation_maintenance(conn)
+                # their diarization/extraction doesn't wait for the next hourly
+                # sweep. Runs regardless of diarization: conversations are the
+                # unit extraction consumes, and closing is cheap.
+                self._conversation_maintenance(conn)
                 if time.monotonic() >= next_hourly:
                     next_hourly = time.monotonic() + RETENTION_INTERVAL_S
                     self._hourly_maintenance(conn)
@@ -124,6 +125,8 @@ class Daemon:
             log.exception("retention/reclaim failed")
         if self.settings.diarization.enabled:
             self._diarization_maintenance(conn)
+        if self.settings.extraction.enabled:
+            self._extraction_catchup(conn)
         if self.settings.proactive.enabled:
             self._proactive_maintenance(conn)
         if self.settings.backup.auto_enabled:
@@ -164,10 +167,11 @@ class Daemon:
             log.exception("proactive enqueue failed")
 
     def _diarization_maintenance(self, conn) -> None:
-        """Enqueue the daily clustering/reattribution + extraction catch-up.
+        """Enqueue the daily clustering/reattribution jobs.
 
         (Idle-conversation closing runs on the faster maintenance tick via
-        :meth:`_conversation_maintenance`.)
+        :meth:`_conversation_maintenance`; extraction catch-up runs from
+        :meth:`_extraction_catchup` so it works with diarization disabled too.)
         """
         from secondbrain.pipeline import worker
         from secondbrain.speaker import cluster
@@ -190,19 +194,25 @@ class Daemon:
                 state.set_state(conn, reattribute.LAST_RUN_KEY, utcnow_iso())
         except Exception:  # noqa: BLE001
             log.exception("reattribution enqueue failed")
-        # Catch-up: enqueue extraction for diarized conversations not yet processed.
-        if self.settings.extraction.enabled:
-            try:
-                from secondbrain.knowledge.extract import enqueue_extraction
 
-                rows = conn.execute(
-                    "SELECT id FROM conversations WHERE status='diarized' "
-                    "AND knowledge_status='pending'"
-                ).fetchall()
-                for r in rows:
-                    enqueue_extraction(conn, r["id"])
-            except Exception:  # noqa: BLE001
-                log.exception("extraction catch-up failed")
+    def _extraction_catchup(self, conn) -> None:
+        """Enqueue extraction for finished conversations not yet processed.
+
+        Includes conversations whose diarization was skipped for missing chunk
+        audio ('skipped_incomplete') — extraction only needs the transcript.
+        """
+        try:
+            from secondbrain.knowledge.extract import enqueue_extraction
+
+            rows = conn.execute(
+                "SELECT id FROM conversations "
+                "WHERE status IN ('diarized', 'skipped_incomplete') "
+                "AND knowledge_status='pending'"
+            ).fetchall()
+            for r in rows:
+                enqueue_extraction(conn, r["id"])
+        except Exception:  # noqa: BLE001
+            log.exception("extraction catch-up failed")
 
     # --- lifecycle -----------------------------------------------------------
 

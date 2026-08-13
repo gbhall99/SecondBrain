@@ -84,6 +84,9 @@ class ConversationConfig(BaseModel):
     # larger idle gap closes the open conversation (→ enqueue diarization).
     max_gap_minutes: float = 5.0
     min_conversation_seconds: float = 5.0
+    # A chunk that would stretch a conversation past this closes it and starts a
+    # new one, so an all-day open mic can't accrete one giant "meeting".
+    max_conversation_minutes: float = 120.0
 
 
 class DiarizationConfig(BaseModel):
@@ -102,6 +105,12 @@ class DiarizationConfig(BaseModel):
     cluster_distance_threshold: float = 0.30  # nightly agglomerative (cosine dist)
     low_confidence_threshold: float = 0.5  # below this a label is flagged
     min_cluster_speech_s: float = 1.0      # ignore clusters too short to embed
+    # An exemplar match whose top1−top2 similarity margin is below this is
+    # labeled but flagged low-confidence instead of confidently auto-labeled
+    # (two candidate voices were nearly tied). 0.0 disables the gate.
+    min_match_margin: float = 0.05
+    # Owner enrollment needs at least this much total speech across the clips.
+    min_enroll_speech_s: float = 10.0
     # Phase 7 — quality/self-correction
     exemplar_k: int = 3                    # match vs k nearest stored exemplars
     max_exemplars_per_speaker: int = 50    # cap kept exemplars (prune beyond)
@@ -121,7 +130,7 @@ class DiarizationConfig(BaseModel):
     @field_validator(
         "match_threshold", "owner_match_threshold", "centroid_update_threshold",
         "cluster_distance_threshold", "low_confidence_threshold", "reattribute_threshold",
-        "prune_min_confidence", "segmentation_threshold",
+        "prune_min_confidence", "segmentation_threshold", "min_match_margin",
     )
     @classmethod
     def _check_unit_interval(cls, v: float) -> float:
