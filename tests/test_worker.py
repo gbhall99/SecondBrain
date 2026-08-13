@@ -263,3 +263,16 @@ def test_speech_seconds_persisted_and_min_gate(conn, settings, tmp_path):
     row = models.get_audio_file(conn, af2)
     assert row["speech_seconds"] == 0.5
     assert row["has_speech"] == 1
+
+
+def test_failed_job_log_includes_id_type_and_duration(conn, settings, caplog):
+    import logging
+
+    from secondbrain.pipeline import queue as q
+
+    q.enqueue(conn, "no_such_job_type", {}, max_attempts=1)
+    with caplog.at_level(logging.ERROR, logger="secondbrain.worker"):
+        assert worker.run_once(conn, settings=settings) is True
+    msgs = [r.getMessage() for r in caplog.records if "failed after" in r.getMessage()]
+    assert msgs, caplog.text
+    assert "no_such_job_type" in msgs[0]

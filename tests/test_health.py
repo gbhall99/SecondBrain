@@ -18,7 +18,7 @@ def test_health_endpoint_no_auth(conn, settings):
     settings.security.require_auth = True  # health must remain open
     from secondbrain.security import auth
 
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     r = client.get("/health")
     assert r.status_code == 200 and r.json()["status"] in ("ok", "degraded")
@@ -238,3 +238,168 @@ def test_doctor_exit_zero_on_warn_only(conn, settings, monkeypatch):
     conn.execute("UPDATE alembic_version SET version_num='bogus'")
     result = runner.invoke(cli.app, ["doctor"])
     assert result.exit_code == 1, result.output
+
+
+# --- batch 3: model-pulled check, hints, perms, encryption, --json ------------
+
+
+class _TagsResp:
+    def __init__(self, status_code=200, models=None):
+        self.status_code = status_code
+        self._models = models
+
+    def json(self):
+        return {"models": [{"name": n} for n in (self._models or [])]}
+
+
+def test_llm_check_flags_unpulled_model(settings, monkeypatch):
+    import httpx
+
+    settings.llm.backend = "ollama"
+    monkeypatch.setattr(
+        httpx, "get", lambda url, timeout: _TagsResp(models=["some-other:7b"])
+    )
+    c = health._llm(settings)
+    assert not c.ok and c.severity == "warn"
+    assert "not pulled" in c.detail
+    assert f"ollama pull {settings.llm.model}" in c.hint
+
+
+def test_llm_check_accepts_pulled_model_and_latest_tag(settings, monkeypatch):
+    import httpx
+
+    settings.llm.backend = "ollama"
+    monkeypatch.setattr(
+        httpx, "get", lambda url, timeout: _TagsResp(models=[settings.llm.model])
+    )
+    assert health._llm(settings).ok
+    settings.llm.model = "llama3"
+    monkeypatch.setattr(
+        httpx, "get", lambda url, timeout: _TagsResp(models=["llama3:latest"])
+    )
+    assert health._llm(settings).ok
+
+
+def test_llm_check_uses_5s_timeout(settings, monkeypatch):
+    import httpx
+
+    seen = {}
+
+    def fake_get(url, timeout):
+        seen["timeout"] = timeout
+        return _TagsResp(models=[settings.llm.model])
+
+    settings.llm.backend = "ollama"
+    monkeypatch.setattr(httpx, "get", fake_get)
+    health._llm(settings)
+    assert seen["timeout"] == 5.0
+
+
+def test_checks_carry_hints_and_summary_exposes_them(conn, settings):
+    s = health.summary(conn, settings)
+    for c in s["checks"]:
+        assert "hint" in c
+    # a failing actionable check renders a hint
+    from secondbrain.pipeline import queue as q
+
+    q.enqueue(conn, "transcribe", {"audio_file_id": 1}, max_attempts=1)
+    q.fail(conn, q.claim_next(conn), "boom")
+    by = {c.name: c for c in health.run_checks(conn, settings)}
+    assert by["failed_jobs"].hint == "run `sb queue --retry-failed`"
+
+
+def test_doctor_renders_fix_hints(conn, settings, monkeypatch):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+    from secondbrain.pipeline import queue as q
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    q.enqueue(conn, "transcribe", {"audio_file_id": 1}, max_attempts=1)
+    q.fail(conn, q.claim_next(conn), "boom")
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "→ fix: run `sb queue --retry-failed`" in result.output
+
+
+def test_doctor_json_outputs_summary(conn, settings, monkeypatch):
+    import json
+
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    result = CliRunner().invoke(cli.app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["status"] in ("ok", "degraded")
+    names = {c["name"] for c in data["checks"]}
+    assert {"migrations", "llm", "config_perms", "launchd_plists"} <= names
+
+
+def test_local_config_perms_check(monkeypatch, tmp_path):
+    import secondbrain.config as config_mod
+
+    monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
+    # no file → fine
+    assert health._local_config_perms().ok
+    p = tmp_path / "config.local.toml"
+    p.write_text('[diarization]\nhf_token = "secret"\n')
+    p.chmod(0o644)
+    c = health._local_config_perms()
+    assert not c.ok and c.severity == "warn" and "world-readable" in c.detail
+    assert "chmod 600" in c.hint
+    p.chmod(0o600)
+    assert health._local_config_perms().ok
+
+
+def test_encryption_check_fails_on_wrong_passphrase(settings, monkeypatch):
+    from secondbrain.storage import db as db_mod
+
+    settings.security.encrypt_db = True
+    settings.security.db_passphrase = "wrong-passphrase"
+    monkeypatch.setattr(db_mod, "sqlcipher_available", lambda: True)
+
+    def bad_connect(*a, **k):
+        raise RuntimeError("SQLCipher key setup failed (check db_passphrase)")
+
+    monkeypatch.setattr(db_mod, "connect", bad_connect)
+    c = health._encryption(settings)
+    assert not c.ok
+    assert "failed to open" in c.detail
+    assert "db_passphrase" in c.hint
+
+
+def test_encryption_check_passes_when_keyed_open_works(settings, monkeypatch):
+    from secondbrain.storage import db as db_mod
+
+    settings.security.encrypt_db = True
+    settings.security.db_passphrase = "right-passphrase"
+    monkeypatch.setattr(db_mod, "sqlcipher_available", lambda: True)
+
+    class _Conn:
+        def execute(self, sql):
+            class _Cur:
+                def fetchone(self):
+                    return (0,)
+
+            return _Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(db_mod, "connect", lambda *a, **k: _Conn())
+    c = health._encryption(settings)
+    assert c.ok and "unlocks" in c.detail
+
+
+def test_stale_plist_check_warns_on_mismatch(monkeypatch, tmp_path):
+    from secondbrain import deploy
+
+    monkeypatch.setattr(deploy, "stale_plists", lambda: ["com.secondbrain.daemon: runs /old"])
+    c = health._launchd_plists()
+    assert not c.ok and c.severity == "warn"
+    assert "sb deploy launchd" in c.hint
+    monkeypatch.setattr(deploy, "stale_plists", list)
+    assert health._launchd_plists().ok

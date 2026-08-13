@@ -168,3 +168,59 @@ def test_watchdog_restarts_dead_thread_with_backoff(tmp_path):
     d._check_threads()
     assert len(runs) == 3
     assert isinstance(d._threads["flaky"], threading.Thread)
+
+
+# --- single-instance lease (batch 3) ------------------------------------------
+
+
+def test_lease_acquire_release_roundtrip(conn):
+    from secondbrain import daemon
+
+    assert daemon.acquire_lease(conn) is True  # no lease yet
+    # our own live lease is re-acquirable (restart within the same pid)
+    assert daemon.acquire_lease(conn) is True
+    daemon.release_lease(conn)
+    assert not state.get_state(conn, daemon.LEASE_KEY)
+
+
+def test_lease_refuses_second_daemon_while_holder_alive(conn, monkeypatch):
+    import json
+    import os
+
+    from secondbrain import daemon
+
+    assert daemon.acquire_lease(conn) is True
+    # Simulate a second process: same live pid on record, different current pid.
+    monkeypatch.setattr(os, "getpid", lambda: os.getppid())
+    assert daemon.acquire_lease(conn) is False
+    holder = json.loads(state.get_state(conn, daemon.LEASE_KEY))
+    assert holder["pid"] != os.getpid()  # lease untouched
+
+
+def test_lease_overrides_stale_holder(conn):
+    import json
+    import os
+
+    from secondbrain import daemon
+
+    # A crashed daemon left a lease behind with a dead pid.
+    state.set_state(
+        conn, daemon.LEASE_KEY,
+        json.dumps({"pid": 2**22 - 1, "started_at": "2026-01-01T00:00:00.000Z"}),
+    )
+    assert daemon.acquire_lease(conn) is True
+    holder = json.loads(state.get_state(conn, daemon.LEASE_KEY))
+    assert holder["pid"] == os.getpid()
+
+
+def test_release_lease_only_for_own_pid(conn):
+    import json
+
+    from secondbrain import daemon
+
+    state.set_state(
+        conn, daemon.LEASE_KEY,
+        json.dumps({"pid": 1, "started_at": "2026-01-01T00:00:00.000Z"}),
+    )
+    daemon.release_lease(conn)  # not ours → untouched
+    assert json.loads(state.get_state(conn, daemon.LEASE_KEY))["pid"] == 1

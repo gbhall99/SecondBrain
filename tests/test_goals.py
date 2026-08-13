@@ -237,8 +237,10 @@ def test_api_decompose_and_accept_plan(client, conn, monkeypatch):
 def test_api_decompose_maps_llm_garbage_to_502(client, conn, monkeypatch):
     from secondbrain.tasks import decompose as dmod
 
+    # Two garbage replies: decomposition now re-prompts once on invalid JSON
+    # before giving up, so both attempts must fail to reach the 502 path.
     monkeypatch.setattr(dmod, "get_llm",
-                        lambda settings: MockLLM(responses=["not json at all"]))
+                        lambda settings: MockLLM(responses=["not json at all", "nope ] still"]))
     gid = client.post("/api/goals", json={"title": "Launch newsletter"}).json()["id"]
     r = client.post(f"/api/goals/{gid}/decompose")
     assert r.status_code == 502

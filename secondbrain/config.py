@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -31,6 +31,20 @@ class CaptureConfig(BaseModel):
     channels: int = 1
     chunk_seconds: int = 60
     min_free_disk_gb: float = 5.0
+
+    @field_validator("sample_rate")
+    @classmethod
+    def _check_sample_rate(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"capture.sample_rate must be > 0, got {v}")
+        return v
+
+    @field_validator("chunk_seconds")
+    @classmethod
+    def _check_chunk_seconds(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"capture.chunk_seconds must be > 0, got {v}")
+        return v
 
 
 class ConsentConfig(BaseModel):
@@ -138,6 +152,27 @@ class DiarizationConfig(BaseModel):
             raise ValueError(f"threshold must be in [0.0, 1.0], got {v}")
         return v
 
+    @model_validator(mode="after")
+    def _check_threshold_ordering(self) -> DiarizationConfig:
+        # Documented in docs/OPERATIONS.md: relabeling past lines needs a HIGHER
+        # bar than live matching, the owner is checked slightly looser, and the
+        # low-confidence flag sits below all of them. A violation silently
+        # breaks attribution quality, so fail fast with the expected ordering.
+        ordered = (
+            ("reattribute_threshold", self.reattribute_threshold),
+            ("match_threshold", self.match_threshold),
+            ("owner_match_threshold", self.owner_match_threshold),
+            ("low_confidence_threshold", self.low_confidence_threshold),
+        )
+        for (hi_name, hi), (lo_name, lo) in zip(ordered, ordered[1:], strict=False):
+            if hi <= lo:
+                raise ValueError(
+                    "diarization thresholds must satisfy reattribute_threshold > "
+                    "match_threshold > owner_match_threshold > low_confidence_threshold; "
+                    f"got {hi_name}={hi} <= {lo_name}={lo}"
+                )
+        return self
+
 
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
@@ -162,6 +197,23 @@ class SecurityConfig(BaseModel):
     encrypt_db: bool = False
     db_passphrase: str = ""
 
+    @field_validator("session_max_age_days")
+    @classmethod
+    def _check_session_age(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"security.session_max_age_days must be >= 1, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_encrypt_db_has_passphrase(self) -> SecurityConfig:
+        # Fail at load time, not on the first DB open deep inside the daemon.
+        if self.encrypt_db and not self.db_passphrase:
+            raise ValueError(
+                "security.encrypt_db is true but security.db_passphrase is empty — "
+                "set it in config.local.toml or the SB_SECURITY__DB_PASSPHRASE env var"
+            )
+        return self
+
 
 class BackupConfig(BaseModel):
     # Automatic daily DB snapshots from the daemon's maintenance loop.
@@ -171,6 +223,8 @@ class BackupConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
+    # Also write logs to <data>/logs/secondbrain.log (rotated) besides stdout.
+    file_enabled: bool = True
 
     @field_validator("level")
     @classmethod
@@ -248,11 +302,27 @@ class LLMConfig(BaseModel):
     host: str = "http://127.0.0.1:11434"
     temperature: float = 0.0
     request_timeout_s: float = 120.0
+    # How long Ollama keeps the model loaded after a request ("30m", "1h", 0=unload).
+    keep_alive: str = "30m"
 
     @field_validator("backend")
     @classmethod
     def _check_backend(cls, v: str) -> str:
         return _one_of("llm.backend", v, {"mock", "ollama"})
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError(f"llm.host must start with http:// or https://, got {v!r}")
+        return v
+
+    @field_validator("request_timeout_s")
+    @classmethod
+    def _check_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"llm.request_timeout_s must be > 0, got {v}")
+        return v
 
     @field_validator("temperature")
     @classmethod

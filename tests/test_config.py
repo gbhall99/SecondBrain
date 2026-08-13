@@ -30,10 +30,10 @@ def test_diarization_config_defaults_and_env(monkeypatch):
     assert s.diarization.embedding_dim == 256
     assert s.conversation.max_gap_minutes == 5.0
     monkeypatch.setenv("SB_DIARIZATION__ENABLED", "true")
-    monkeypatch.setenv("SB_DIARIZATION__MATCH_THRESHOLD", "0.8")
+    monkeypatch.setenv("SB_DIARIZATION__MATCH_THRESHOLD", "0.75")
     s2 = Settings()
     assert s2.diarization.enabled is True
-    assert s2.diarization.match_threshold == 0.8
+    assert s2.diarization.match_threshold == 0.75
 
 
 def test_llm_and_extraction_config_defaults_and_env(monkeypatch):

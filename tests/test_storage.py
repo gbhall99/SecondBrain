@@ -144,3 +144,30 @@ def test_pause_state_roundtrip(conn):
     assert state.is_paused(conn) is True
     state.set_paused(conn, False)
     assert state.is_paused(conn) is False
+
+
+def test_timed_pause_auto_resumes_after_expiry(conn):
+    from datetime import UTC, datetime, timedelta
+
+    from secondbrain.storage.models import iso_from_dt
+
+    # Timed pause still in the future → paused.
+    future = iso_from_dt(datetime.now(UTC) + timedelta(minutes=15))
+    state.set_paused(conn, True, until_iso=future)
+    assert state.is_paused(conn) is True
+
+    # Expired timed pause → auto-resume (and the flag is cleared persistently).
+    past = iso_from_dt(datetime.now(UTC) - timedelta(seconds=1))
+    state.set_paused(conn, True, until_iso=past)
+    assert state.is_paused(conn) is False
+    assert state.get_state(conn, state.PAUSED) == "0"
+    assert not state.get_state(conn, state.PAUSE_UNTIL)
+
+
+def test_untimed_pause_never_expires(conn):
+    state.set_paused(conn, True)
+    assert state.is_paused(conn) is True
+    assert not state.get_state(conn, state.PAUSE_UNTIL)
+    # resuming clears any leftover expiry
+    state.set_paused(conn, False)
+    assert state.is_paused(conn) is False

@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -34,6 +35,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from secondbrain import health
 from secondbrain.config import Settings, get_settings
+from secondbrain.llm.errors import llm_failure_detail
 from secondbrain.query import service
 from secondbrain.search import semantic
 from secondbrain.security import auth
@@ -49,6 +51,11 @@ _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # path/query params that reach SQL are bounded by this instead, so a fuzzed or
 # copy-mangled id fails validation cleanly (422) like any other bad input.
 _SQLITE_MAX_INT = 2**63 - 1
+
+# How long the in-process session-generation mirror may lag the stored value.
+# An out-of-process revocation (`sb auth set-password` / `sb auth
+# revoke-sessions`) takes effect within this window without a server restart.
+SESSION_GEN_TTL_S = 5.0
 
 # Friendly copy for the HTML error page (browser navigations only; API clients
 # and non-HTML callers keep the standard JSON error bodies).
@@ -306,11 +313,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     init_db(settings=settings).close()
     with db_session(settings=settings) as _c:
         secret = auth.session_secret(_c)
-        # In-process mirror of the persisted session generation. /logout bumps
-        # it to revoke every outstanding cookie at once; the stored value keeps
-        # those revocations effective across restarts (single-worker server, so
-        # a plain dict is a safe cache).
-        session_gen = {"value": auth.session_generation(_c)}
+        # TTL-cached mirror of the persisted session generation. /logout bumps
+        # it to revoke every outstanding cookie at once; the short TTL means a
+        # bump made *outside* this process (`sb auth set-password`,
+        # `sb auth revoke-sessions`) is observed within seconds instead of
+        # only after a restart (single-worker server, so a dict is safe).
+        session_gen = {
+            "value": auth.session_generation(_c),
+            "read_at": time.monotonic(),
+        }
+
+    def _current_generation() -> int:
+        now = time.monotonic()
+        if now - session_gen["read_at"] > SESSION_GEN_TTL_S:
+            with db_session(settings=settings) as conn:
+                session_gen["value"] = auth.session_generation(conn)
+            session_gen["read_at"] = now
+        return session_gen["value"]
 
     # Embed any transcripts recorded before vector indexing existed (or while
     # the embedding backend was broken) so natural-language questions can
@@ -339,7 +358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _cookie_user(request: Request) -> str | None:
         """Username from a valid, current-generation session cookie (else None)."""
         cookie = request.cookies.get(auth.COOKIE_NAME, "")
-        return auth.verify_cookie(cookie, secret, generation=session_gen["value"])
+        return auth.verify_cookie(cookie, secret, generation=_current_generation())
 
     def _authed(request: Request) -> bool:
         """Whether the caller may see privileged detail (mirrors the auth gate)."""
@@ -556,7 +575,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 username,
                 secret,
                 settings.security.session_max_age_days,
-                generation=session_gen["value"],
+                generation=_current_generation(),
             ),
             max_age=settings.security.session_max_age_days * 86400,
             httponly=True,
@@ -574,6 +593,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.security.require_auth and _cookie_user(request) is not None:
             with db() as conn:
                 session_gen["value"] = auth.bump_session_generation(conn)
+                session_gen["read_at"] = time.monotonic()
         resp = JSONResponse({"ok": True})
         resp.delete_cookie(auth.COOKIE_NAME)
         return resp
@@ -1318,25 +1338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _llm_failure_detail(exc: Exception) -> str | None:
         """Human-readable message for an Ollama transport failure, else None."""
-        import httpx
-
-        if isinstance(exc, httpx.ConnectError):
-            return (
-                "Couldn't reach the local model — is Ollama running? "
-                f"(expected at {settings.llm.host})"
-            )
-        if isinstance(exc, httpx.TimeoutException):
-            return (
-                f"The local model didn't answer within {int(settings.llm.request_timeout_s)}s. "
-                "It may be busy loading — try again, or ask a simpler question."
-            )
-        if isinstance(exc, httpx.HTTPStatusError):
-            hint = (
-                f" Model '{settings.llm.model}' may not be pulled — try `ollama pull "
-                f"{settings.llm.model}`." if exc.response.status_code == 404 else ""
-            )
-            return f"The local model returned an error (HTTP {exc.response.status_code}).{hint}"
-        return None
+        return llm_failure_detail(exc, settings)
 
     @app.post("/api/ask")
     def api_ask(

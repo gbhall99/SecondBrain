@@ -14,7 +14,9 @@ capture keeps running even if the UI is restarted.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import signal
 import threading
 import time
@@ -41,6 +43,56 @@ BACKUP_RUN_KEY = "backup:last_run"
 # Watchdog: restart a dead loop after a growing delay (never gives up).
 RESTART_BACKOFF_S = 5.0
 RESTART_BACKOFF_MAX_S = 300.0
+
+# Single-instance lease: two daemons on one DB double-capture the mic and race
+# the queue. The lease (pid + start time) lives in app_state; a dead pid means
+# a crashed daemon, whose stale lease is overridden with a log line.
+LEASE_KEY = "daemon:lease"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
+
+
+def acquire_lease(conn) -> bool:
+    """Take the single-daemon lease. False when a live daemon already holds it."""
+    raw = state.get_state(conn, LEASE_KEY)
+    if raw:
+        try:
+            info = json.loads(raw)
+        except (ValueError, TypeError):
+            info = None
+        if info and int(info.get("pid", 0)) != os.getpid() and _pid_alive(int(info["pid"])):
+            log.error(
+                "another daemon (pid %s, started %s) already holds the lease — refusing to start",
+                info["pid"], info.get("started_at"),
+            )
+            return False
+        if info:
+            log.warning("overriding stale daemon lease (pid %s not running)", info.get("pid"))
+    state.set_state(
+        conn, LEASE_KEY, json.dumps({"pid": os.getpid(), "started_at": utcnow_iso()})
+    )
+    return True
+
+
+def release_lease(conn) -> None:
+    """Drop the lease if this process holds it (best-effort, on clean shutdown)."""
+    raw = state.get_state(conn, LEASE_KEY)
+    try:
+        holder = int(json.loads(raw).get("pid", 0)) if raw else 0
+    except (ValueError, TypeError, AttributeError):
+        holder = 0
+    if holder == os.getpid():
+        state.set_state(conn, LEASE_KEY, "")
 
 
 class Daemon:
@@ -282,12 +334,25 @@ class Daemon:
 
 def main() -> None:
     from secondbrain.logging_setup import configure_logging
+    from secondbrain.storage.db import db_session
 
     configure_logging()
     daemon = Daemon()
+    daemon.settings.ensure_dirs()
+    init_db(settings=daemon.settings).close()
+    with db_session(settings=daemon.settings) as conn:
+        if not acquire_lease(conn):
+            raise SystemExit(
+                "Another SecondBrain daemon is already running against this database "
+                "(see the log for its pid). Stop it first, or wait for launchd to."
+            )
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: daemon.stop())
-    daemon.run_forever()
+    try:
+        daemon.run_forever()
+    finally:
+        with db_session(settings=daemon.settings) as conn:
+            release_lease(conn)
 
 
 if __name__ == "__main__":

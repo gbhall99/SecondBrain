@@ -74,3 +74,73 @@ def test_settings_env_validation_propagates(monkeypatch):
     monkeypatch.setenv("SB_API__PORT", "999999")
     with pytest.raises(ValidationError):
         Settings()
+
+
+# --- new validators (batch 3) -------------------------------------------------
+
+
+def test_llm_request_timeout_must_be_positive():
+    with pytest.raises(ValidationError):
+        LLMConfig(request_timeout_s=0)
+    with pytest.raises(ValidationError):
+        LLMConfig(request_timeout_s=-5.0)
+    assert LLMConfig(request_timeout_s=30.0).request_timeout_s == 30.0
+
+
+def test_llm_host_must_be_http_url():
+    with pytest.raises(ValidationError):
+        LLMConfig(host="127.0.0.1:11434")
+    with pytest.raises(ValidationError):
+        LLMConfig(host="tcp://somewhere")
+    assert LLMConfig(host="https://127.0.0.1:11434").host.startswith("https://")
+
+
+def test_llm_keep_alive_default():
+    assert LLMConfig().keep_alive == "30m"
+
+
+def test_security_session_age_minimum():
+    from secondbrain.config import SecurityConfig
+
+    with pytest.raises(ValidationError):
+        SecurityConfig(session_max_age_days=0)
+    assert SecurityConfig(session_max_age_days=1).session_max_age_days == 1
+
+
+def test_encrypt_db_requires_passphrase():
+    from secondbrain.config import SecurityConfig
+
+    with pytest.raises(ValidationError) as exc_info:
+        SecurityConfig(encrypt_db=True, db_passphrase="")
+    assert "db_passphrase" in str(exc_info.value)
+    ok = SecurityConfig(encrypt_db=True, db_passphrase="hunter2hunter2")
+    assert ok.encrypt_db is True
+
+
+def test_capture_rates_must_be_positive():
+    from secondbrain.config import CaptureConfig
+
+    with pytest.raises(ValidationError):
+        CaptureConfig(sample_rate=0)
+    with pytest.raises(ValidationError):
+        CaptureConfig(chunk_seconds=0)
+    assert CaptureConfig(sample_rate=44100, chunk_seconds=30).sample_rate == 44100
+
+
+def test_diarization_threshold_ordering_enforced():
+    # documented ordering: reattribute > match > owner_match > low_confidence
+    with pytest.raises(ValidationError) as exc_info:
+        DiarizationConfig(match_threshold=0.85)  # >= reattribute (0.80)
+    assert "reattribute_threshold > match_threshold" in str(exc_info.value)
+    with pytest.raises(ValidationError):
+        DiarizationConfig(owner_match_threshold=0.71)  # >= match (0.70)
+    with pytest.raises(ValidationError):
+        DiarizationConfig(low_confidence_threshold=0.65)  # >= owner_match (0.65)
+    # defaults respect the ordering
+    d = DiarizationConfig()
+    assert (d.reattribute_threshold > d.match_threshold
+            > d.owner_match_threshold > d.low_confidence_threshold)
+
+
+def test_logging_file_enabled_default_true():
+    assert LoggingConfig().file_enabled is True

@@ -7,6 +7,7 @@ cosine), then an optional LLM yes/no disambiguation in the ambiguous band.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 from secondbrain.config import Settings, get_settings
@@ -16,6 +17,8 @@ from secondbrain.llm.client import LLM
 from secondbrain.llm.jsonout import LLMJSONError, parse_json
 from secondbrain.search import semantic
 from secondbrain.speaker import registry
+
+log = logging.getLogger(__name__)
 
 
 def embed_name(text: str, settings: Settings) -> list[float] | None:
@@ -66,7 +69,11 @@ def _llm_same(llm: LLM, node_type: str, a: str, b: str) -> bool:
             schema=schema,
         )
         return bool(parse_json(resp.text).get("same"))
-    except (LLMJSONError, Exception):  # noqa: BLE001 - conservative on failure
+    except LLMJSONError as exc:
+        log.warning("entity disambiguation returned invalid JSON: %s", exc)
+        return False
+    except Exception:  # noqa: BLE001 - conservative on any LLM/transport failure
+        log.warning("entity disambiguation LLM call failed", exc_info=True)
         return False
 
 

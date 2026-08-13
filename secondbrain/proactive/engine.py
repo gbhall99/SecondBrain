@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from secondbrain.config import Settings, get_settings
 from secondbrain.knowledge import chat as chatmod
 from secondbrain.llm.client import LLM, get_llm
-from secondbrain.llm.jsonout import parse_json
+from secondbrain.llm.jsonout import complete_json
 from secondbrain.proactive import ranking, store
 from secondbrain.proactive.detectors import DETECTORS, Suggestion, owner_node_id
 from secondbrain.speaker import registry
@@ -74,7 +74,7 @@ def _coaching(conn, settings: Settings, llm: LLM, now: datetime) -> list[Suggest
         return []
     transcript = "\n".join(f"[seg_id={r['id']}] {r['text']}" for r in rows)
     try:
-        data = parse_json(llm.complete(system=_COACHING_SYSTEM, prompt=transcript).text)
+        data = complete_json(llm, system=_COACHING_SYSTEM, prompt=transcript)
     except Exception:  # noqa: BLE001
         return []
     out = []

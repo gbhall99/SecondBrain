@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.llm.client import LLM, get_llm
-from secondbrain.llm.jsonout import parse_json
+from secondbrain.llm.jsonout import complete_json
 from secondbrain.tasks import store
 
 _SYSTEM = (
@@ -53,8 +53,9 @@ def propose_plan(
         return {"milestones": []}
     prompt = f"Goal: {goal['title']}\nDescription: {goal['description'] or ''}"
     schema = DecompositionResult.model_json_schema()
-    resp = llm.complete(system=_SYSTEM, prompt=prompt, schema=schema)
-    result = DecompositionResult.model_validate(parse_json(resp.text))
+    result = DecompositionResult.model_validate(
+        complete_json(llm, system=_SYSTEM, prompt=prompt, schema=schema)
+    )
     return result.model_dump()
 
 

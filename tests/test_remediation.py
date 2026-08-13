@@ -67,16 +67,16 @@ def test_chat_excludes_opted_out_segment(conn, settings):
 
 def test_secure_cookie_set_over_https(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings), base_url="https://testserver")
-    r = client.post("/login", json={"username": "owner", "password": "pw"})
+    r = client.post("/login", json={"username": "owner", "password": "opensesame"})
     assert r.status_code == 200
     assert "secure" in r.headers.get("set-cookie", "").lower()
 
 
 def test_login_rate_limited(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     for _ in range(5):
         assert client.post("/login", json={"username": "owner", "password": "x"}).status_code == 401
