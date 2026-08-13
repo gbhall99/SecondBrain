@@ -23,6 +23,15 @@ log = logging.getLogger(__name__)
 # audio can never outlive the policy even when diarization stalls.
 ORPHAN_GRACE_HOURS = 72
 
+# Chunks that never reach 'transcribed' (dead-lettered 'failed', or 'recorded'
+# ones whose job vanished) must not keep raw audio forever either. 'recorded'
+# gets a generous grace so a long offline backlog is never deleted before the
+# worker catches up; transcripts are unaffected (there are none for these).
+STUCK_RECORDED_GRACE_DAYS = 7
+
+# Diarization scratch files (conv_concat*.wav) older than this are swept.
+SCRATCH_MAX_AGE_HOURS = 24
+
 
 def compute_delete_after(settings: Settings, transcribed_at: datetime | None = None) -> str | None:
     """Deadline after which raw audio may be deleted.
@@ -80,6 +89,30 @@ def sweep_expired_audio(conn: sqlite3.Connection, settings: Settings | None = No
                 len(orphans), ORPHAN_GRACE_HOURS,
             )
         rows += orphans
+        # Dead-lettered chunks: 'failed' past retention+grace, and 'recorded'
+        # past a generous grace (their job is gone — the audio would sit forever).
+        stuck_failed = conn.execute(
+            "SELECT id, path FROM audio_files WHERE status='failed' "
+            "AND started_at IS NOT NULL AND started_at <= ?",
+            (cutoff,),
+        ).fetchall()
+        recorded_cutoff = iso_from_dt(
+            now_dt - timedelta(
+                hours=max(hours + ORPHAN_GRACE_HOURS, STUCK_RECORDED_GRACE_DAYS * 24)
+            )
+        )
+        stuck_recorded = conn.execute(
+            "SELECT id, path FROM audio_files WHERE status='recorded' "
+            "AND started_at IS NOT NULL AND started_at <= ?",
+            (recorded_cutoff,),
+        ).fetchall()
+        if stuck_failed or stuck_recorded:
+            log.warning(
+                "retention: expiring %d failed and %d stuck-recorded chunk(s) "
+                "that never transcribed",
+                len(stuck_failed), len(stuck_recorded),
+            )
+        rows += stuck_failed + stuck_recorded
     deleted = 0
     for r in rows:
         p = Path(r["path"])
@@ -103,12 +136,25 @@ def _sweep_derived_clips(conn: sqlite3.Connection, settings: Settings) -> int:
     ``segclip_{segment_id}[_{window}].wav`` (day-view per-line playback), where
     the optional ``_{window}`` suffix stamps the sliced offsets; both are
     derived raw audio and must honor the same retention policy as their source
-    chunk.
+    chunk. Stale diarization scratch files (``conv_concat*.wav``) older than a
+    day are swept too — they're concatenated raw audio a crashed diarization
+    can leave behind.
     """
     removed = 0
     clip_dir = settings.audio_processed_dir
     if not clip_dir.is_dir():
         return 0
+    scratch_cutoff = (
+        datetime.now(UTC) - timedelta(hours=SCRATCH_MAX_AGE_HOURS)
+    ).timestamp()
+    for p in clip_dir.glob("conv_concat*.wav"):
+        try:
+            if p.stat().st_mtime > scratch_cutoff:
+                continue  # possibly still in use by a running diarization
+            p.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            log.warning("retention: could not delete scratch file %s", p, exc_info=True)
     source_status_sql = {
         "sample": (
             "SELECT af.status AS status FROM speaker_observations so "

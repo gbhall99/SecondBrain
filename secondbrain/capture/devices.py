@@ -32,11 +32,21 @@ def list_input_devices() -> list[InputDevice]:
     return devices
 
 
+class DeviceNotFoundError(LookupError):
+    """A configured input_device name matched no available input device."""
+
+
 def resolve_device(name: str):
-    """Return a sounddevice device index for ``name`` (or None for default)."""
+    """Return a sounddevice device index for ``name`` (or None for default).
+
+    An unset/blank ``name`` is an intentional "use the system default" and
+    returns None. A configured name that matches nothing raises
+    :class:`DeviceNotFoundError` — silently falling back to the default mic
+    would record the wrong room without anyone noticing.
+    """
     if not name:
         return None
     for dev in list_input_devices():
         if dev.name == name or name.lower() in dev.name.lower():
             return dev.index
-    return None
+    raise DeviceNotFoundError(f"input device {name!r} not found (run `sb devices`)")

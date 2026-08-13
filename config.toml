@@ -44,6 +44,9 @@ backend = "parakeet"
 whisper_model = "mlx-community/whisper-large-v3-turbo"
 parakeet_model = "mlx-community/parakeet-tdt-0.6b-v2"
 language = ""                  # empty = auto-detect
+# Skip transcription when VAD found less total speech than this many seconds.
+# 0.0 = transcribe any chunk with detected speech (historical behavior).
+min_speech_seconds = 0.0
 
 [search]
 # Optional semantic search via sqlite-vec + local embeddings. Falls back to
@@ -58,6 +61,12 @@ semantic_max_distance = 0.8
 [api]
 host = "127.0.0.1"             # local-only. Never bind to 0.0.0.0.
 port = 8765
+
+[backup]
+# Automatic daily database snapshot from the daemon's maintenance loop
+# (equivalent to `sb backup --keep N`). Snapshots land in <data>/backups.
+auto_enabled = true
+keep = 7                       # prune to the newest N snapshots afterwards
 
 [security]
 # Auth + at-rest encryption (Phase 5). Off by default. To reach the UI over

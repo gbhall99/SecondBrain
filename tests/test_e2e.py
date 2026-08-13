@@ -23,8 +23,10 @@ def test_full_pipeline_capture_to_graph(conn, settings):
     settings.extraction.enabled = True
 
     # 1. a recorded chunk → transcription job
+    chunk = settings.audio_raw_dir / "c.flac"
+    chunk.write_bytes(b"\x00\x01")  # a real file: missing files are skipped
     af = recorder.register_chunk(
-        conn, path=settings.audio_raw_dir / "c.flac",
+        conn, path=chunk,
         started_at="2026-06-16T09:00:00.000Z", ended_at="2026-06-16T09:00:02.000Z",
         duration_s=2.0, settings=settings,
     )

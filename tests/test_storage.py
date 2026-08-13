@@ -102,7 +102,7 @@ def test_upgrade_from_old_db(tmp_path):
     apply_base_schema(c)
     tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
-    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_perf_indexes"
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_reliability"
     c.close()
 
 
@@ -119,13 +119,23 @@ def test_perf_indexes_present(conn):
     } <= names
 
 
+def test_reliability_schema_present(conn):
+    af_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audio_files)").fetchall()}
+    assert {"speech_seconds", "rms_level", "overflow_count"} <= af_cols
+    names = {
+        r["name"]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    }
+    assert "idx_jobs_state_finished" in names
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0007_perf_indexes"
+    assert ver == "0008_reliability"
 
 
 def test_pause_state_roundtrip(conn):
