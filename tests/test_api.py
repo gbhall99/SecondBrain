@@ -2164,12 +2164,15 @@ def test_digest_param_validation(client):
 
 
 def test_digest_dates_endpoint(client):
+    from secondbrain.proactive.engine import week_monday
+
     r = client.get("/api/digest/dates")
     assert r.status_code == 200
     assert r.json() == {"daily": [], "weekly": []}
     client.post("/api/digest/generate", json={"kind": "weekly", "force": True})
     r = client.get("/api/digest/dates").json()
-    assert r["weekly"] == [_local_today()] and r["daily"] == []
+    # weekly digests are keyed to the week's Monday, whatever day they run
+    assert r["weekly"] == [week_monday(_local_today())] and r["daily"] == []
 
 
 def test_digest_citations_resolved(client, conn):
@@ -2212,7 +2215,7 @@ def test_suggestion_done_then_reopen(client, conn):
 
 def test_suggestion_reopen_lifts_kind_snooze(client, conn):
     sid = _seed_suggestion(conn)
-    client.post(f"/api/suggestions/{sid}/action", json={"action": "snooze"})
+    client.post(f"/api/suggestions/{sid}/action", json={"action": "snooze_kind"})
     row = conn.execute(
         "SELECT value FROM app_state WHERE key='proactive_snooze:commitment_owed'"
     ).fetchone()
@@ -2251,7 +2254,7 @@ def test_snooze_hides_all_same_kind_items_and_undo_restores_them(client, conn):
     a = _seed_suggestion(conn, dedupe="h-a")
     b = _seed_suggestion(conn, dedupe="h-b")
     c = _seed_suggestion(conn, kind="connection", dedupe="h-c")
-    client.post(f"/api/suggestions/{a}/action", json={"action": "snooze"})
+    client.post(f"/api/suggestions/{a}/action", json={"action": "snooze_kind"})
     # the whole kind is hidden, as the button label promises; other kinds stay
     assert [s["id"] for s in client.get("/api/suggestions").json()["suggestions"]] == [c]
     snoozed = client.get("/api/suggestions?status=snoozed").json()["suggestions"]
@@ -3335,3 +3338,290 @@ def test_action_items_carry_direction_and_needs_review(client, conn):
     # normalized due date drives ordering (dated first)
     ordered = [a["object_text"] for a in service.list_action_items(conn)]
     assert ordered[0] == "send deck"
+
+
+# --- brief: display caps, per-item snooze, async generate, copy/track ----------
+
+
+def test_suggestions_endpoint_returns_capped_list_plus_total(client, conn, settings):
+    settings.proactive.top_n = 2
+    settings.proactive.per_kind_cap = 1
+    for i in range(3):
+        _seed_suggestion(conn, kind="connection", dedupe=f"h-conn-{i}")
+    _seed_suggestion(conn, kind="goal_alignment", dedupe="h-goal")
+    r = client.get("/api/suggestions").json()
+    assert r["total"] == 4
+    assert len(r["suggestions"]) == 2                # top_n
+    kinds = [s["kind"] for s in r["suggestions"]]
+    assert kinds.count("connection") == 1            # per_kind_cap for non-commitments
+    assert len(r["more"]) == 2                       # the rest is still served
+    # handled statuses are never capped
+    assert client.get("/api/suggestions?status=done").json()["more"] == []
+
+
+def test_commitments_exempt_from_tight_per_kind_cap(client, conn, settings):
+    settings.proactive.top_n = 10
+    settings.proactive.per_kind_cap = 2
+    for i in range(5):
+        _seed_suggestion(conn, kind="commitment_overdue", dedupe=f"h-cmt-{i}")
+    r = client.get("/api/suggestions").json()
+    assert len(r["suggestions"]) == 5  # commitments are the core need
+
+
+def test_per_item_snooze_leaves_siblings_and_reopen_clears(client, conn):
+    a = _seed_suggestion(conn, dedupe="h-a")
+    b = _seed_suggestion(conn, dedupe="h-b")
+    r = client.post(f"/api/suggestions/{a}/action", json={"action": "snooze", "days": 3})
+    assert r.json()["ok"]
+    open_ids = [s["id"] for s in client.get("/api/suggestions").json()["suggestions"]]
+    assert open_ids == [b]  # only the acted row is hidden
+    row = conn.execute(
+        "SELECT value FROM app_state WHERE key='proactive_snooze_hash:h-a'"
+    ).fetchone()
+    assert row is not None and row["value"]
+    client.post(f"/api/suggestions/{a}/action", json={"action": "reopen"})
+    row = conn.execute(
+        "SELECT value FROM app_state WHERE key='proactive_snooze_hash:h-a'"
+    ).fetchone()
+    assert row["value"] == ""  # the item's own snooze lifted
+    assert client.post(
+        f"/api/suggestions/{a}/action", json={"action": "snooze", "days": 0}
+    ).status_code == 422
+
+
+def test_snoozed_hash_suppresses_redetection_until_expiry(conn, settings):
+    from datetime import UTC, datetime
+
+    from secondbrain.proactive import ranking
+    from secondbrain.proactive import store as pstore
+    from secondbrain.proactive.detectors import Suggestion
+
+    s = Suggestion(kind="connection", title="x", detail="", confidence=0.9,
+                   payload={"key": {"pair": [1, 2]}})
+    sid = conn.execute(
+        "INSERT INTO suggestions (digest_date, kind, title, importance, confidence,"
+        " status, dedupe_hash) VALUES (?, 'connection', 'x', 0.5, 0.9, 'open', ?)",
+        (_local_today(), s.dedupe_hash),
+    ).lastrowid
+    pstore.suggestion_action(conn, sid, "snooze", days=3)
+    now = datetime.now(UTC)
+    assert ranking.rank(conn, [s], settings, now=now) == []
+
+
+def test_snooze_of_stale_goal_bumps_last_progress(client, conn):
+    gid = conn.execute("INSERT INTO goals (title, status) VALUES ('g','active')").lastrowid
+    sid = conn.execute(
+        "INSERT INTO suggestions (digest_date, kind, title, importance, confidence,"
+        " goal_id, dedupe_hash) VALUES (?, 'stale_goal', 'No recent progress: g',"
+        " 0.5, 0.6, ?, 'h-sg')",
+        (_local_today(), gid),
+    ).lastrowid
+    assert conn.execute(
+        "SELECT last_progress_at FROM goals WHERE id=?", (gid,)
+    ).fetchone()["last_progress_at"] is None
+    client.post(f"/api/suggestions/{sid}/action", json={"action": "snooze"})
+    # "Review later" counts as looking at it — the stale nag resets
+    assert conn.execute(
+        "SELECT last_progress_at FROM goals WHERE id=?", (gid,)
+    ).fetchone()["last_progress_at"]
+
+
+def test_digest_generate_enqueues_for_real_llm(conn, settings):
+    settings.llm.backend = "ollama"  # a real model: never run in a request thread
+    client = TestClient(create_app(settings))
+    r = client.post("/api/digest/generate", json={"kind": "daily", "force": True})
+    assert r.status_code == 202
+    assert r.json()["queued"] is True
+    job = conn.execute(
+        "SELECT type, payload, state FROM jobs WHERE type='generate_digest'"
+    ).fetchone()
+    assert job is not None and '"daily"' in job["payload"] and job["state"] == "pending"
+    # the status poller reports the queued run as in flight
+    st = client.get("/api/digest/status").json()
+    assert st["generating"] is True and st["started_at"]
+    # re-clicking regenerate dedupes instead of stacking jobs
+    assert client.post("/api/digest/generate", json={"kind": "daily"}).status_code == 202
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE type='generate_digest'"
+    ).fetchone()["n"]
+    assert n == 1
+
+
+def test_brief_page_offers_copy_track_and_show_more(client, conn):
+    page = client.get("/brief").text
+    assert "Copy as Markdown" in page
+    assert "Track as task" in page          # commitment items promote to tasks
+    assert "snooze all" in page             # kind-wide snooze is the secondary action
+    assert '"more"' in page                 # overflow items embedded in state
+
+
+def test_weekly_brief_renders_stats_row(client, conn):
+    from secondbrain.proactive.engine import week_monday
+
+    client.post("/api/digest/generate", json={"kind": "weekly", "force": True})
+    page = client.get(f"/brief?kind=weekly&date={week_monday(_local_today())}").text
+    assert "stats-row" in page
+    assert "plan adherence" in page or "tasks done" in page
+
+
+# --- tasks page: direction, capacity, filters, energy, subtasks ----------------
+
+
+def _owner_and_dana(conn):
+    from secondbrain.knowledge import graph
+
+    me = graph.create_node(conn, type="person", name="Me", embedding=None,
+                           confidence=1.0, extraction_id=None)
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=0.9, extraction_id=None)
+    return me, dana
+
+
+def test_tasks_page_splits_commitments_by_direction(client, conn):
+    from secondbrain.knowledge import graph
+
+    me, dana = _owner_and_dana(conn)
+    graph.upsert_edge(conn, src_node_id=me, dst_node_id=dana, predicate="action_item",
+                      kind="action_item", object_text="send the deck",
+                      source_segment_ids=[1])
+    graph.upsert_edge(conn, src_node_id=dana, dst_node_id=me, predicate="action_item",
+                      kind="action_item", object_text="send me the numbers",
+                      source_segment_ids=[1])
+    page = client.get("/tasks").text
+    assert "You owe" in page and "Owed to you" in page
+    assert ">Chase<" in page                       # owed-to-you gets Chase, not Add
+    assert "Add to tasks" in page                  # you-owe keeps promotion
+
+
+def test_chase_creates_followup_task(client, conn):
+    from secondbrain.knowledge import graph
+
+    me, dana = _owner_and_dana(conn)
+    edge = graph.upsert_edge(conn, src_node_id=dana, dst_node_id=me,
+                             predicate="action_item", kind="action_item",
+                             object_text="send me the numbers", source_segment_ids=[1])
+    r = client.post(f"/api/actions/{edge}/promote", json={"chase": True})
+    assert r.status_code == 200
+    assert r.json()["title"] == "Follow up with Dana: send me the numbers"
+    # idempotent per edge, even across chase/plain
+    assert client.post(f"/api/actions/{edge}/promote").json()["task_id"] == r.json()["task_id"]
+
+
+def test_tasks_page_meeting_aware_capacity_suggestion(client, conn, settings):
+    from datetime import UTC, datetime, timedelta
+
+    from secondbrain.query import service
+
+    today = service.local_today()
+    noon = datetime.strptime(today + " 12:00", "%Y-%m-%d %H:%M").astimezone(UTC)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    conn.execute(
+        "INSERT INTO conversations (started_at, ended_at, status) VALUES (?, ?, 'closed')",
+        (noon.strftime(fmt), (noon + timedelta(minutes=120)).strftime(fmt)),
+    )
+    page = client.get("/tasks").text
+    assert "2.0h of meetings so far" in page
+    expected = settings.tasks.workday_minutes - 120
+    assert f"suggested capacity {expected}m" in page
+    # the capacity input pre-fills the suggestion when no plan exists yet
+    assert f'id="capacity" min="15" max="1440" step="5"\n               value="{expected}"' in page
+
+
+def test_tasks_page_no_estimate_note_on_plan(client):
+    client.post("/api/tasks", json={"title": "unsized work"})
+    client.post("/api/plan/today", json={"action": "propose"})
+    page = client.get("/tasks").text
+    assert "no estimate (assumed 30m)" in page
+
+
+def test_plan_add_task_endpoint_and_do_today_button(client, conn):
+    a = client.post("/api/tasks", json={"title": "pin me"}).json()["id"]
+    assert "Do today" in client.get("/tasks").text
+    r = client.post("/api/plan/today", json={"action": "add_task", "task_id": a})
+    assert r.status_code == 200 and a in r.json()["task_ids"]
+    # validation: missing id, unknown id, finished task
+    assert client.post("/api/plan/today", json={"action": "add_task"}).status_code == 422
+    assert client.post(
+        "/api/plan/today", json={"action": "add_task", "task_id": 99999}
+    ).status_code == 404
+    client.post(f"/api/tasks/{a}/status", json={"status": "done"})
+    assert client.post(
+        "/api/plan/today", json={"action": "add_task", "task_id": a}
+    ).status_code == 409
+
+
+def test_backlog_filters_energy_and_quick_wins_markup(client, conn):
+    gid = client.post("/api/goals", json={"title": "Learn woodworking"}).json()["id"]
+    client.post("/api/tasks", json={"title": "deep focus work", "energy": "deep",
+                                    "goal_id": gid})
+    client.post("/api/tasks", json={"title": "tiny errand", "effort": 1})
+    page = client.get("/tasks").text
+    # filter widgets
+    assert 'id="bl-filter"' in page and 'id="bl-quadrant"' in page
+    assert 'id="bl-goal"' in page and 'id="bl-week"' in page and 'id="bl-quick"' in page
+    assert "Quick wins" in page
+    # rows carry the data the client-side filters use
+    assert 'data-energy="deep"' in page
+    assert 'data-quick="1"' in page
+    assert f'data-goal="{gid}"' in page
+    # the energy chip renders on the row, and the forms offer preset energies
+    assert 'class="pill t-energy"' in page
+    assert 'id="new-energy"' in page and 'id="new-goal"' in page
+
+
+def test_task_goal_and_energy_patch(client):
+    gid = client.post("/api/goals", json={"title": "G"}).json()["id"]
+    tid = client.post("/api/tasks", json={"title": "movable"}).json()["id"]
+    t = client.patch(f"/api/tasks/{tid}", json={"goal_id": gid, "energy": "quick"}).json()["task"]
+    assert t["goal_id"] == gid and t["energy"] == "quick"
+    # 0 / '' clear them
+    t = client.patch(f"/api/tasks/{tid}", json={"goal_id": 0, "energy": ""}).json()["task"]
+    assert t["goal_id"] is None and t["energy"] is None
+    assert client.patch(f"/api/tasks/{tid}", json={"goal_id": 99999}).status_code == 404
+
+
+def test_backlog_groups_subtasks_under_parent(client, conn):
+    from secondbrain.tasks import store as tstore
+
+    parent = tstore.create_task(conn, title="Big milestone")
+    tstore.create_task(conn, title="child step one", parent_task_id=parent)
+    tstore.create_task(conn, title="child step two", parent_task_id=parent)
+    page = client.get("/tasks").text
+    assert 'class="subtasks"' in page
+    assert "2 sub-tasks" in page
+    # children render inside the collapsed group, not as flat siblings
+    assert page.index('class="subtasks"') < page.index("child step one")
+
+
+def test_tasks_page_keyboard_shortcuts_wired(client):
+    page = client.get("/tasks").text
+    assert "press n to jump here" in page
+    assert "requestSubmit" in page               # Cmd/Ctrl+Enter submits forms
+
+
+def test_rollover_badge_shows_after_two_slips(client, conn):
+    tid = client.post("/api/tasks", json={"title": "keeps slipping"}).json()["id"]
+    conn.execute("UPDATE tasks SET rollover_count=3, last_planned_for='2026-06-16' "
+                 "WHERE id=?", (tid,))
+    page = client.get("/tasks").text
+    assert "slipped ×3" in page
+    conn.execute("UPDATE tasks SET rollover_count=1 WHERE id=?", (tid,))
+    assert "slipped ×" not in client.get("/tasks").text  # one slip isn't nagged about
+
+
+def test_big_rock_flagged_on_page(client):
+    client.post("/api/tasks", json={"title": "giant doc", "estimate_minutes": 300,
+                                    "value": 5})
+    client.post("/api/plan/today", json={"action": "propose", "capacity_minutes": 60})
+    page = client.get("/tasks").text
+    assert "won’t fit — schedule a block?" in page
+    assert "over capacity" in page
+
+
+def test_priority_score_and_why_rendered(client):
+    client.post("/api/tasks", json={"title": "explainable", "value": 5})
+    page = client.get("/tasks").text
+    assert 'class="t-score"' in page
+    assert "Why this rank:" in page
+    t = client.get("/api/tasks").json()["tasks"][0]
+    assert "priority_why" in t and "value" in t["priority_why"]

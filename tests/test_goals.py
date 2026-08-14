@@ -130,15 +130,16 @@ def test_goal_links_carry_display_info(client, conn, settings):
     link.link_advance(conn, gid, eid)
     conn.commit()
     links = client.get(f"/api/goals/{gid}").json()["links"]
-    by_kind = {link_["kind"]: link_ for link_ in links}
-    assert by_kind["node"]["label"] == "pricing strategy"
-    assert by_kind["node"]["ref_type"] == "topic"
-    assert by_kind["edge"]["label"] == "ship the pricing strategy deck"
-    assert by_kind["edge"]["ref_type"] == "decision"
-    assert by_kind["edge"]["src_node_id"] == nid
-    assert by_kind["edge"]["relation"] == "advances"
+    by = {(link_["kind"], link_["relation"]): link_ for link_ in links}
+    node = by[("node", "related")]
+    assert node["label"] == "pricing strategy"
+    assert node["ref_type"] == "topic"
+    edge = by[("edge", "advances")]
+    assert edge["label"] == "ship the pricing strategy deck"
+    assert edge["ref_type"] == "decision"
+    assert edge["src_node_id"] == nid
     # original contract keys are still present on every link
-    assert {"kind", "ref_id", "relation", "score"} <= set(by_kind["node"])
+    assert {"kind", "ref_id", "relation", "score"} <= set(node)
 
 
 def test_api_goals_list_reports_links_count(client, conn, settings):
@@ -226,11 +227,12 @@ def test_api_decompose_and_accept_plan(client, conn, monkeypatch):
     assert accepted.status_code == 200
     assert len(accepted.json()["task_ids"]) == 5  # 2 milestones + 3 steps
     goal = client.get(f"/api/goals/{gid}").json()["goal"]
-    assert goal["tasks_total"] == 5 and goal["tasks_done"] == 0
+    # progress counts real work only: the 2 AI milestone containers are excluded
+    assert goal["tasks_total"] == 3 and goal["tasks_done"] == 0
     listed = client.get("/api/goals").json()["goals"][0]
-    assert listed["tasks_total"] == 5 and listed["tasks_done"] == 0
+    assert listed["tasks_total"] == 3 and listed["tasks_done"] == 0
     page = client.get("/goals")
-    assert "0/5 tasks done" in page.text   # progress doubles as the drill-down toggle
+    assert "0/3 tasks done" in page.text   # progress doubles as the drill-down toggle
     assert "toggleTasks" in page.text
 
 
@@ -263,3 +265,90 @@ def test_goals_page_states(client, conn, settings):
     assert "No paused goals" in filtered.text
     client.post(f"/api/goals/{gid}/status", json={"status": "paused"})
     assert "Resume" in client.get("/goals").text  # context-aware actions
+
+
+# --- progress excludes AI milestone containers ---------------------------------
+
+
+def test_progress_excludes_ai_milestone_containers(conn, settings):
+    from secondbrain.tasks import store as tstore
+
+    gid = store.create_goal(conn, title="Container test", settings=settings)
+    container = tstore.create_task(conn, title="Milestone", goal_id=gid, source="ai")
+    step = tstore.create_task(conn, title="Step 1", goal_id=gid,
+                              parent_task_id=container, source="ai")
+    manual = tstore.create_task(conn, title="Manual", goal_id=gid)
+    tstore.set_status(conn, step, "done")
+    g = store.get_goal(conn, gid)["goal"]
+    # the container is bookkeeping: 1/2 real tasks done, not 1/3
+    assert g["tasks_total"] == 2 and g["tasks_done"] == 1
+    listed = next(x for x in store.list_goals(conn) if x["id"] == gid)
+    assert listed["tasks_total"] == 2 and listed["tasks_done"] == 1
+    # an AI task WITHOUT children is real work, not a container
+    solo_ai = tstore.create_task(conn, title="Solo AI", goal_id=gid, source="ai")
+    g = store.get_goal(conn, gid)["goal"]
+    assert g["tasks_total"] == 3
+    assert manual and solo_ai
+    # progress_counts (the at-risk detector's source) agrees
+    done, total = store.progress_counts(conn)[gid]
+    assert (done, total) == (1, 3)
+
+
+# --- auto-link calibration -----------------------------------------------------
+
+
+def test_keyword_threshold_is_separate_and_lower(conn, settings):
+    # jaccard 0.4 ("pricing strategy" vs "ship the pricing strategy deck"):
+    # below the 0.72 cosine threshold, above the 0.3 keyword threshold.
+    nid = graph.create_node(conn, type="topic", name="pricing strategy", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    eid = conn.execute(
+        "INSERT INTO kg_edges (src_node_id, kind, object_text, valid) "
+        "VALUES (?, 'decision', 'ship the pricing strategy deck', 1)", (nid,),
+    ).lastrowid
+    gid = store.create_goal(conn, title="pricing strategy", settings=settings)
+    link.relink_goal(conn, gid, settings)
+    refs = {(lk["kind"], lk["ref_id"]) for lk in store.get_goal(conn, gid)["links"]}
+    assert ("edge", eid) in refs
+    # raising the keyword threshold drops it again
+    settings.proactive.goal_link_keyword_threshold = 0.5
+    link.relink_goal(conn, gid, settings)
+    refs = {(lk["kind"], lk["ref_id"]) for lk in store.get_goal(conn, gid)["links"]}
+    assert ("edge", eid) not in refs and ("node", nid) in refs
+
+
+def test_relink_preserves_created_at_of_surviving_links(conn, settings):
+    graph.create_node(conn, type="topic", name="atlas", embedding=None,
+                      confidence=0.9, extraction_id=None)
+    gid = store.create_goal(conn, title="atlas", settings=settings)
+    link.relink_goal(conn, gid, settings)
+    conn.execute("UPDATE goal_links SET created_at='2020-01-01T00:00:00.000Z' "
+                 "WHERE goal_id=?", (gid,))
+    link.relink_goal(conn, gid, settings)
+    row = conn.execute(
+        "SELECT created_at FROM goal_links WHERE goal_id=?", (gid,)
+    ).fetchone()
+    assert row["created_at"] == "2020-01-01T00:00:00.000Z"  # not delete+reinsert
+
+
+def test_relink_incremental_scans_only_new_edges(conn, settings):
+    nid = graph.create_node(conn, type="topic", name="atlas", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    old_edge = conn.execute(
+        "INSERT INTO kg_edges (src_node_id, kind, object_text, valid) "
+        "VALUES (?, 'idea', 'atlas', 1)", (nid,),
+    ).lastrowid
+    gid = store.create_goal(conn, title="atlas", settings=settings)
+    link.relink_goal(conn, gid, settings)  # full relink
+    refs = {(lk["kind"], lk["ref_id"]) for lk in store.get_goal(conn, gid)["links"]}
+    assert ("edge", old_edge) in refs
+    new_edge = conn.execute(
+        "INSERT INTO kg_edges (src_node_id, kind, object_text, valid) "
+        "VALUES (?, 'decision', 'atlas kickoff', 1)", (nid,),
+    ).lastrowid
+    n = link.relink_goal(conn, gid, settings, since_edge_id=old_edge)
+    assert n >= 1
+    refs = {(lk["kind"], lk["ref_id"]) for lk in store.get_goal(conn, gid)["links"]}
+    # the new edge was linked; the old edge link survived without a re-scan
+    assert ("edge", new_edge) in refs and ("edge", old_edge) in refs
+    assert ("node", nid) in refs

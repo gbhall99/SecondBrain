@@ -1956,10 +1956,31 @@ def task_set_status(conn, task_id: int, status: str) -> None:
     store.set_status(conn, task_id, status)
 
 
-def promote_action_item(conn, edge_id: int, goal_id: int | None = None) -> int | None:
+def promote_action_item(
+    conn, edge_id: int, goal_id: int | None = None, *, chase: bool = False
+) -> int | None:
+    """Promote an action-item edge into a task. With ``chase`` (for items owed
+    TO you) the task becomes a follow-up — 'Follow up with <who>: <text>' —
+    instead of copying their work into your backlog. Idempotent per edge."""
     from secondbrain.tasks import store
 
-    return store.promote_action_item(conn, edge_id, goal_id)
+    if not chase:
+        return store.promote_action_item(conn, edge_id, goal_id)
+    row = conn.execute(
+        """
+        SELECT e.object_text, COALESCE(s.display_label, s.name) AS src_name
+        FROM kg_edges e JOIN kg_nodes s ON s.id = e.src_node_id
+        WHERE e.id=? AND e.kind='action_item'
+        """,
+        (edge_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    who = row["src_name"] or "them"
+    text = row["object_text"] or "(unspecified)"
+    return store.promote_action_item(
+        conn, edge_id, goal_id, title=f"Follow up with {who}: {text}"
+    )
 
 
 def dismiss_action_item(conn, edge_id: int) -> bool:
@@ -2019,6 +2040,27 @@ def remove_from_day(conn, task_id: int, date=None) -> dict | None:
     from secondbrain.tasks import planner
 
     return planner.remove_from_day(conn, task_id, date or local_today())
+
+
+def add_to_day(conn, task_id: int, date=None, settings: Settings | None = None) -> dict | None:
+    """Pin one task into today's plan ("Do today")."""
+    from secondbrain.tasks import planner
+
+    return planner.add_to_day(conn, task_id, date or local_today(),
+                              settings or get_settings())
+
+
+def meeting_minutes_today(conn) -> int:
+    """Minutes of recorded conversation on the local day so far."""
+    from secondbrain.tasks import planner
+
+    return planner.meeting_minutes(conn, local_today())
+
+
+def suggested_capacity(settings: Settings, meeting_min: int) -> int:
+    from secondbrain.tasks import planner
+
+    return planner.suggested_capacity(settings, meeting_min)
 
 
 def task_research(
@@ -2083,14 +2125,24 @@ def annotate_task_priorities(
     """Attach the Eisenhower ``quadrant`` and planner ``priority_score`` to each
     task dict (in place, display-only fields). These are the exact signals
     ``propose_day`` ranks by, so a backlog sorted on ``priority_score`` matches
-    what would be planned next."""
+    what would be planned next. ``priority_why`` (additive) spells out the
+    factors behind the score for the UI's why-this-rank tooltip."""
     from secondbrain.tasks import prioritize
 
     settings = settings or get_settings()
     today = datetime.strptime(local_today(), "%Y-%m-%d").date()
     for t in tasks:
-        t["quadrant"] = prioritize.quadrant(conn, t, settings, today)
-        t["priority_score"] = prioritize.score(conn, t, settings, today)
+        parts = prioritize.score_breakdown(conn, t, settings, today)
+        t["quadrant"] = parts["quadrant"]
+        t["priority_score"] = parts["score"]
+        why = (
+            f"value {parts['base']:.2f} × goal {parts['goal']:.2f} × "
+            f"{parts['quadrant']} {parts['quadrant_weight']:.2f} × "
+            f"urgency {parts['urgency']:.2f}"
+        )
+        if parts["quick_win"] > 1.0:
+            why += f" × quick win {parts['quick_win']:.2f}"
+        t["priority_why"] = f"{why} = {parts['score']:.2f}"
     return tasks
 
 
@@ -2613,17 +2665,44 @@ def generate_digest(conn, settings: Settings | None = None, kind: str = "daily",
 
     settings = settings or get_settings()
     d = date or _today()
+    if kind == "weekly":
+        d = engine.week_monday(d)  # one weekly row per week, keyed to its Monday
     existing = store.get_digest(conn, d, kind)
     if existing and not force:
         return existing
     return engine.run_digest(conn, settings=settings, kind=kind, date=d)
 
 
+def enqueue_digest(conn, kind: str = "daily") -> int | None:
+    """Queue digest generation on the daemon's worker (same job type it uses).
+
+    Returns the job id, or None when an equivalent job is already queued —
+    either way the /api/digest/status poller reports it as in flight.
+    """
+    from secondbrain.pipeline import queue as q
+    from secondbrain.proactive import engine
+
+    return q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": kind}, dedupe_key="kind")
+
+
+def _queued_digest_job(conn, kind: str):
+    return conn.execute(
+        "SELECT started_at, scheduled_at FROM jobs "
+        "WHERE type='generate_digest' AND state IN ('pending','running') "
+        "AND json_extract(payload, '$.kind') = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (kind,),
+    ).fetchone()
+
+
 def get_digest(conn, date: str | None = None, kind: str = "daily") -> dict | None:
     from secondbrain.knowledge.chat import _CITE
-    from secondbrain.proactive import store
+    from secondbrain.proactive import engine, store
 
-    d = store.get_digest(conn, date or _today(), kind)
+    day = date or _today()
+    if kind == "weekly" and date is None:
+        day = engine.week_monday(day)  # weekly rows are keyed to their Monday
+    d = store.get_digest(conn, day, kind)
     if d is not None:
         # Additive: resolve [seg_id] markers in the summary so the UI can link
         # each citation to its moment in the day view (same shape as /api/ask).
@@ -2671,29 +2750,50 @@ def list_suggestions(conn, date: str | None = None, status: str = "open") -> lis
     return store.list_suggestions(conn, date, status)
 
 
-def suggestion_action(conn, suggestion_id: int, action: str) -> bool:
+def suggestion_action(
+    conn, suggestion_id: int, action: str, *, days: int | None = None,
+    settings: Settings | None = None,
+) -> bool:
     """Apply an action to a suggestion; False when the id doesn't exist."""
     from secondbrain.proactive import store
 
-    return store.suggestion_action(conn, suggestion_id, action)
+    settings = settings or get_settings()
+    if action in ("snooze", "snooze_kind") and days is None:
+        days = settings.proactive.snooze_default_days
+    return store.suggestion_action(conn, suggestion_id, action, days=days)
+
+
+def cap_suggestions(suggestions: list[dict], settings: Settings | None = None):
+    """(visible, overflow) display split for a ranked open-suggestion list."""
+    from secondbrain.proactive import ranking
+
+    return ranking.apply_caps(suggestions, settings or get_settings())
 
 
 def digest_generation_status(conn, kind: str = "daily") -> dict:
-    """In-flight generation marker plus today's digest stamp for ``kind``.
+    """In-flight generation marker plus the current digest stamp for ``kind``.
 
     Powers the brief page's resumable progress line: ``generating`` says a run
-    is under way (``started_at`` = its UTC start), and ``created_at`` is the
-    current stamp of today's digest row — once it moves past ``started_at``,
-    the run has landed.
+    is under way or queued (``started_at`` = its UTC start / enqueue time), and
+    ``created_at`` is the current stamp of the digest row — once it moves past
+    ``started_at``, the run has landed. Weekly digests are keyed to the week's
+    Monday.
     """
-    from secondbrain.proactive import store
+    from secondbrain.proactive import engine, store
 
     today = _today()
+    digest_day = engine.week_monday(today) if kind == "weekly" else today
     started = store.generating_since(conn, kind)
-    d = store.get_digest(conn, today, kind)
+    if started is None:
+        # A queued (or daemon-claimed) generation job counts as in flight —
+        # the web Regenerate enqueues instead of blocking a request thread.
+        job = _queued_digest_job(conn, kind)
+        if job is not None:
+            started = job["started_at"] or job["scheduled_at"]
+    d = store.get_digest(conn, digest_day, kind)
     return {
         "kind": kind,
-        "date": today,
+        "date": digest_day,
         "generating": started is not None,
         "started_at": started,
         "created_at": (d or {}).get("created_at"),
@@ -2701,10 +2801,12 @@ def digest_generation_status(conn, kind: str = "daily") -> dict:
 
 
 def digest_generating(conn) -> dict[str, str | None]:
-    """Per-kind started-at marker of any in-flight digest generation."""
-    from secondbrain.proactive import store
-
-    return {k: store.generating_since(conn, k) for k in ("daily", "weekly")}
+    """Per-kind started-at marker of any in-flight (or queued) generation."""
+    out: dict[str, str | None] = {}
+    for k in ("daily", "weekly"):
+        st = digest_generation_status(conn, k)
+        out[k] = st["started_at"] if st["generating"] else None
+    return out
 
 
 def _today() -> str:

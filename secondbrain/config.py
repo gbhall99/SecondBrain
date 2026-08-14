@@ -237,6 +237,9 @@ class TasksConfig(BaseModel):
     # Goal decomposition + tasks + daily planning (Phase 6). OFF by default.
     enabled: bool = False
     daily_capacity_minutes: int = 240
+    # Length of a working day; the planner suggests capacity = workday minus
+    # today's recorded meeting minutes (floored at 30).
+    workday_minutes: int = 480
     urgent_days: int = 2               # due within N days → "urgent" quadrant
     important_value: int = 4           # value ≥ this → "important" quadrant
     # Opt-in web research per task (local graph-RAG research is always available).
@@ -264,6 +267,9 @@ class ProactiveConfig(BaseModel):
     lookback_days: int = 30
     connection_threshold: float = 0.78
     goal_link_threshold: float = 0.72
+    # Jaccard keyword overlap is a much coarser signal than embedding cosine,
+    # so the keyword fallback gets its own (lower) linking threshold.
+    goal_link_keyword_threshold: float = 0.3
     due_soon_days: int = 3
     stale_goal_days: int = 14
     stale_days: int = 21
@@ -271,6 +277,8 @@ class ProactiveConfig(BaseModel):
     suppress_days: int = 30
     urgent_due_hours: int = 24
     reconnect_days: int = 30           # flag a known person not seen in N days
+    snooze_default_days: int = 7       # per-item snooze length when none chosen
+    goal_at_risk_days: int = 14        # target date within N days + low progress → at risk
 
     @field_validator("digest_hour")
     @classmethod
@@ -286,7 +294,10 @@ class ProactiveConfig(BaseModel):
             raise ValueError(f"proactive.weekly_review_weekday must be in [0, 6], got {v}")
         return v
 
-    @field_validator("connection_threshold", "goal_link_threshold", "confidence_floor")
+    @field_validator(
+        "connection_threshold", "goal_link_threshold", "goal_link_keyword_threshold",
+        "confidence_floor",
+    )
     @classmethod
     def _check_unit_interval(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:

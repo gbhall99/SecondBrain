@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from secondbrain.storage.models import utcnow_iso
@@ -60,10 +61,13 @@ def release_stale_scheduled(conn: sqlite3.Connection, before_day: str) -> int:
     A task accepted into an earlier day's plan but never finished would keep
     a stale 'scheduled' pill forever — contradicting a fresh Today section
     that says there's no plan yet. In-progress and done/dropped tasks are
-    left untouched. Returns how many tasks were released.
+    left untouched. Each released task records the slip: ``rollover_count``
+    increments and ``last_planned_for`` keeps the day it was planned for, so
+    the UI can show "slipped ×3". Returns how many tasks were released.
     """
     cur = conn.execute(
-        "UPDATE tasks SET status='backlog', scheduled_for=NULL, updated_at=? "
+        "UPDATE tasks SET status='backlog', last_planned_for=scheduled_for, "
+        "rollover_count=rollover_count+1, scheduled_for=NULL, updated_at=? "
         "WHERE status='scheduled' AND scheduled_for IS NOT NULL AND scheduled_for < ?",
         (utcnow_iso(), before_day),
     )
@@ -78,6 +82,23 @@ def set_status(conn: sqlite3.Connection, task_id: int, status: str) -> None:
     )
     if status == "done":
         _bump_goal_progress(conn, task_id)
+    if status in DONE_STATUSES:
+        # A finished (or abandoned) task leaves any day plan that still lists
+        # it — the Today section shows what's left to do, not history.
+        _drop_from_day_plans(conn, task_id)
+
+
+def _drop_from_day_plans(conn: sqlite3.Connection, task_id: int) -> None:
+    for r in conn.execute("SELECT date, task_ids FROM day_plans").fetchall():
+        try:
+            ids = json.loads(r["task_ids"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        if task_id in ids:
+            conn.execute(
+                "UPDATE day_plans SET task_ids=? WHERE date=?",
+                (json.dumps([t for t in ids if t != task_id]), r["date"]),
+            )
 
 
 def _bump_goal_progress(conn: sqlite3.Connection, task_id: int) -> None:
@@ -143,22 +164,32 @@ def ready_tasks(conn: sqlite3.Connection) -> list[dict]:
 
 
 def promote_action_item(
-    conn: sqlite3.Connection, edge_id: int, goal_id: int | None = None
+    conn: sqlite3.Connection,
+    edge_id: int,
+    goal_id: int | None = None,
+    *,
+    title: str | None = None,
 ) -> int | None:
-    """Turn a kg_edges action_item into a task (idempotent per edge)."""
+    """Turn a kg_edges action_item into a task (idempotent per edge).
+
+    ``title`` overrides the task title (the "Chase" flow turns an owed-to-you
+    item into a follow-up task instead of copying their work into your list).
+    """
     existing = conn.execute("SELECT id FROM tasks WHERE source_edge_id=?", (edge_id,)).fetchone()
     if existing:
         return int(existing["id"])
     edge = conn.execute(
-        "SELECT object_text, due_date FROM kg_edges WHERE id=? AND kind='action_item'", (edge_id,)
+        "SELECT object_text, due_date, due_date_norm FROM kg_edges "
+        "WHERE id=? AND kind='action_item'",
+        (edge_id,),
     ).fetchone()
     if edge is None:
         return None
     return create_task(
         conn,
-        title=edge["object_text"] or "(action item)",
+        title=title or edge["object_text"] or "(action item)",
         goal_id=goal_id,
-        due_date=edge["due_date"],
+        due_date=edge["due_date_norm"] or edge["due_date"],
         source="conversation",
         source_edge_id=edge_id,
     )

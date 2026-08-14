@@ -12,14 +12,21 @@ from secondbrain.proactive.detectors import Suggestion, _as_date
 BASE_WEIGHT = {
     "commitment_overdue": 1.0,
     "commitment_owed": 0.9,
+    "goal_at_risk": 0.9,
+    "tasks_due": 0.85,
     "goal_alignment": 0.8,
+    "commitment_undated": 0.75,
+    "plan_carryover": 0.7,
     "connection": 0.6,
     "stale_goal": 0.5,
-    "stale_commitment": 0.5,
     "relationship_reconnect": 0.45,
     "coaching": 0.4,
 }
 _PRIORITY_FACTOR = {1: 1.0, 2: 0.7, 3: 0.4}
+
+# Commitments are the core need — they get a far looser per-kind cap than the
+# nice-to-have kinds when the visible list is cut down at render time.
+COMMITMENT_KIND_CAP = 10
 
 
 def _urgency(s: Suggestion, today) -> float:
@@ -46,10 +53,16 @@ def rank(
     *,
     now: datetime,
 ) -> list[Suggestion]:
-    """Score, filter (floor/snooze/suppress), cap per-kind and to top_n."""
+    """Score and filter (floor/snooze/suppress), sorted by importance.
+
+    Every scored suggestion is returned (and persisted by the engine); the
+    top_n / per-kind display cut happens at render time via :func:`apply_caps`
+    so "show more" can reveal the rest without a re-run.
+    """
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%fZ")
     weights = store.get_feedback_weights(conn)
     snoozed = store.snoozed_kinds(conn, now_iso)
+    snoozed_items = store.snoozed_hashes(conn, now_iso)
     suppressed = store.suppressed_hashes(conn, settings, now_iso)
     today = now.date()
     cfg = settings.proactive
@@ -58,7 +71,7 @@ def rank(
     for s in suggestions:
         if s.confidence < cfg.confidence_floor:
             continue
-        if s.kind in snoozed or s.dedupe_hash in suppressed:
+        if s.kind in snoozed or s.dedupe_hash in snoozed_items or s.dedupe_hash in suppressed:
             continue
         s.importance = round(
             BASE_WEIGHT.get(s.kind, 0.5)
@@ -71,14 +84,31 @@ def rank(
         scored.append(s)
 
     scored.sort(key=lambda x: x.importance, reverse=True)
+    return scored
 
-    out: list[Suggestion] = []
+
+def _kind_of(s) -> str:
+    return s["kind"] if isinstance(s, dict) else s.kind
+
+
+def apply_caps(items: list, settings: Settings) -> tuple[list, list]:
+    """Split an importance-sorted list into (visible, overflow) for display.
+
+    ``top_n`` bounds the visible list; ``per_kind_cap`` bounds each kind within
+    it — except commitment kinds, which get :data:`COMMITMENT_KIND_CAP`
+    (commitments are the whole point of the brief). Works on Suggestion
+    objects and on the dict rows the API serves.
+    """
+    visible: list = []
+    overflow: list = []
     per_kind: dict[str, int] = {}
-    for s in scored:
-        if per_kind.get(s.kind, 0) >= cfg.per_kind_cap:
+    for s in items:
+        kind = _kind_of(s)
+        cap = COMMITMENT_KIND_CAP if kind.startswith("commitment") \
+            else settings.proactive.per_kind_cap
+        if per_kind.get(kind, 0) >= cap or len(visible) >= settings.proactive.top_n:
+            overflow.append(s)
             continue
-        per_kind[s.kind] = per_kind.get(s.kind, 0) + 1
-        out.append(s)
-        if len(out) >= cfg.top_n:
-            break
-    return out
+        per_kind[kind] = per_kind.get(kind, 0) + 1
+        visible.append(s)
+    return visible, overflow

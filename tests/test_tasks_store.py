@@ -35,3 +35,22 @@ def test_promote_action_item_idempotent(conn):
     task = store.get_task(conn, t1)
     assert task["source"] == "conversation" and task["source_edge_id"] == edge
     assert task["due_date"] == "2026-07-01"
+
+
+def test_promote_with_title_override_keeps_idempotence(conn):
+    owner = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                              confidence=1.0, extraction_id=None)
+    edge = graph.upsert_edge(conn, src_node_id=owner, dst_node_id=None,
+                             predicate="action_item", kind="action_item",
+                             object_text="send the figures", due_date="2026-07-01",
+                             source_segment_ids=[1])
+    t1 = store.promote_action_item(conn, edge, title="Follow up with Dana: send the figures")
+    assert store.get_task(conn, t1)["title"] == "Follow up with Dana: send the figures"
+    # still idempotent per edge — a plain promote returns the same task
+    assert store.promote_action_item(conn, edge) == t1
+
+
+def test_new_tasks_start_with_zero_rollovers(conn):
+    tid = store.create_task(conn, title="fresh")
+    t = store.get_task(conn, tid)
+    assert t["rollover_count"] == 0 and t["last_planned_for"] is None

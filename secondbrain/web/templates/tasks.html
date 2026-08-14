@@ -14,6 +14,8 @@
     #capacity { width: 5.6rem; }
     @media (max-width: 480px) { .cap-group { margin-left: 0; } }
     .plan-hint { margin: -.2rem 0 .5rem; }
+    .cap-warn { color: var(--danger); font-weight: 600; }
+    .cap-suggest { flex-basis: 100%; margin: 0; }
 
     /* task rows (shared by Today / Backlog / Completed / action items) */
     ul.tasks { list-style: none; margin: .2rem 0 .6rem; padding: 0; }
@@ -30,6 +32,13 @@
     .ts-in_progress { background: color-mix(in srgb, var(--ok) 12%, transparent); font-weight: 600; }
     .ts-blocked { background: color-mix(in srgb, var(--warn) 18%, transparent);
                   color: var(--warn); font-weight: 600; }
+    .t-energy { background: var(--soft); color: var(--muted); }
+    .t-slip { background: color-mix(in srgb, var(--warn) 18%, transparent);
+              color: var(--warn); }
+    .t-wontfit { background: color-mix(in srgb, var(--danger) 13%, transparent);
+                 color: var(--danger); font-weight: 600; }
+    .t-score { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums;
+               cursor: help; }
     .t-detail { margin: .1rem 0 0; font-size: .88rem; color: var(--muted);
                 white-space: pre-wrap; overflow-wrap: anywhere; }
     .t-meta { margin: .15rem 0 0; font-size: .82rem; }
@@ -43,6 +52,14 @@
       .t-acts button { flex: 1 0 auto; padding: .5rem .6rem; }
     }
 
+    /* sub-tasks grouped under their parent */
+    details.subtasks { margin: .35rem 0 0 .3rem; }
+    details.subtasks summary { cursor: pointer; color: var(--muted); font-size: .85rem;
+                               width: max-content; padding: .1rem .2rem; border-radius: 6px; }
+    ul.tasks.sub { margin: .1rem 0 0 1.1rem; border-left: 2px solid var(--line);
+                   padding-left: .7rem; }
+    ul.tasks.sub .task:last-child { border-bottom: 0; }
+
     /* research notes */
     .notes { margin: .55rem 0 .1rem; padding-left: .85rem; border-left: 2px solid var(--line); }
     .note { margin: .45rem 0; }
@@ -51,6 +68,7 @@
     .note-srcs { margin: .15rem 0 0; padding-left: 1.1rem; font-size: .82rem;
                  color: var(--muted); }
     .note-srcs a { overflow-wrap: anywhere; }
+    .notes-refresh { margin: .2rem 0 .35rem; }
 
     /* Eisenhower legend */
     details.tag-legend { margin: .2rem 0 .6rem; }
@@ -62,6 +80,13 @@
     details.tag-legend li { font-size: .85rem; color: var(--muted); }
     details.tag-legend li .pill { font-size: .72rem; padding: .12rem .55rem;
                                   margin: 0 .3rem 0 0; }
+
+    /* backlog filters */
+    .filters-row { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .7rem;
+                   margin: .5rem 0 .3rem; }
+    .filters-row input[type=search] { flex: 1; min-width: min(11rem, 100%); }
+    .filters-row label { font-size: .85rem; color: var(--muted); display: inline-flex;
+                         align-items: center; gap: .3rem; white-space: nowrap; }
 
     /* add + edit forms */
     .add-form { margin: .8rem 0 1rem; }
@@ -86,6 +111,8 @@
     details.done-wrap { margin: 1rem 0; }
     details.done-wrap summary { cursor: pointer; font-weight: 600; width: max-content;
                                 padding: .3rem .2rem; border-radius: 6px; }
+
+    .empty-filter { margin: .4rem 0; }
 {% endblock %}
 {% block content %}
   {% set QUADRANTS = {
@@ -97,23 +124,43 @@
   {% set ST_LABEL = {'next': 'next', 'scheduled': 'scheduled',
                      'in_progress': 'in progress', 'blocked': 'blocked'} %}
 
-  {% macro trow(t, ctx) %}
+  {% macro trow(t, ctx, kids=[]) %}
     {% set closed = t.status in ('done', 'dropped') %}
     <li class="task{{ ' t-closed' if closed }}" id="task-{{ t.id }}"
         data-id="{{ t.id }}" data-title="{{ t.title }}" data-detail="{{ t.detail or '' }}"
         data-estimate="{{ t.estimate_minutes or '' }}" data-due="{{ t.due_date or '' }}"
-        data-value="{{ t.value }}" data-effort="{{ t.effort }}">
+        data-value="{{ t.value }}" data-effort="{{ t.effort }}"
+        data-goal="{{ t.goal_id or '' }}" data-energy="{{ t.energy or '' }}"
+        data-quadrant="{{ t.quadrant or '' }}"
+        data-quick="{{ '1' if (t.energy == 'quick' or (t.effort or 3) <= 2) else '' }}"
+        data-search="{{ (t.title ~ ' ' ~ (t.detail or '')) | lower }}">
       <div class="t-view">
         <div class="t-line">
           {% set q = QUADRANTS.get(t.quadrant) %}
           {% if q and not closed %}
-            <span class="pill q-{{ t.quadrant }}" title="{{ q[1] }}">{{ q[0] }}</span>
+            <span class="pill q-{{ t.quadrant }}"
+                  title="{{ q[1] }}{% if t.priority_why %}&#10;Why this rank: {{ t.priority_why }}{% endif %}">{{ q[0] }}</span>
           {% endif %}
           <span class="t-title">{{ t.title }}</span>
+          {% if t.energy and not closed %}
+            <span class="pill t-energy" title="Energy: best done as {{ t.energy }} work">{{ t.energy }}</span>
+          {% endif %}
+          {% if (t.rollover_count or 0) >= 2 and not closed %}
+            <span class="pill t-slip"
+                  title="Planned but not finished {{ t.rollover_count }} times{% if t.last_planned_for %} (last planned for {{ t.last_planned_for }}){% endif %}">slipped ×{{ t.rollover_count }}</span>
+          {% endif %}
+          {% if ctx == 'plan' and t.wont_fit %}
+            <span class="pill t-wontfit"
+                  title="Bigger than the whole capacity — it won't fit as-is">won’t fit — schedule a block?</span>
+          {% endif %}
           {% set show_pill = ('in_progress', 'blocked') if ctx == 'plan'
                              else ('next', 'scheduled', 'in_progress', 'blocked') %}
           {% if t.status in show_pill %}
             <span class="pill ts-{{ t.status }}">{{ ST_LABEL[t.status] }}</span>
+          {% endif %}
+          {% if not closed and t.priority_score is defined %}
+            <span class="t-score" title="{{ t.priority_why or '' }}"
+                  aria-label="Priority score {{ '%.2f' | format(t.priority_score) }}">{{ '%.2f' | format(t.priority_score) }}</span>
           {% endif %}
         </div>
         {% if t.detail and not closed %}
@@ -138,7 +185,7 @@
                   {% if not t.notes_count %}hidden{% endif %}>Notes ({{ t.notes_count }})</button>
         </p>
         <p class="t-status-line meta" role="status" hidden></p>
-        <div class="t-acts">
+        <div class="t-acts" data-ctx="{{ ctx }}">
           {% if closed %}
             <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Restored to the backlog.')">Undo</button>
           {% else %}
@@ -160,6 +207,9 @@
             {% if ctx == 'plan' %}
               <button type="button" onclick="removeFromPlan({{ t.id }}, this)"
                       title="Take it out of today’s plan — the task goes back to the backlog">Not today</button>
+            {% else %}
+              <button type="button" onclick="planAddTask({{ t.id }}, this)"
+                      title="Pin it into today’s plan right now">Do today</button>
             {% endif %}
             {% if t.status == 'blocked' %}
               <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Unblocked — back in the running.')">Unblock</button>
@@ -171,7 +221,35 @@
                     title="Stop tracking it — kept under Completed, undoable">Drop</button>
           {% endif %}
         </div>
+        {% if kids %}
+          <details class="subtasks">
+            <summary>{{ kids | length }} sub-task{{ '' if kids | length == 1 else 's' }}</summary>
+            <ul class="tasks sub">
+              {% for c in kids %}{{ trow(c, ctx) }}{% endfor %}
+            </ul>
+          </details>
+        {% endif %}
         <div class="notes" id="notes-{{ t.id }}" hidden data-loaded="0"></div>
+      </div>
+    </li>
+  {% endmacro %}
+
+  {% macro action_row(a, chase) %}
+    <li class="task" id="action-{{ a.id }}">
+      <div class="t-line"><span class="t-title">{{ a.object_text or '(unspecified)' }}</span></div>
+      <p class="t-meta meta">{{ a.src_name }}{% if a.dst_name %} → {{ a.dst_name }}{% endif %}
+        {%- if a.due_label %} · <span class="{{ 'overdue' if a.overdue else ('due-today' if a.due_today) }}">{{ a.due_label }}</span>{% endif %}
+        {%- if a.detected_label %} · heard {{ a.detected_label }}{% endif %}</p>
+      <div class="t-acts">
+        {% if chase %}
+          <button type="button" onclick="chaseAction({{ a.id }}, this)"
+                  title="Create a follow-up task — chase {{ a.src_name or 'them' }} instead of doing their work">Chase</button>
+        {% else %}
+          <button type="button" onclick="promoteAction({{ a.id }}, this)"
+                  title="Track it — it becomes a task in your backlog">Add to tasks</button>
+        {% endif %}
+        <button type="button" onclick="dismissAction({{ a.id }}, this)"
+                title="Not a real to-do? Remove it from this list — it won’t come back">Dismiss</button>
       </div>
     </li>
   {% endmacro %}
@@ -186,14 +264,14 @@
       {% if plan %}
         <span class="pill st-{{ plan.status }}">{{ 'Accepted' if plan.status == 'accepted' else 'Proposed' }}</span>
         {% if plan_tasks %}
-          <span class="meta">{{ plan_done }}/{{ plan_tasks | length }} done ·
-            {{ planned_minutes }} of {{ plan.capacity_minutes }} min planned</span>
+          <span class="meta">{{ plan_tasks | length }} to do ·
+            <span class="{{ 'cap-warn' if over_capacity }}">{{ planned_minutes }} of {{ plan.capacity_minutes }} min planned{% if over_capacity %} — over capacity{% endif %}</span></span>
         {% endif %}
       {% endif %}
       <span class="cap-group">
         <label class="meta" for="capacity">Capacity</label>
         <input type="number" id="capacity" min="15" max="1440" step="5"
-               value="{{ plan.capacity_minutes if plan else default_capacity }}" />
+               value="{{ plan.capacity_minutes if plan else suggested_capacity }}" />
         <span class="meta" aria-hidden="true">min</span>
         <button type="button" onclick="planAction('propose', this)"
                 {% if not n_open_total %}disabled{% endif %}
@@ -205,6 +283,15 @@
                   title="Mark these tasks scheduled for today">Accept plan</button>
         {% endif %}
       </span>
+      {% if meeting_minutes %}
+        <p class="meta cap-suggest">{{ '%.1f' | format(meeting_minutes / 60) }}h of meetings so far
+          today → suggested capacity {{ suggested_capacity }}m</p>
+      {% endif %}
+      {% if n_no_estimate %}
+        <p class="meta cap-suggest">{{ n_no_estimate }} planned
+          task{{ '' if n_no_estimate == 1 else 's' }} ha{{ 's' if n_no_estimate == 1 else 've' }}
+          no estimate (assumed 30m).</p>
+      {% endif %}
     </div>
     {% if plan and plan.status == 'proposed' and plan_tasks %}
       <p class="meta plan-hint">This is a draft — accept it to schedule these tasks for today,
@@ -215,7 +302,7 @@
       {% if n_open_total %}
         <div class="empty"><strong>No plan for today yet</strong>
           “Propose plan” picks the most urgent and valuable open tasks that fit your
-          {{ default_capacity }}-minute budget — nothing is scheduled until you accept.</div>
+          time budget — nothing is scheduled until you accept.</div>
       {% else %}
         <div class="empty"><strong>Nothing to plan yet</strong>
           Add your first task below, then propose a plan and SecondBrain will fit
@@ -227,7 +314,7 @@
           or add a new task, then re-propose.{% else %}Your backlog is empty —
           add a task below, then hit “Re-propose”.{% endif %}</div>
     {% else %}
-      <ul class="tasks">
+      <ul class="tasks" id="plan-list">
         {% for t in plan_tasks %}{{ trow(t, 'plan') }}{% endfor %}
       </ul>
     {% endif %}
@@ -238,22 +325,24 @@
     {% if actions %}
       <p class="meta">Commitments SecondBrain heard in your conversations — add the real
         ones to your backlog, dismiss the rest.</p>
-      <ul class="tasks">
-        {% for a in actions %}
-          <li class="task">
-            <div class="t-line"><span class="t-title">{{ a.object_text or '(unspecified)' }}</span></div>
-            <p class="t-meta meta">{{ a.src_name }}{% if a.dst_name %} → {{ a.dst_name }}{% endif %}
-              {%- if a.due_label %} · <span class="{{ 'overdue' if a.overdue else ('due-today' if a.due_today) }}">{{ a.due_label }}</span>{% endif %}
-              {%- if a.detected_label %} · heard {{ a.detected_label }}{% endif %}</p>
-            <div class="t-acts">
-              <button type="button" onclick="promoteAction({{ a.id }}, this)"
-                      title="Track it — it becomes a task in your backlog">Add to tasks</button>
-              <button type="button" onclick="dismissAction({{ a.id }}, this)"
-                      title="Not a real to-do? Remove it from this list — it won’t come back">Dismiss</button>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
+      {% if actions_owed_by %}
+        <h3 id="owe-h">You owe <span class="meta">({{ actions_owed_by | length }})</span></h3>
+        <ul class="tasks">
+          {% for a in actions_owed_by %}{{ action_row(a, false) }}{% endfor %}
+        </ul>
+      {% endif %}
+      {% if actions_owed_to %}
+        <h3 id="owed-h">Owed to you <span class="meta">({{ actions_owed_to | length }})</span></h3>
+        <ul class="tasks">
+          {% for a in actions_owed_to %}{{ action_row(a, true) }}{% endfor %}
+        </ul>
+      {% endif %}
+      {% if actions_other %}
+        <h3 id="other-h">Other <span class="meta">({{ actions_other | length }})</span></h3>
+        <ul class="tasks">
+          {% for a in actions_other %}{{ action_row(a, false) }}{% endfor %}
+        </ul>
+      {% endif %}
     {% else %}
       <p class="meta">No action items detected from conversations yet — when a conversation
         contains a commitment (“I’ll send the report Friday”), it appears here for
@@ -279,11 +368,11 @@
       <div class="add-main">
         <label class="visually-hidden" for="new-title">New task title</label>
         <input type="text" id="new-title" required maxlength="500"
-               placeholder="Add a task… e.g. Renew car registration" />
+               placeholder="Add a task… e.g. Renew car registration (press n to jump here)" />
         <button type="submit" class="btn-primary">Add task</button>
       </div>
       <details class="add-more">
-        <summary>More options — detail, estimate, due date, value, effort</summary>
+        <summary>More options — detail, estimate, due date, value, effort, goal, energy</summary>
         <div class="form-row">
           <div class="field field-wide">
             <label for="new-detail">Detail (optional)</label>
@@ -314,16 +403,57 @@
               <option value="4">4 · long</option><option value="5">5 · huge</option>
             </select>
           </div>
+          <div class="field">
+            <label for="new-goal">Goal</label>
+            <select id="new-goal">
+              <option value="">No goal</option>
+              {% for g in goal_options %}
+                <option value="{{ g.id }}">{{ g.title }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="new-energy">Energy</label>
+            <select id="new-energy">
+              <option value="">—</option>
+              <option value="deep">deep</option><option value="quick">quick</option>
+              <option value="call">call</option><option value="errand">errand</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
         </div>
       </details>
     </form>
 
     {% if open_tasks %}
       <p class="meta">Ranked by priority — due dates, value, effort and goal priority set the
-        order and the Do / Schedule / Delegate / Eliminate tags.</p>
-      <ul class="tasks">
-        {% for t in open_tasks %}{{ trow(t, 'backlog') }}{% endfor %}
+        order and the Do / Schedule / Delegate / Eliminate tags. Hover a score for the why.</p>
+      <div class="filters-row">
+        <label class="visually-hidden" for="bl-filter">Filter backlog tasks</label>
+        <input type="search" id="bl-filter" placeholder="Filter tasks…" autocomplete="off" />
+        <label class="visually-hidden" for="bl-quadrant">Filter by quadrant</label>
+        <select id="bl-quadrant">
+          <option value="">All quadrants</option>
+          {% for key, q in QUADRANTS.items() %}<option value="{{ key }}">{{ q[0] }}</option>{% endfor %}
+        </select>
+        <label class="visually-hidden" for="bl-goal">Filter by goal</label>
+        <select id="bl-goal">
+          <option value="">All goals</option>
+          <option value="none">No goal</option>
+          {% for g in goal_options %}<option value="{{ g.id }}">{{ g.title }}</option>{% endfor %}
+        </select>
+        <label title="Only tasks due in the next 7 days (or overdue)">
+          <input type="checkbox" id="bl-week" /> Due this week</label>
+        <label title="Low-effort / quick-energy tasks for a 5-minute gap">
+          <input type="checkbox" id="bl-quick" /> Quick wins</label>
+        <span class="meta" id="bl-count" aria-live="polite"></span>
+      </div>
+      <ul class="tasks" id="backlog-list">
+        {% for t, kids in backlog_tree %}{{ trow(t, 'backlog', kids) }}{% endfor %}
       </ul>
+      <div class="empty empty-filter" id="bl-nomatch" hidden><strong>No task matches</strong>
+        Loosen the filters, or
+        <button type="button" class="linklike" id="bl-reset">show everything</button>.</div>
     {% elif plan_tasks %}
       <p class="meta">Everything open is in today’s plan — nicely focused.</p>
     {% elif completed %}
@@ -363,28 +493,144 @@
     }
     const $task = id => document.getElementById(`task-${id}`);
 
+    /* ---------- in-place page refresh --------------------------------------
+     * Structural changes (add / promote / plan re-propose) re-render sections
+     * server-side. Instead of a full location.reload we fetch the page and
+     * swap #main in place, preserving scroll position, the quick-add draft
+     * and the backlog filter state.
+     */
+    async function refreshTasks(msg, kind) {
+      const main = document.getElementById('main');
+      try {
+        const keep = {
+          title: (document.getElementById('new-title') || {}).value || '',
+          detail: (document.getElementById('new-detail') || {}).value || '',
+          filter: (document.getElementById('bl-filter') || {}).value || '',
+          quadrant: (document.getElementById('bl-quadrant') || {}).value || '',
+          goal: (document.getElementById('bl-goal') || {}).value || '',
+          week: !!(document.getElementById('bl-week') || {}).checked,
+          quick: !!(document.getElementById('bl-quick') || {}).checked,
+        };
+        const r = await fetch(location.href, { headers: { Accept: 'text/html' } });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        const fresh = doc.getElementById('main');
+        if (!fresh) throw new Error('unexpected response');
+        main.replaceChildren(...fresh.childNodes);   // parsed <script> stays inert
+        const set = (id, v) => { const n = document.getElementById(id); if (n) n.value = v; };
+        set('new-title', keep.title); set('new-detail', keep.detail);
+        set('bl-filter', keep.filter); set('bl-quadrant', keep.quadrant);
+        set('bl-goal', keep.goal);
+        const chk = (id, v) => { const n = document.getElementById(id); if (n) n.checked = v; };
+        chk('bl-week', keep.week); chk('bl-quick', keep.quick);
+        wireFilters();
+        applyFilters();
+        if (msg) SB.toast(msg, kind || 'success');
+      } catch (err) {
+        SB.reload(msg, kind);   // degraded path: plain reload
+      }
+    }
+
     /* ---------- add ------------------------------------------------------- */
     async function addTask(e) {
       e.preventDefault();
-      const v = id => document.getElementById(id).value;
+      const v = id => { const n = document.getElementById(id); return n ? n.value : ''; };
       const body = { title: v('new-title'),
                      value: parseInt(v('new-value'), 10),
                      effort: parseInt(v('new-effort'), 10) };
       if (v('new-detail').trim()) body.detail = v('new-detail').trim();
       if (v('new-est')) body.estimate_minutes = parseInt(v('new-est'), 10);
       if (v('new-due')) body.due_date = v('new-due');
+      if (v('new-goal')) body.goal_id = parseInt(v('new-goal'), 10);
+      if (v('new-energy')) body.energy = v('new-energy');
       try {
         await SB.api('/api/tasks', { method: 'POST', body, button: e.submitter });
-        SB.reload('Task added to your backlog.', 'success');
+        document.getElementById('new-title').value = '';
+        document.getElementById('new-detail').value = '';
+        refreshTasks('Task added to your backlog.', 'success');
       } catch (err) { /* SB.api already toasted; the typed values stay put */ }
     }
 
-    /* ---------- one-tap status changes ------------------------------------ */
+    /* ---------- one-tap status changes -------------------------------------
+     * The row is patched in place from the response — no page round-trip.
+     * Done/dropped rows leave their list (they live under Completed).
+     */
     async function setStatus(id, status, btn, msg) {
+      const li = $task(id);
+      const fromClosed = li && li.classList.contains('t-closed');
       try {
         await SB.api(`/api/tasks/${id}/status`, { method: 'POST', body: { status }, button: btn });
-        SB.reload(msg, 'success');
-      } catch (err) { /* SB.api already toasted */ }
+      } catch (err) { return; /* SB.api already toasted */ }
+      if (status === 'done' || status === 'dropped' || fromClosed) {
+        // moves between the open lists and Completed → section re-render
+        refreshTasks(msg, 'success');
+        return;
+      }
+      patchRowStatus(li, status);
+      SB.toast(msg, 'success');
+    }
+
+    function patchRowStatus(li, status) {
+      if (!li) return;
+      const line = li.querySelector('.t-line');
+      const old = line.querySelector('[class*="ts-"]');
+      if (old) old.remove();
+      const ctx = (li.querySelector('.t-acts') || {}).dataset
+        ? li.querySelector('.t-acts').dataset.ctx : 'backlog';
+      const show = ctx === 'plan' ? ['in_progress', 'blocked']
+                                  : ['next', 'scheduled', 'in_progress', 'blocked'];
+      if (show.indexOf(status) !== -1) {
+        const labels = { next: 'next', scheduled: 'scheduled',
+                         in_progress: 'in progress', blocked: 'blocked' };
+        line.append(el('span', { class: `pill ts-${status}`, text: labels[status] }));
+      }
+      rebuildActs(li, status, ctx);
+    }
+
+    function rebuildActs(li, status, ctx) {
+      const id = parseInt(li.dataset.id, 10);
+      const acts = li.querySelector('.t-acts');
+      if (!acts) return;
+      acts.replaceChildren();
+      if (status === 'in_progress') {
+        acts.append(el('button', { type: 'button', text: 'Stop',
+          title: 'Stop working on it for now',
+          onclick: ev => setStatus(id, 'backlog', ev.target, 'Stopped — back in the backlog.') }));
+      } else if (status !== 'blocked') {
+        acts.append(el('button', { type: 'button', text: 'Start', title: 'Mark as in progress',
+          onclick: ev => setStatus(id, 'in_progress', ev.target, 'Started — good luck.') }));
+      }
+      acts.append(el('button', { type: 'button', text: 'Done',
+        onclick: ev => setStatus(id, 'done', ev.target, 'Done — nice work.') }));
+      acts.append(el('button', { type: 'button', text: 'Research',
+        onclick: ev => research(id, ev.target) }));
+      {% if web_research_enabled %}
+      acts.append(el('button', { type: 'button', text: 'Research (web)',
+        onclick: ev => research(id, ev.target, true) }));
+      {% endif %}
+      acts.append(el('button', { type: 'button', text: 'Edit',
+        onclick: ev => editTask(ev.target) }));
+      if (ctx === 'plan') {
+        acts.append(el('button', { type: 'button', text: 'Not today',
+          onclick: ev => removeFromPlan(id, ev.target) }));
+      } else {
+        acts.append(el('button', { type: 'button', text: 'Do today',
+          title: 'Pin it into today’s plan right now',
+          onclick: ev => planAddTask(id, ev.target) }));
+      }
+      if (status === 'blocked') {
+        acts.append(el('button', { type: 'button', text: 'Unblock',
+          onclick: ev => setStatus(id, 'backlog', ev.target, 'Unblocked — back in the running.') }));
+      } else {
+        acts.append(el('button', { type: 'button', text: 'Block',
+          title: 'Waiting on something? Blocked tasks are skipped by the planner',
+          onclick: ev => setStatus(id, 'blocked', ev.target,
+            "Marked blocked — it won't be planned until unblocked.") }));
+      }
+      acts.append(el('button', { type: 'button', class: 'btn-danger', text: 'Drop',
+        onclick: ev => setStatus(id, 'dropped', ev.target,
+          'Dropped — find it under Completed if you change your mind.') }));
+      acts.dataset.ctx = ctx;
     }
 
     /* ---------- today plan ------------------------------------------------- */
@@ -395,11 +641,27 @@
         if (!cap.reportValidity()) return;
         if (cap.value) body.capacity_minutes = parseInt(cap.value, 10);
       }
+      let d;
       try {
-        await SB.api('/api/plan/today', { method: 'POST', body, button: btn });
-        SB.reload(action === 'accept'
-          ? 'Plan accepted — these tasks are scheduled for today.'
-          : 'Plan proposed — review it, then accept.', 'success');
+        d = await SB.api('/api/plan/today', { method: 'POST', body, button: btn });
+      } catch (err) { return; /* SB.api already toasted */ }
+      let msg = action === 'accept'
+        ? 'Plan accepted — these tasks are scheduled for today.'
+        : 'Plan proposed — review it, then accept.';
+      const rolled = d && d.rolled_over ? d.rolled_over.length : 0;
+      if (action === 'propose' && rolled) {
+        msg += ` ${rolled} unfinished task${rolled === 1 ? '' : 's'} rolled over from earlier days.`;
+      }
+      refreshTasks(msg, 'success');
+    }
+
+    async function planAddTask(id, btn) {
+      try {
+        const d = await SB.api('/api/plan/today',
+                               { method: 'POST', body: { action: 'add_task', task_id: id },
+                                 button: btn });
+        const cap = d && d.capacity_minutes;
+        refreshTasks(cap ? 'Pinned into today’s plan.' : 'Pinned into today’s plan.', 'success');
       } catch (err) { /* SB.api already toasted */ }
     }
 
@@ -458,16 +720,20 @@
         return;
       }
       box.dataset.loaded = '1';
-      renderNotes(box, notes);
+      renderNotes(box, notes, id);
     }
 
-    function renderNotes(box, notes) {
+    function renderNotes(box, notes, id) {
       if (!notes.length) {
         box.replaceChildren(el('p', { class: 'meta',
           text: 'No research notes yet — “Research” asks the local model to dig into this task.' }));
         return;
       }
       const frag = document.createDocumentFragment();
+      frag.append(el('p', { class: 'meta notes-refresh' },
+        el('button', { type: 'button', class: 'linklike', text: 'Refresh research',
+                       title: 'Re-run research for this task and save a fresh note',
+                       onclick: ev => research(id, ev.target) })));
       notes.forEach(n => {
         const head = [(n.backend === 'web' ? 'Web research' : 'Local research'),
                       n.created_label || ''].filter(Boolean).join(' · ');
@@ -513,6 +779,31 @@
       });
       return s;
     }
+    function goalSelect(id, current) {
+      const s = el('select', { id, class: 'e-goal' });
+      s.append(el('option', { value: '', text: 'No goal' }));
+      const src = document.getElementById('new-goal');
+      if (src) {
+        Array.from(src.options).forEach(o => {
+          if (!o.value) return;
+          s.append(el('option', { value: o.value, text: o.textContent,
+                                  selected: o.value === String(current) ? '' : null }));
+        });
+      }
+      return s;
+    }
+    function energySelect(id, current) {
+      const s = el('select', { id, class: 'e-energy' });
+      s.append(el('option', { value: '', text: '—' }));
+      ['deep', 'quick', 'call', 'errand', 'admin'].forEach(v => {
+        s.append(el('option', { value: v, text: v,
+                                selected: v === current ? '' : null }));
+      });
+      if (current && ['deep', 'quick', 'call', 'errand', 'admin'].indexOf(current) === -1) {
+        s.append(el('option', { value: current, text: current, selected: '' }));
+      }
+      return s;
+    }
 
     function editTask(btn) {
       const li = btn.closest('.task');
@@ -540,7 +831,9 @@
                         ['barely', 'low', 'useful', 'important', 'critical'])),
           field(`et-effort-${d.id}`, 'Effort',
             scaleSelect(`et-effort-${d.id}`, 'e-effort', d.effort,
-                        ['minutes', 'short', 'medium', 'long', 'huge']))),
+                        ['minutes', 'short', 'medium', 'long', 'huge'])),
+          field(`et-goal-${d.id}`, 'Goal', goalSelect(`et-goal-${d.id}`, d.goal)),
+          field(`et-energy-${d.id}`, 'Energy', energySelect(`et-energy-${d.id}`, d.energy))),
         el('div', { class: 'edit-acts' },
           el('button', { type: 'submit', class: 'btn-primary', text: 'Save' }),
           el('button', { type: 'button', text: 'Cancel', title: 'Or press Escape',
@@ -558,6 +851,7 @@
       e.preventDefault();
       const f = e.target;
       const est = f.querySelector('.e-est').value;
+      const goal = f.querySelector('.e-goal').value;
       try {
         await SB.api(`/api/tasks/${id}`, { method: 'PATCH', button: e.submitter, body: {
           title: f.querySelector('.e-title').value,
@@ -566,8 +860,10 @@
           due_date: f.querySelector('.e-due').value,              /* '' clears */
           value: parseInt(f.querySelector('.e-value').value, 10),
           effort: parseInt(f.querySelector('.e-effort').value, 10),
+          goal_id: goal === '' ? 0 : parseInt(goal, 10),          /* 0 clears */
+          energy: f.querySelector('.e-energy').value,             /* '' clears */
         }});
-        SB.reload('Task updated.', 'success');
+        refreshTasks('Task updated.', 'success');
       } catch (err) { /* SB.api already toasted; your edits stay in the form */ }
     }
 
@@ -577,24 +873,124 @@
         await SB.api('/api/plan/today', { method: 'POST',
                                           body: { action: 'remove_task', task_id: id },
                                           button: btn });
-        SB.reload('Out of today’s plan — the task is back in your backlog.', 'success');
-      } catch (err) { /* SB.api already toasted */ }
+      } catch (err) { return; /* SB.api already toasted */ }
+      // Patch in place: move the row from Today into the backlog list.
+      const li = $task(id);
+      const backlog = document.getElementById('backlog-list');
+      if (li && backlog) {
+        patchRowStatus(li, 'backlog');
+        li.querySelector('.t-acts').dataset.ctx = 'backlog';
+        backlog.prepend(li);
+        SB.toast('Out of today’s plan — the task is back in your backlog.', 'success');
+      } else {
+        refreshTasks('Out of today’s plan — the task is back in your backlog.', 'success');
+      }
     }
 
     /* ---------- action-item promotion / dismissal ---------------------------- */
     async function promoteAction(edgeId, btn) {
       try {
         const d = await SB.api(`/api/actions/${edgeId}/promote`, { method: 'POST', button: btn });
-        SB.reload(d && d.title ? `Added to your backlog: “${d.title}”.`
-                               : 'Added to your backlog.', 'success');
+        refreshTasks(d && d.title ? `Added to your backlog: “${d.title}”.`
+                                  : 'Added to your backlog.', 'success');
+      } catch (err) { /* SB.api already toasted */ }
+    }
+
+    async function chaseAction(edgeId, btn) {
+      try {
+        const d = await SB.api(`/api/actions/${edgeId}/promote`,
+                               { method: 'POST', body: { chase: true }, button: btn });
+        refreshTasks(d && d.title ? `Follow-up added: “${d.title}”.`
+                                  : 'Follow-up task added.', 'success');
       } catch (err) { /* SB.api already toasted */ }
     }
 
     async function dismissAction(edgeId, btn) {
       try {
         await SB.api(`/api/actions/${edgeId}/dismiss`, { method: 'POST', button: btn });
-        SB.reload('Dismissed — it won’t be suggested again.', 'success');
-      } catch (err) { /* SB.api already toasted */ }
+      } catch (err) { return; /* SB.api already toasted */ }
+      const li = document.getElementById(`action-${edgeId}`);
+      if (li) li.remove();
+      SB.toast('Dismissed — it won’t be suggested again.', 'success');
     }
+
+    /* ---------- backlog filters --------------------------------------------- */
+    function localDayPlus(days) {
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      const p = n => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    }
+
+    function applyFilters() {
+      const list = document.getElementById('backlog-list');
+      if (!list) return;
+      const val = id => { const n = document.getElementById(id); return n ? n.value : ''; };
+      const chk = id => { const n = document.getElementById(id); return !!(n && n.checked); };
+      const q = (val('bl-filter') || '').trim().toLowerCase();
+      const quad = val('bl-quadrant');
+      const goal = val('bl-goal');
+      const week = chk('bl-week');
+      const quick = chk('bl-quick');
+      const weekEnd = localDayPlus(7);
+      let shown = 0;
+      const rows = Array.from(list.children).filter(n => n.classList
+                                                    && n.classList.contains('task'));
+      rows.forEach(li => {
+        const d = li.dataset;
+        let ok = true;
+        if (q && (d.search || '').indexOf(q) === -1) ok = false;
+        if (quad && d.quadrant !== quad) ok = false;
+        if (goal === 'none' ? d.goal : (goal && d.goal !== goal)) ok = false;
+        if (week && (!d.due || d.due > weekEnd)) ok = false;
+        if (quick && !d.quick) ok = false;
+        li.hidden = !ok;
+        if (ok) shown++;
+      });
+      const count = document.getElementById('bl-count');
+      if (count) {
+        count.textContent = shown === rows.length
+          ? '' : `${shown} of ${rows.length} shown`;
+      }
+      const nomatch = document.getElementById('bl-nomatch');
+      if (nomatch) nomatch.hidden = shown !== 0;
+    }
+
+    function wireFilters() {
+      ['bl-filter', 'bl-quadrant', 'bl-goal', 'bl-week', 'bl-quick'].forEach(id => {
+        const n = document.getElementById(id);
+        if (!n) return;
+        n.addEventListener(n.tagName === 'INPUT' && n.type === 'search' ? 'input' : 'change',
+                           applyFilters);
+      });
+      const reset = document.getElementById('bl-reset');
+      if (reset) reset.addEventListener('click', () => {
+        ['bl-filter', 'bl-quadrant', 'bl-goal'].forEach(id => {
+          const n = document.getElementById(id); if (n) n.value = '';
+        });
+        ['bl-week', 'bl-quick'].forEach(id => {
+          const n = document.getElementById(id); if (n) n.checked = false;
+        });
+        applyFilters();
+        const f = document.getElementById('bl-filter');
+        if (f) f.focus();
+      });
+    }
+    wireFilters();
+
+    /* ---------- page-local keyboard shortcuts -------------------------------- */
+    document.addEventListener('keydown', ev => {
+      const t = ev.target;
+      const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+                           || t.tagName === 'SELECT' || t.isContentEditable);
+      if (ev.key === 'n' && !typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        const box = document.getElementById('new-title');
+        if (box) { ev.preventDefault(); box.focus(); }
+      }
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+        const form = t && t.closest ? t.closest('form') : null;
+        if (form) { ev.preventDefault(); form.requestSubmit(); }
+      }
+    });
   </script>
 {% endblock %}

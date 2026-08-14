@@ -133,3 +133,95 @@ def test_remove_from_day_releases_task_and_keeps_plan(conn, settings):
 
     # A day with no plan: nothing to remove from.
     assert planner.remove_from_day(conn, a, date="2031-01-01") is None
+
+
+def test_rollover_visibly_counted_and_reported(conn, settings):
+    a = store.create_task(conn, title="keeps slipping", estimate_minutes=10)
+    planner.propose_day(conn, date="2026-06-16", settings=settings)
+    planner.accept_day(conn, "2026-06-16")
+
+    day = planner.propose_day(conn, date="2026-06-17", settings=settings)
+    assert day["rolled_over"] == [{"id": a, "title": "keeps slipping"}]
+    t = store.get_task(conn, a)
+    assert t["rollover_count"] == 1 and t["last_planned_for"] == "2026-06-16"
+
+    planner.accept_day(conn, "2026-06-17")
+    planner.propose_day(conn, date="2026-06-18", settings=settings)
+    assert store.get_task(conn, a)["rollover_count"] == 2
+
+
+def test_add_to_day_pins_task_into_plan(conn, settings):
+    a = store.create_task(conn, title="A", estimate_minutes=10)
+    b = store.create_task(conn, title="pin me", estimate_minutes=10)
+    # no plan yet → one is created (proposed) holding just this task
+    day = planner.add_to_day(conn, b, date="2026-06-16", settings=settings)
+    assert day["status"] == "proposed" and day["task_ids"] == [b]
+    # idempotent
+    day = planner.add_to_day(conn, b, date="2026-06-16", settings=settings)
+    assert day["task_ids"] == [b]
+    # on an ACCEPTED plan, the pinned task is scheduled immediately
+    planner.accept_day(conn, "2026-06-16")
+    day = planner.add_to_day(conn, a, date="2026-06-16", settings=settings)
+    assert a in day["task_ids"]
+    t = store.get_task(conn, a)
+    assert t["status"] == "scheduled" and t["scheduled_for"] == "2026-06-16"
+    # finished / missing tasks can't be pinned
+    store.set_status(conn, a, "done")
+    assert planner.add_to_day(conn, a, date="2026-06-16", settings=settings) is None
+    assert planner.add_to_day(conn, 99999, date="2026-06-16", settings=settings) is None
+
+
+def test_done_and_dropped_tasks_leave_the_plan(conn, settings):
+    import json as _json
+
+    a = store.create_task(conn, title="A", estimate_minutes=10)
+    b = store.create_task(conn, title="B", estimate_minutes=10)
+    planner.propose_day(conn, date="2026-06-16", settings=settings)
+    planner.accept_day(conn, "2026-06-16")
+    store.set_status(conn, a, "done")
+    raw = conn.execute("SELECT task_ids FROM day_plans WHERE date='2026-06-16'").fetchone()
+    assert _json.loads(raw["task_ids"]) == [b]
+    day = planner.get_day(conn, "2026-06-16")
+    assert day["task_ids"] == [b]
+    assert [t["id"] for t in day["tasks"]] == [b]
+    # legacy rows that still list a finished id are filtered at hydration
+    conn.execute("UPDATE day_plans SET task_ids=? WHERE date='2026-06-16'",
+                 (_json.dumps([a, b]),))
+    day = planner.get_day(conn, "2026-06-16")
+    assert day["task_ids"] == [b]
+
+
+def test_big_rock_included_with_flag_instead_of_silent_packing(conn, settings):
+    rock = store.create_task(conn, title="write the strategy doc",
+                             estimate_minutes=300, value=5,
+                             due_date="2026-06-16")
+    small = store.create_task(conn, title="tiny chore", estimate_minutes=10, value=1)
+    day = planner.propose_day(conn, date="2026-06-16", capacity_minutes=60,
+                              settings=settings)
+    assert day["big_rock_task_id"] == rock
+    assert day["task_ids"][0] == rock
+    assert small not in day["task_ids"]  # the rock consumed the day
+
+
+def test_no_big_rock_flag_when_top_task_fits(conn, settings):
+    store.create_task(conn, title="fits fine", estimate_minutes=30, value=5)
+    day = planner.propose_day(conn, date="2026-06-16", capacity_minutes=60,
+                              settings=settings)
+    assert day["big_rock_task_id"] is None
+
+
+def test_meeting_minutes_and_suggested_capacity(conn, settings):
+    from datetime import UTC, datetime, timedelta
+
+    # a 30-minute conversation at local noon today
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    noon = datetime.strptime(today + " 12:00", "%Y-%m-%d %H:%M").astimezone(UTC)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    conn.execute(
+        "INSERT INTO conversations (started_at, ended_at, status) VALUES (?, ?, 'closed')",
+        (noon.strftime(fmt), (noon + timedelta(minutes=30)).strftime(fmt)),
+    )
+    assert planner.meeting_minutes(conn, today) == 30
+    assert planner.suggested_capacity(settings, 30) == settings.tasks.workday_minutes - 30
+    # floor: a wall-to-wall meeting day still suggests a usable minimum
+    assert planner.suggested_capacity(settings, 10000) == planner.MIN_SUGGESTED_CAPACITY

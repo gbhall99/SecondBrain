@@ -1755,14 +1755,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 day = today
             digest = service.get_digest(conn, day, kind)
-            suggestions = service.list_suggestions(conn, day)
-            cite_meta = {c["segment_id"]: c for c in _suggestion_citation_meta(conn, suggestions)}
+            all_open = service.list_suggestions(conn, day)
+            cite_meta = {c["segment_id"]: c for c in _suggestion_citation_meta(conn, all_open)}
             for c in (digest or {}).get("citations", []):
                 cite_meta[c["segment_id"]] = c
             generating = service.digest_generating(conn)
+        suggestions, more = service.cap_suggestions(all_open, settings)
         state_payload = {
             "kind": kind, "date": day, "today": today, "dates": dates,
             "digest": digest, "suggestions": suggestions,
+            # everything below the display cut — persisted, revealed by the
+            # page's "show N more" without another generation run
+            "more": more,
             # per-kind started-at of an in-flight generate run, so the page can
             # resume its progress line after a reload instead of going silent
             "generating": generating,
@@ -1771,8 +1775,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "brief.html",
-            {"digest": digest, "suggestions": suggestions, "kind": kind,
-             "date": day, "today": today, "state": state_payload},
+            {"digest": digest, "suggestions": suggestions, "more_count": len(more),
+             "kind": kind, "date": day, "today": today, "state": state_payload},
         )
 
     @app.get("/api/digest")
@@ -1794,22 +1798,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_digest_generate(
         kind: str = Body("daily", embed=True), force: bool = Body(True, embed=True)
     ):
+        from secondbrain.proactive import store as pstore
         from secondbrain.proactive.engine import DigestInFlight
 
         if kind not in ("daily", "weekly"):
             raise HTTPException(422, "kind must be 'daily' or 'weekly'")
+
+        def _conflict(started_at: str | None):
+            what = "weekly review" if kind == "weekly" else "daily brief"
+            elapsed = _elapsed_s(started_at)
+            return HTTPException(
+                409,
+                f"That {what} is already being written"
+                + (f" (started {elapsed}s ago)" if elapsed is not None else "")
+                + " — it will appear here when it's done.",
+            )
+
         with db() as conn:
+            if settings.llm.backend != "mock":
+                # A real model takes minutes: enqueue on the daemon's worker
+                # (same job type it schedules) instead of blocking a request
+                # thread; the /api/digest/status poller follows the run.
+                started = pstore.generating_since(conn, kind)
+                if started:
+                    raise _conflict(started)
+                service.enqueue_digest(conn, kind)  # deduped per kind
+                return JSONResponse({"queued": True, "kind": kind}, status_code=202)
+            # Mock LLM (tests/dev): synchronous is instant and keeps the
+            # original response shape.
             try:
                 return service.generate_digest(conn, settings, kind=kind, force=force) or {}
             except DigestInFlight as exc:
-                what = "weekly review" if kind == "weekly" else "daily brief"
-                elapsed = _elapsed_s(exc.started_at)
-                raise HTTPException(
-                    409,
-                    f"That {what} is already being written"
-                    + (f" (started {elapsed}s ago)" if elapsed is not None else "")
-                    + " — it will appear here when it's done.",
-                ) from exc
+                raise _conflict(exc.started_at) from exc
 
     @app.get("/api/digest/status")
     def api_digest_status(kind: str = Query("daily", pattern="^(daily|weekly)$")):
@@ -1823,26 +1843,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         date: str = Query(None),
         status: str = Query("open", pattern="^(open|done|dismissed|snoozed)$"),
     ):
+        """Suggestions for a day. Open items are split for display: the capped
+        ``suggestions`` list plus the ``more`` overflow (revealed by the brief
+        page's "show more"); ``total`` counts both. Handled statuses are never
+        capped."""
         if date is not None and _parse_day(date) is None:
             raise HTTPException(422, "date must be a real YYYY-MM-DD date")
         with db() as conn:
             suggestions = service.list_suggestions(conn, date, status)
             citations = _suggestion_citation_meta(conn, suggestions)
-        return {"suggestions": suggestions, "citations": citations}
+        more: list = []
+        if status == "open":
+            suggestions, more = service.cap_suggestions(suggestions, settings)
+        return {
+            "suggestions": suggestions,
+            "more": more,
+            "total": len(suggestions) + len(more),
+            "citations": citations,
+        }
 
-    _SUGGESTION_ACTIONS = ("done", "dismiss", "snooze", "up", "down", "reopen")
+    _SUGGESTION_ACTIONS = (
+        "done", "dismiss", "snooze", "snooze_kind", "up", "down", "reopen"
+    )
 
     @app.post("/api/suggestions/{suggestion_id}/action")
     def api_suggestion_action(
         suggestion_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         action: str = Body(..., embed=True),
+        days: int = Body(None, embed=True, ge=1, le=90),
     ):
         if action not in _SUGGESTION_ACTIONS:
             raise HTTPException(
                 422, f"action must be one of: {', '.join(_SUGGESTION_ACTIONS)}"
             )
         with db() as conn:
-            found = service.suggestion_action(conn, suggestion_id, action)
+            found = service.suggestion_action(
+                conn, suggestion_id, action, days=days, settings=settings
+            )
         if not found:
             raise HTTPException(404, "suggestion not found — it may have been cleaned up")
         return {"ok": True}
@@ -1995,7 +2032,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tasks = service.annotate_task_priorities(conn, service.list_tasks(conn), settings)
             note_counts = service.task_research_note_counts(conn)
             actions = service.list_action_items(conn)
-            goal_titles = {g["id"]: g["title"] for g in service.list_goals(conn)}
+            goals = service.list_goals(conn)
+            meeting_min = service.meeting_minutes_today(conn)
+        goal_titles = {g["id"]: g["title"] for g in goals}
+        suggested_cap = service.suggested_capacity(settings, meeting_min)
 
         for t in tasks:  # display-only annotations
             t.update(_due_info(t["due_date"], today))
@@ -2007,11 +2047,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Today section, everything else in Backlog / Completed.
         plan_ids = set(plan["task_ids"]) if plan else set()
         plan_tasks = [by_id[tid] for tid in plan["task_ids"] if tid in by_id] if plan else []
+        if plan:
+            for t in plan_tasks:
+                # Big-rock flag: a planned task bigger than the whole capacity
+                # can't be "fitted" — say so instead of pretending.
+                t["wont_fit"] = (
+                    (t["estimate_minutes"] or _DEFAULT_TASK_MINUTES)
+                    > plan["capacity_minutes"]
+                )
         open_tasks = [
             t for t in tasks
             if t["status"] not in ("done", "dropped") and t["id"] not in plan_ids
         ]
         open_tasks.sort(key=lambda t: t["priority_score"], reverse=True)
+        # Sub-tasks group under their (open, on-page) parent instead of
+        # rendering as flat siblings; orphans stay top-level.
+        open_ids = {t["id"] for t in open_tasks}
+        children: dict[int, list[dict]] = {}
+        roots = []
+        for t in open_tasks:
+            pid = t.get("parent_task_id")
+            if pid and pid in open_ids:
+                children.setdefault(pid, []).append(t)
+            else:
+                roots.append(t)
+        backlog_tree = [(t, children.get(t["id"], [])) for t in roots]
         completed = [
             t for t in tasks
             if t["status"] in ("done", "dropped") and t["id"] not in plan_ids
@@ -2022,24 +2082,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Overdue/labels prefer the ISO date normalized at extraction time
             # ("March 3" → 2026-03-03); the raw spoken string stays displayed.
             a.update(_due_info(a.get("due_date_norm") or a["due_date"], today))
+        # Commitments surface with direction: what you owe vs what you're owed.
+        actions_owed_by = [a for a in actions if a["owed_direction"] == "owed_by_me"]
+        actions_owed_to = [a for a in actions if a["owed_direction"] == "owed_to_me"]
+        actions_other = [a for a in actions if a["owed_direction"] == "other"]
 
         d = _parse_day(today)
         n_open_total = sum(1 for t in tasks if t["status"] not in ("done", "dropped"))
+        planned_minutes = sum(
+            t["estimate_minutes"] or _DEFAULT_TASK_MINUTES for t in plan_tasks
+        )
         return templates.TemplateResponse(
             request,
             "tasks.html",
             {
                 "plan": plan,
                 "plan_tasks": plan_tasks,
-                "plan_done": sum(1 for t in plan_tasks if t["status"] == "done"),
-                "planned_minutes": sum(
-                    t["estimate_minutes"] or _DEFAULT_TASK_MINUTES for t in plan_tasks
-                ),
+                "planned_minutes": planned_minutes,
+                "over_capacity": bool(plan) and planned_minutes > plan["capacity_minutes"],
+                "n_no_estimate": sum(1 for t in plan_tasks if not t["estimate_minutes"]),
                 "open_tasks": open_tasks,
+                "backlog_tree": backlog_tree,
                 "completed": completed,
                 "actions": actions,
+                "actions_owed_by": actions_owed_by,
+                "actions_owed_to": actions_owed_to,
+                "actions_other": actions_other,
                 "n_open_total": n_open_total,
                 "default_capacity": settings.tasks.daily_capacity_minutes,
+                "meeting_minutes": meeting_min,
+                "suggested_capacity": suggested_cap,
+                # Goal selector options on the add/edit forms (active first).
+                "goal_options": [
+                    {"id": g["id"], "title": g["title"]}
+                    for g in goals if g["status"] in ("active", "paused")
+                ],
                 "today_label": f"{d.strftime('%A')} {d.day} {d.strftime('%B')}" if d else today,
                 # Config-gated: when on, task rows also offer "Research (web)".
                 "web_research_enabled": settings.tasks.web_research_enabled,
@@ -2061,7 +2138,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         detail: str = Body(None, max_length=4000),
                         estimate_minutes: int = Body(None, ge=1, le=1440),
                         value: int = Body(3, ge=1, le=5),
-                        effort: int = Body(3, ge=1, le=5), due_date: str = Body(None)):
+                        effort: int = Body(3, ge=1, le=5), due_date: str = Body(None),
+                        energy: str = Body(None, max_length=40)):
         title = title.strip()
         if not title:
             raise HTTPException(422, "title can't be empty")
@@ -2072,7 +2150,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tid = service.create_task(conn, title=title, goal_id=goal_id,
                                       detail=(detail or "").strip() or None,
                                       estimate_minutes=estimate_minutes, value=value,
-                                      effort=effort, due_date=due_date)
+                                      effort=effort, due_date=due_date,
+                                      energy=(energy or "").strip() or None)
         return {"id": tid}
 
     @app.patch("/api/tasks/{task_id}")
@@ -2084,9 +2163,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         due_date: str = Body(None),
         value: int = Body(None, ge=1, le=5),
         effort: int = Body(None, ge=1, le=5),
+        goal_id: int = Body(None, ge=0, le=_SQLITE_MAX_INT),
+        energy: str = Body(None, max_length=40),
     ):
-        """Edit a task in place (fix a typo, set a due date/estimate). Omitted
-        fields are unchanged; empty-string due_date and estimate 0 clear them."""
+        """Edit a task in place (fix a typo, set a due date/estimate, link a
+        goal, tag energy). Omitted fields are unchanged; empty-string due_date
+        / energy, estimate 0 and goal_id 0 clear them."""
         fields: dict = {}
         if title is not None:
             title = title.strip()
@@ -2103,10 +2185,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             fields["value"] = value
         if effort is not None:
             fields["effort"] = effort
+        if goal_id is not None:
+            fields["goal_id"] = goal_id or None  # 0 clears
+        if energy is not None:
+            fields["energy"] = energy.strip() or None  # '' clears
         if not fields:
             raise HTTPException(422, "nothing to update — send at least one field")
         with db() as conn:
             _task_or_404(conn, task_id)
+            if fields.get("goal_id") and service.get_goal(conn, fields["goal_id"]) is None:
+                raise HTTPException(404, "goal not found — it may have been deleted")
             service.update_task(conn, task_id, **fields)
             task = service.annotate_task_priorities(
                 conn, [service.get_task(conn, task_id)], settings
@@ -2177,11 +2265,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"task_id": task_id, "notes": notes}
 
     @app.post("/api/actions/{edge_id}/promote")
-    def api_promote_action(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
+    def api_promote_action(
+        edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        chase: bool = Body(False, embed=True),
+    ):
         """Turn a detected conversation action item into a backlog task
-        (idempotent — promoting twice returns the same task)."""
+        (idempotent — promoting twice returns the same task). With ``chase``
+        (for items owed TO you) the task becomes a follow-up with the
+        counterparty instead of copying their work into your backlog."""
         with db() as conn:
-            tid = service.promote_action_item(conn, edge_id)
+            tid = service.promote_action_item(conn, edge_id, chase=chase)
             if tid is None:
                 raise HTTPException(
                     404, "action item not found — it may have been superseded or forgotten"
@@ -2221,9 +2314,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         capacity_minutes: int = Body(None, embed=True, ge=15, le=1440),
         task_id: int = Body(None, embed=True, ge=1, le=_SQLITE_MAX_INT),
     ):
-        if action not in ("propose", "accept", "remove_task"):
-            raise HTTPException(422, "action must be 'propose', 'accept' or 'remove_task'")
+        if action not in ("propose", "accept", "remove_task", "add_task"):
+            raise HTTPException(
+                422, "action must be 'propose', 'accept', 'remove_task' or 'add_task'"
+            )
         with db() as conn:
+            if action == "add_task":
+                # "Do today": pin one task into the current plan (creating a
+                # proposed plan if the day has none yet).
+                if task_id is None:
+                    raise HTTPException(422, "task_id is required to add a task")
+                task = service.get_task(conn, task_id)
+                if task is None:
+                    raise HTTPException(404, "task not found — it may have been removed")
+                if task["status"] in ("done", "dropped"):
+                    raise HTTPException(409, "that task is already finished")
+                return _plan_envelope(service.add_to_day(conn, task_id, settings=settings))
             if action == "accept":
                 plan = service.get_day(conn)
                 if plan is None:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = "0009_decisions"
+SCHEMA_VERSION = "0010_planner"
 
 # Ordered DDL statements. Each is executed individually so this list can also be
 # reused by an Alembic migration via op.execute().
@@ -513,6 +513,23 @@ ALTERS_0009: list[str] = [
 ]
 
 
+# --- Phase 12: meeting-aware planner + digest payload (migration 0010) ---------
+# Visible task rollover (a task released from an unfinished day plan keeps a
+# count + the day it was last planned for) and a JSON payload column on digests
+# (weekly review stats). All additive.
+STATEMENTS_0010_CREATE: list[str] = []
+
+COLUMNS_0010: list[tuple[str, str, str]] = [
+    ("tasks", "rollover_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("tasks", "last_planned_for", "TEXT"),
+    ("digests", "payload", "TEXT NOT NULL DEFAULT '{}'"),
+]
+
+ALTERS_0010: list[str] = [
+    f"ALTER TABLE {t} ADD COLUMN {name} {ddl}" for t, name, ddl in COLUMNS_0010
+]
+
+
 def backfill_kg_edges_fts(conn: sqlite3.Connection) -> None:
     """Rebuild kg_edges_fts when it is out of sync with kg_edges (idempotent).
 
@@ -602,6 +619,14 @@ def apply_phase11_schema(conn: sqlite3.Connection) -> None:
     backfill_kg_edges_fts(conn)
 
 
+def apply_phase12_schema(conn: sqlite3.Connection) -> None:
+    """Apply the 0010 additions idempotently (columns on existing tables)."""
+    for table, column, ddl in COLUMNS_0010:
+        _safe_add_column(conn, table, column, ddl)
+    for stmt in STATEMENTS_0010_CREATE:
+        conn.execute(stmt)
+
+
 def apply_base_schema(conn: sqlite3.Connection) -> None:
     """Create all base tables/indices/triggers idempotently (non-Alembic path).
 
@@ -619,6 +644,7 @@ def apply_base_schema(conn: sqlite3.Connection) -> None:
     apply_phase9_schema(conn)
     apply_phase10_schema(conn)
     apply_phase11_schema(conn)
+    apply_phase12_schema(conn)
     conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
     row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     if row is None:

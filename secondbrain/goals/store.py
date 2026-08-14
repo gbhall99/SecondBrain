@@ -83,11 +83,29 @@ _GOAL_COLS = (
     "last_progress_at", "created_at", "updated_at",
 )
 
-# Per-goal task progress; dropped tasks no longer count toward the plan.
-_TASK_STATS = (
-    "SELECT goal_id, COUNT(*) AS total, SUM(status='done') AS done "
-    "FROM tasks WHERE goal_id IS NOT NULL AND status != 'dropped' GROUP BY goal_id"
+# Per-goal task progress; dropped tasks no longer count toward the plan, and
+# AI milestone *containers* (a source='ai' task that has sub-tasks) are
+# bookkeeping, not work — counting them would understate progress until the
+# very end of each milestone.
+_PROGRESS_WHERE = (
+    "t.goal_id IS NOT NULL AND t.status != 'dropped' "
+    "AND NOT (t.source='ai' AND EXISTS "
+    "(SELECT 1 FROM tasks c WHERE c.parent_task_id = t.id))"
 )
+_TASK_STATS = (
+    "SELECT t.goal_id AS goal_id, COUNT(*) AS total, SUM(t.status='done') AS done "
+    f"FROM tasks t WHERE {_PROGRESS_WHERE} GROUP BY t.goal_id"
+)
+
+
+def progress_counts(conn: sqlite3.Connection) -> dict[int, tuple[int, int]]:
+    """goal_id → (done, total) using the same rules the goal cards display
+    (dropped tasks and AI milestone containers excluded). Powers the at-risk
+    detector so its percentages match what the user sees."""
+    return {
+        int(r["goal_id"]): (int(r["done"] or 0), int(r["total"] or 0))
+        for r in conn.execute(_TASK_STATS).fetchall()
+    }
 
 # Active work first, then paused, done, dropped (blind ORDER BY status would
 # bury paused goals below done ones alphabetically).
@@ -131,8 +149,8 @@ def get_goal(conn: sqlite3.Connection, goal_id: int) -> dict | None:
         return None
     goal = dict(row)
     stats = conn.execute(
-        "SELECT COUNT(*) AS total, COALESCE(SUM(status='done'), 0) AS done "
-        "FROM tasks WHERE goal_id=? AND status != 'dropped'",
+        "SELECT COUNT(*) AS total, COALESCE(SUM(t.status='done'), 0) AS done "
+        f"FROM tasks t WHERE t.goal_id=? AND {_PROGRESS_WHERE}",
         (goal_id,),
     ).fetchone()
     goal["tasks_total"], goal["tasks_done"] = int(stats["total"]), int(stats["done"])
