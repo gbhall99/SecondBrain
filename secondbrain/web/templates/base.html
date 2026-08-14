@@ -27,7 +27,12 @@ SHARED PRIMITIVES (defined here — reuse, never re-declare in pages):
   The hidden attribute always hides (a global !important guard beats any page
   display rule) — toggle el.hidden from JS freely.
 
-NAV: link list below; active page computed from request.url.path (prefix match)
+NAV: sticky; links ordered by between-meetings frequency, with Graph / Voices /
+Health in a "More" overflow (details.nav-more; app.js closes it on outside
+click) and a compact global search (submits to /?q=…; collapses behind an icon
+on narrow screens). Count badges (brief items, tasks due) come from the
+nav_badges context processor in api.py (15s in-process cache). Active page
+computed from request.url.path (prefix match)
 and rendered with aria-current="page". A Sign out control appears automatically
 when the visitor holds a cookie session (authed_via_cookie, injected for every
 render by a template context processor in api.py — loopback clients bypass auth
@@ -44,6 +49,11 @@ JS HELPERS (/static/app.js, loaded on every page as window.SB):
       successful writes that need re-rendered data.
   SB.busy(el, on)       manual busy toggle        SB.esc(s)  HTML-escape string
   SB.signout()          POST /logout (revokes all sessions) then go to /login
+  SB.registerSearch(el) page's primary search box — '/' focuses it (falls back
+      to the nav search). SB.listNav({items, keys}) = j/k focus ring + action
+      keys over a list (brief/tasks triage). SB.sortableTable(table, {urlKey})
+      wires .sortbtn column headers with URL-state sync. A 'g'-then-letter nav
+      chord and a '?' help overlay (markup below) ship with every page.
 Write-flow pattern (never leave a fetch silent):
   try { await SB.api('/api/x', {method:'POST', body:{…}, button: e.submitter});
         SB.reload('Saved', 'success'); } catch (e) {} // SB.api already toasted
@@ -57,8 +67,12 @@ anything under /api/ (and non-browser clients) keeps plain JSON errors.
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#161618" media="(prefers-color-scheme: dark)" />
   <title>{% block title %}SecondBrain{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%A7%A0</text></svg>" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/static/favicon.svg" />
   <style>
     :root {
       color-scheme: light dark;
@@ -93,16 +107,75 @@ anything under /api/ (and non-browser clients) keeps plain JSON errors.
                  border: 1px solid var(--line); border-radius: 0 0 8px 8px; }
     .skip-link:focus { left: .5rem; }
 
+    /* Sticky nav: stays reachable on long pages (between-meetings triage is a
+       lot of scroll-and-act) — background + z-index so content slides under. */
     .nav { display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .1rem;
            margin: 0 -.5rem 1.1rem; padding: .2rem 0; border-bottom: 1px solid var(--line);
-           font-size: .92rem; }
+           font-size: .92rem; position: sticky; top: 0; background: var(--bg); z-index: 100; }
     .nav a { text-decoration: none; color: var(--muted); padding: .4rem .5rem;
              display: inline-block; border-radius: 6px; }
     .nav a:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
     .nav a[aria-current="page"] { color: var(--fg); font-weight: 600; }
-    .nav-signout { margin-left: auto; background: none; border: 0; cursor: pointer;
+    .nav-signout { background: none; border: 0; cursor: pointer;
                    color: var(--muted); font: inherit; padding: .4rem .5rem; border-radius: 6px; }
     .nav-signout:hover { color: var(--fg); text-decoration: underline; }
+    /* Small count badges on nav entries (brief items, tasks due) + a warning
+       dot on the overflow when something needs attention (failed jobs). */
+    .nav-badge { display: inline-block; min-width: 1.15em; padding: 0 .3em;
+                 margin-left: .25em; border-radius: 999px; background: var(--soft);
+                 font-size: .72rem; font-weight: 600; text-align: center;
+                 font-variant-numeric: tabular-nums; color: var(--fg); }
+    .nav-badge.warn { background: color-mix(in srgb, var(--danger) 15%, transparent);
+                      color: var(--danger); }
+    .nav-dot { display: inline-block; width: .45em; height: .45em; margin-left: .25em;
+               border-radius: 50%; background: var(--danger); vertical-align: super; }
+    /* Overflow menu: <details> so it works without JS; app.js closes it on
+       outside click / Escape. */
+    .nav-more { position: relative; }
+    .nav-more > summary { list-style: none; cursor: pointer; color: var(--muted);
+                          padding: .4rem .5rem; border-radius: 6px; user-select: none; }
+    .nav-more > summary::-webkit-details-marker { display: none; }
+    .nav-more > summary:hover { color: var(--fg); }
+    .nav-more[open] > summary { color: var(--fg); }
+    .nav-more > summary.more-active { color: var(--fg); font-weight: 600; }
+    .nav-more .nav-menu { position: absolute; top: 100%; left: 0; min-width: 9.5rem;
+                          background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 10px; padding: .3rem; z-index: 120;
+                          box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+    .nav-more .nav-menu a { display: block; }
+    /* Compact global search in the nav; collapses behind an icon toggle on
+       very narrow screens ('/' focuses it from any page). */
+    .nav-search { margin-left: auto; display: flex; align-items: center; gap: .2rem; }
+    .nav-search input { font-size: .85rem; padding: .28rem .55rem; width: 10rem;
+                        border-radius: 999px; }
+    .nav-search-toggle { display: none; background: none; border: 0; cursor: pointer;
+                         color: var(--muted); font: inherit; font-size: 1rem;
+                         padding: .35rem .45rem; border-radius: 6px; }
+    .nav-search-toggle:hover { color: var(--fg); }
+    @media (max-width: 640px) {
+      .nav-search input { width: 8rem; }
+      .nav-search:not(.open) input { display: none; }
+      .nav-search-toggle { display: inline-block; }
+    }
+    /* Programmatic list focus (j/k triage) must be visibly outlined even when
+       the browser wouldn't count it as :focus-visible. */
+    .kbd-focus { outline: 2px solid var(--fg); outline-offset: 2px; border-radius: 6px; }
+
+    /* Keyboard help overlay ('?' opens, Escape closes). */
+    #kbd-help { position: fixed; inset: 0; z-index: 1100; display: flex;
+                align-items: center; justify-content: center;
+                background: rgba(0,0,0,.45); padding: 1rem; }
+    #kbd-help .kbd-card { background: var(--bg); color: var(--fg);
+                          border: 1px solid var(--line); border-radius: 12px;
+                          padding: 1rem 1.2rem; max-width: 30rem; width: 100%;
+                          max-height: 85vh; overflow: auto; }
+    #kbd-help h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
+    #kbd-help table { width: 100%; }
+    #kbd-help td { padding: .22rem .4rem; border-bottom: 1px solid var(--line); }
+    #kbd-help kbd { border: 1px solid var(--line); border-bottom-width: 2px;
+                    border-radius: 4px; padding: 0 .35em; font-size: .85em;
+                    background: var(--soft); white-space: nowrap; }
+    #kbd-help .kbd-close { margin-top: .7rem; }
 
     .meta { color: var(--muted); font-size: .85rem; }
     .card { border: 1px solid var(--line); border-radius: 10px; padding: .8rem 1rem; margin: .6rem 0; }
@@ -165,32 +238,57 @@ anything under /api/ (and non-browser clients) keeps plain JSON errors.
     }
     {% block style %}{% endblock %}
   </style>
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   {% set path = request.url.path if request else '/' %}
+  {% set badges = nav_badges or {} %}
+  {% macro nav_link(href, label, extra) %}
+    {%- set ns = namespace(active=false) %}
+    {%- for m in [href] + extra %}
+      {%- if path == m or (m != '/' and path.startswith(m ~ '/')) %}{% set ns.active = true %}{% endif %}
+    {%- endfor %}
+    <a href="{{ href }}"{% if ns.active %} aria-current="page"{% endif %}>{{ label }}
+      {%- if href == '/brief' and badges.get('digest_count_today') %}
+        <span class="nav-badge" title="{{ badges.digest_count_today }} open brief item{{ '' if badges.digest_count_today == 1 else 's' }} today">{{ badges.digest_count_today }}</span>
+      {%- elif href == '/tasks' and (badges.get('tasks_overdue', 0) + badges.get('tasks_due_today', 0)) %}
+        {%- set due = badges.get('tasks_overdue', 0) + badges.get('tasks_due_today', 0) %}
+        <span class="nav-badge{{ ' warn' if badges.get('tasks_overdue') }}"
+              title="{{ badges.get('tasks_overdue', 0) }} overdue · {{ badges.get('tasks_due_today', 0) }} due today">{{ due }}</span>
+      {%- endif -%}
+    </a>
+  {%- endmacro %}
   <nav class="nav" aria-label="Primary">
-    {% for href, label, extra in [
-        ('/', 'Home', []),
-        ('/timeline', 'Timeline', []),
-        ('/day', 'Day', []),
-        ('/speakers', 'People', ['/person']),
-        ('/relationships', 'Relationships', []),
-        ('/projects', 'Projects', ['/project']),
-        ('/decisions', 'Decisions', []),
-        ('/graph', 'Graph', []),
-        ('/chat', 'Ask', []),
-        ('/brief', 'Brief', []),
-        ('/goals', 'Goals', []),
-        ('/tasks', 'Tasks', []),
-    ] %}
-      {% set ns = namespace(active=false) %}
-      {% for m in [href] + extra %}
-        {% if path == m or (m != '/' and path.startswith(m ~ '/')) %}{% set ns.active = true %}{% endif %}
-      {% endfor %}
-      <a href="{{ href }}"{% if ns.active %} aria-current="page"{% endif %}>{{ label }}</a>
-    {% endfor %}
+    {# Ordered by how often a between-meetings check reaches for them. #}
+    {{ nav_link('/', 'Home', []) }}
+    {{ nav_link('/brief', 'Brief', []) }}
+    {{ nav_link('/tasks', 'Tasks', []) }}
+    {{ nav_link('/decisions', 'Decisions', []) }}
+    {{ nav_link('/day', 'Day', []) }}
+    {{ nav_link('/timeline', 'Timeline', []) }}
+    {{ nav_link('/relationships', 'People', ['/person']) }}
+    {{ nav_link('/projects', 'Projects', ['/project']) }}
+    {{ nav_link('/goals', 'Goals', []) }}
+    {{ nav_link('/chat', 'Ask', []) }}
+    {% set more_active = path.startswith('/graph') or path.startswith('/speakers')
+                         or path == '/health' %}
+    <details class="nav-more">
+      <summary aria-haspopup="menu"{% if more_active %} class="more-active"{% endif %}>More{% if badges.get('failed_jobs') %}<span class="nav-dot" title="{{ badges.failed_jobs }} failed job{{ '' if badges.failed_jobs == 1 else 's' }}" aria-label="{{ badges.failed_jobs }} failed jobs"></span>{% endif %} ▾</summary>
+      <div class="nav-menu">
+        {{ nav_link('/graph', 'Graph', []) }}
+        {{ nav_link('/speakers', 'Voices', []) }}
+        {%- set ns_h = namespace(active=(path == '/health')) %}
+        <a href="/health"{% if ns_h.active %} aria-current="page"{% endif %}>Health{% if badges.get('failed_jobs') %}<span class="nav-dot" aria-hidden="true" title="{{ badges.failed_jobs }} failed job{{ '' if badges.failed_jobs == 1 else 's' }}"></span>{% endif %}</a>
+      </div>
+    </details>
+    <form class="nav-search" action="/" method="get" role="search">
+      <button type="button" class="nav-search-toggle" aria-label="Show search"
+              aria-expanded="false" title="Search transcripts">⌕</button>
+      <label class="visually-hidden" for="nav-q">Search transcripts</label>
+      <input type="search" id="nav-q" name="q" placeholder="Search… ( / )"
+             autocomplete="off" />
+    </form>
     {% if authed_via_cookie %}
       <button type="button" class="nav-signout" onclick="SB.signout()">Sign out</button>
     {% endif %}
@@ -199,5 +297,28 @@ anything under /api/ (and non-browser clients) keeps plain JSON errors.
     {% block content %}{% endblock %}
   </main>
   <div id="toasts" aria-live="polite"></div>
+  <div id="kbd-help" role="dialog" aria-modal="true" aria-labelledby="kbd-help-h" hidden>
+    <div class="kbd-card">
+      <h2 id="kbd-help-h">Keyboard shortcuts</h2>
+      <table>
+        <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+        <tr><td><kbd>?</kbd></td><td>This help</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>h</kbd></td><td>Home</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>b</kbd></td><td>Brief</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>t</kbd></td><td>Tasks</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>d</kbd></td><td>Decisions</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>y</kbd></td><td>Day view</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>l</kbd></td><td>Timeline</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>p</kbd></td><td>People</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>r</kbd></td><td>Projects</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>g</kbd></td><td>Goals</td></tr>
+        <tr><td><kbd>g</kbd> then <kbd>a</kbd></td><td>Ask</td></tr>
+        <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous item (Brief &amp; Tasks lists)</td></tr>
+        <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Previous / next day (Day, Timeline, Brief)</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Close this help / stop a streaming answer</td></tr>
+      </table>
+      <button type="button" class="kbd-close" onclick="SB.closeHelp()">Close</button>
+    </div>
+  </div>
 </body>
 </html>

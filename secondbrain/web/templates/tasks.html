@@ -47,9 +47,21 @@
     .t-status-line { margin: .3rem 0 0; }
     .t-acts { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; }
     .t-acts button { font-size: .82rem; padding: .32rem .68rem; }
+    /* Row action overflow: Done/Start/Do-today stay visible, the long tail
+       lives behind a ⋯ menu (button + role=menu; Escape/outside click close). */
+    .t-more { position: relative; display: inline-block; }
+    .t-menu { position: absolute; right: 0; top: 100%; z-index: 200; min-width: 10rem;
+              background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+              padding: .3rem; box-shadow: 0 6px 20px rgba(0,0,0,.18);
+              display: flex; flex-direction: column; gap: .15rem; }
+    .t-menu button { text-align: left; background: none; border: 0; width: 100%;
+                     border-radius: 6px; padding: .45rem .6rem; }
+    .t-menu button:hover:not(:disabled) { background: var(--soft); border: 0; }
     @media (max-width: 480px) {
       .t-acts { gap: .45rem; }
-      .t-acts button { flex: 1 0 auto; padding: .5rem .6rem; }
+      .t-acts > button { flex: 1 0 auto; padding: .5rem .6rem; min-height: 44px; }
+      .t-more .more-btn { min-height: 44px; min-width: 44px; }
+      .t-menu button { min-height: 44px; }
     }
 
     /* sub-tasks grouped under their parent */
@@ -190,20 +202,13 @@
             <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Restored to the backlog.')">Undo</button>
           {% else %}
             {% if t.status == 'in_progress' %}
-              <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Stopped — back in the backlog.')"
+              <button type="button" data-key="start" onclick="setStatus({{ t.id }}, 'backlog', this, 'Stopped — back in the backlog.')"
                       title="Stop working on it for now">Stop</button>
             {% elif t.status != 'blocked' %}
-              <button type="button" onclick="setStatus({{ t.id }}, 'in_progress', this, 'Started — good luck.')"
+              <button type="button" data-key="start" onclick="setStatus({{ t.id }}, 'in_progress', this, 'Started — good luck.')"
                       title="Mark as in progress">Start</button>
             {% endif %}
-            <button type="button" onclick="setStatus({{ t.id }}, 'done', this, 'Done — nice work.')">Done</button>
-            <button type="button" onclick="research({{ t.id }}, this)"
-                    title="Ask the local model to dig through your conversations and knowledge for this task — takes a moment, and the note is saved here">Research</button>
-            {% if web_research_enabled %}
-              <button type="button" onclick="research({{ t.id }}, this, true)"
-                      title="Search the web through your configured engine and save a summarised, cited note here — takes a moment">Research (web)</button>
-            {% endif %}
-            <button type="button" onclick="editTask(this)">Edit</button>
+            <button type="button" data-key="done" onclick="setStatus({{ t.id }}, 'done', this, 'Done — nice work.')">Done</button>
             {% if ctx == 'plan' %}
               <button type="button" onclick="removeFromPlan({{ t.id }}, this)"
                       title="Take it out of today’s plan — the task goes back to the backlog">Not today</button>
@@ -211,14 +216,32 @@
               <button type="button" onclick="planAddTask({{ t.id }}, this)"
                       title="Pin it into today’s plan right now">Do today</button>
             {% endif %}
-            {% if t.status == 'blocked' %}
-              <button type="button" onclick="setStatus({{ t.id }}, 'backlog', this, 'Unblocked — back in the running.')">Unblock</button>
-            {% else %}
-              <button type="button" onclick="setStatus({{ t.id }}, 'blocked', this, 'Marked blocked — it won\'t be planned until unblocked.')"
-                      title="Waiting on something? Blocked tasks are skipped by the planner">Block</button>
-            {% endif %}
-            <button type="button" class="btn-danger" onclick="setStatus({{ t.id }}, 'dropped', this, 'Dropped — find it under Completed if you change your mind.')"
-                    title="Stop tracking it — kept under Completed, undoable">Drop</button>
+            {# Everything else behind an accessible ⋯ menu (Escape closes,
+               works on touch — plain buttons inside role=menu). #}
+            <span class="t-more">
+              <button type="button" class="more-btn" aria-haspopup="menu" aria-expanded="false"
+                      aria-label="More actions for “{{ t.title }}”">⋯</button>
+              <div class="t-menu" role="menu" hidden>
+                <button type="button" role="menuitem" onclick="research({{ t.id }}, this)"
+                        title="Ask the local model to dig through your conversations and knowledge for this task — takes a moment, and the note is saved here">Research</button>
+                {% if web_research_enabled %}
+                  <button type="button" role="menuitem" onclick="research({{ t.id }}, this, true)"
+                          title="Search the web through your configured engine and save a summarised, cited note here — takes a moment">Research (web)</button>
+                {% endif %}
+                <button type="button" role="menuitem" onclick="editTask(this)">Edit</button>
+                {% if t.status == 'blocked' %}
+                  <button type="button" role="menuitem" onclick="setStatus({{ t.id }}, 'backlog', this, 'Unblocked — back in the running.')">Unblock</button>
+                {% else %}
+                  <button type="button" role="menuitem" onclick="setStatus({{ t.id }}, 'blocked', this, 'Marked blocked — it won\'t be planned until unblocked.')"
+                          title="Waiting on something? Blocked tasks are skipped by the planner">Block</button>
+                {% endif %}
+                {% if t.notes_count %}
+                  <button type="button" role="menuitem" onclick="toggleNotes({{ t.id }}, this)">Notes ({{ t.notes_count }})</button>
+                {% endif %}
+                <button type="button" role="menuitem" class="btn-danger" onclick="setStatus({{ t.id }}, 'dropped', this, 'Dropped — find it under Completed if you change your mind.')"
+                        title="Stop tracking it — kept under Completed, undoable">Drop</button>
+              </div>
+            </span>
           {% endif %}
         </div>
         {% if kids %}
@@ -237,9 +260,19 @@
   {% macro action_row(a, chase) %}
     <li class="task" id="action-{{ a.id }}">
       <div class="t-line"><span class="t-title">{{ a.object_text or '(unspecified)' }}</span></div>
-      <p class="t-meta meta">{{ a.src_name }}{% if a.dst_name %} → {{ a.dst_name }}{% endif %}
+      <p class="t-meta meta">
+        {%- if a.counterparty and a.counterparty.name and a.counterparty_speaker_id -%}
+          {%- if a.src_name == a.counterparty.name -%}
+            <a href="/person/{{ a.counterparty_speaker_id }}" title="Open {{ a.src_name }}’s page">{{ a.src_name }}</a>
+          {%- else %}{{ a.src_name }}{% endif %}
+          {%- if a.dst_name %} → {% if a.dst_name == a.counterparty.name %}<a href="/person/{{ a.counterparty_speaker_id }}" title="Open {{ a.dst_name }}’s page">{{ a.dst_name }}</a>{% else %}{{ a.dst_name }}{% endif %}{% endif %}
+        {%- else -%}
+          {{ a.src_name }}{% if a.dst_name %} → {{ a.dst_name }}{% endif %}
+        {%- endif %}
         {%- if a.due_label %} · <span class="{{ 'overdue' if a.overdue else ('due-today' if a.due_today) }}">{{ a.due_label }}</span>{% endif %}
-        {%- if a.detected_label %} · heard {{ a.detected_label }}{% endif %}</p>
+        {%- if a.detected_label %} · heard {{ a.detected_label }}{% endif %}
+        {%- if a.source_day %} · <a href="/day?date={{ a.source_day }}{% if a.source_seg %}#seg-{{ a.source_seg }}{% endif %}"
+             title="Open the conversation this was heard in">source</a>{% endif %}</p>
       <div class="t-acts">
         {% if chase %}
           <button type="button" onclick="chaseAction({{ a.id }}, this)"
@@ -592,24 +625,18 @@
       const acts = li.querySelector('.t-acts');
       if (!acts) return;
       acts.replaceChildren();
+      // Visible: Start/Stop, Done, Do today / Not today (the frequent taps).
       if (status === 'in_progress') {
-        acts.append(el('button', { type: 'button', text: 'Stop',
+        acts.append(el('button', { type: 'button', text: 'Stop', 'data-key': 'start',
           title: 'Stop working on it for now',
           onclick: ev => setStatus(id, 'backlog', ev.target, 'Stopped — back in the backlog.') }));
       } else if (status !== 'blocked') {
-        acts.append(el('button', { type: 'button', text: 'Start', title: 'Mark as in progress',
+        acts.append(el('button', { type: 'button', text: 'Start', 'data-key': 'start',
+          title: 'Mark as in progress',
           onclick: ev => setStatus(id, 'in_progress', ev.target, 'Started — good luck.') }));
       }
-      acts.append(el('button', { type: 'button', text: 'Done',
+      acts.append(el('button', { type: 'button', text: 'Done', 'data-key': 'done',
         onclick: ev => setStatus(id, 'done', ev.target, 'Done — nice work.') }));
-      acts.append(el('button', { type: 'button', text: 'Research',
-        onclick: ev => research(id, ev.target) }));
-      {% if web_research_enabled %}
-      acts.append(el('button', { type: 'button', text: 'Research (web)',
-        onclick: ev => research(id, ev.target, true) }));
-      {% endif %}
-      acts.append(el('button', { type: 'button', text: 'Edit',
-        onclick: ev => editTask(ev.target) }));
       if (ctx === 'plan') {
         acts.append(el('button', { type: 'button', text: 'Not today',
           onclick: ev => removeFromPlan(id, ev.target) }));
@@ -618,20 +645,73 @@
           title: 'Pin it into today’s plan right now',
           onclick: ev => planAddTask(id, ev.target) }));
       }
+      // Everything else behind the ⋯ menu (mirrors the server-rendered rows).
+      const menu = el('div', { class: 't-menu', role: 'menu', hidden: '' });
+      menu.append(el('button', { type: 'button', role: 'menuitem', text: 'Research',
+        onclick: ev => research(id, ev.target) }));
+      {% if web_research_enabled %}
+      menu.append(el('button', { type: 'button', role: 'menuitem', text: 'Research (web)',
+        onclick: ev => research(id, ev.target, true) }));
+      {% endif %}
+      menu.append(el('button', { type: 'button', role: 'menuitem', text: 'Edit',
+        onclick: ev => editTask(ev.target) }));
       if (status === 'blocked') {
-        acts.append(el('button', { type: 'button', text: 'Unblock',
+        menu.append(el('button', { type: 'button', role: 'menuitem', text: 'Unblock',
           onclick: ev => setStatus(id, 'backlog', ev.target, 'Unblocked — back in the running.') }));
       } else {
-        acts.append(el('button', { type: 'button', text: 'Block',
+        menu.append(el('button', { type: 'button', role: 'menuitem', text: 'Block',
           title: 'Waiting on something? Blocked tasks are skipped by the planner',
           onclick: ev => setStatus(id, 'blocked', ev.target,
             "Marked blocked — it won't be planned until unblocked.") }));
       }
-      acts.append(el('button', { type: 'button', class: 'btn-danger', text: 'Drop',
+      menu.append(el('button', { type: 'button', role: 'menuitem', class: 'btn-danger',
+        text: 'Drop',
         onclick: ev => setStatus(id, 'dropped', ev.target,
           'Dropped — find it under Completed if you change your mind.') }));
+      const more = el('span', { class: 't-more' },
+        el('button', { type: 'button', class: 'more-btn', 'aria-haspopup': 'menu',
+                       'aria-expanded': 'false', 'aria-label': 'More actions',
+                       text: '⋯' }),
+        menu);
+      acts.append(more);
       acts.dataset.ctx = ctx;
     }
+
+    /* ---------- ⋯ overflow menus (delegated: works for re-built rows too) ---- */
+    function closeMenus(except) {
+      document.querySelectorAll('.t-menu:not([hidden])').forEach(m => {
+        if (m === except) return;
+        m.hidden = true;
+        const b = m.parentElement.querySelector('.more-btn');
+        if (b) b.setAttribute('aria-expanded', 'false');
+      });
+    }
+    document.addEventListener('click', ev => {
+      const btn = ev.target.closest && ev.target.closest('.more-btn');
+      if (btn) {
+        const menu = btn.parentElement.querySelector('.t-menu');
+        const opening = menu.hidden;
+        closeMenus();
+        menu.hidden = !opening;
+        btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        if (opening) {
+          const first = menu.querySelector('button');
+          if (first) first.focus();
+        }
+        return;
+      }
+      if (!ev.target.closest || !ev.target.closest('.t-menu')) closeMenus();
+      else closeMenus(null); // a menu action was chosen — close every menu
+    });
+    document.addEventListener('keydown', ev => {
+      if (ev.key !== 'Escape') return;
+      const open = document.querySelector('.t-menu:not([hidden])');
+      if (open) {
+        const b = open.parentElement.querySelector('.more-btn');
+        closeMenus();
+        if (b) b.focus();
+      }
+    });
 
     /* ---------- today plan ------------------------------------------------- */
     async function planAction(action, btn) {
@@ -922,6 +1002,34 @@
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
     }
 
+    /* Filter state survives reload/back via the URL (?f=…&quad=…&goal=…). */
+    function syncFilterURL() {
+      const val = id => { const n = document.getElementById(id); return n ? n.value : ''; };
+      const chk = id => { const n = document.getElementById(id); return !!(n && n.checked); };
+      try {
+        const u = new URL(location.href);
+        const set = (k, v) => { if (v) u.searchParams.set(k, v); else u.searchParams.delete(k); };
+        set('f', (val('bl-filter') || '').trim());
+        set('quad', val('bl-quadrant'));
+        set('goal', val('bl-goal'));
+        set('week', chk('bl-week') ? '1' : '');
+        set('quick', chk('bl-quick') ? '1' : '');
+        history.replaceState(null, '', u);
+      } catch (e) { /* keep the current URL */ }
+    }
+    function initFiltersFromURL() {
+      try {
+        const u = new URLSearchParams(location.search);
+        const set = (id, v) => { const n = document.getElementById(id); if (n && v) n.value = v; };
+        const chk = (id, v) => { const n = document.getElementById(id); if (n) n.checked = v; };
+        set('bl-filter', u.get('f') || '');
+        set('bl-quadrant', u.get('quad') || '');
+        set('bl-goal', u.get('goal') || '');
+        chk('bl-week', u.get('week') === '1');
+        chk('bl-quick', u.get('quick') === '1');
+      } catch (e) { /* defaults */ }
+    }
+
     function applyFilters() {
       const list = document.getElementById('backlog-list');
       if (!list) return;
@@ -956,12 +1064,13 @@
       if (nomatch) nomatch.hidden = shown !== 0;
     }
 
+    function onFilterChange() { applyFilters(); syncFilterURL(); }
     function wireFilters() {
       ['bl-filter', 'bl-quadrant', 'bl-goal', 'bl-week', 'bl-quick'].forEach(id => {
         const n = document.getElementById(id);
         if (!n) return;
         n.addEventListener(n.tagName === 'INPUT' && n.type === 'search' ? 'input' : 'change',
-                           applyFilters);
+                           onFilterChange);
       });
       const reset = document.getElementById('bl-reset');
       if (reset) reset.addEventListener('click', () => {
@@ -971,14 +1080,19 @@
         ['bl-week', 'bl-quick'].forEach(id => {
           const n = document.getElementById(id); if (n) n.checked = false;
         });
-        applyFilters();
+        onFilterChange();
         const f = document.getElementById('bl-filter');
         if (f) f.focus();
       });
     }
     wireFilters();
+    initFiltersFromURL();
+    applyFilters();
 
-    /* ---------- page-local keyboard shortcuts -------------------------------- */
+    /* ---------- page-local keyboard shortcuts --------------------------------
+     * n = new task; j/k walk the visible task rows; on a focused row:
+     * c = complete, s = start/stop (shared layer in app.js handles the rest).
+     */
     document.addEventListener('keydown', ev => {
       const t = ev.target;
       const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
@@ -991,6 +1105,13 @@
         const form = t && t.closest ? t.closest('form') : null;
         if (form) { ev.preventDefault(); form.requestSubmit(); }
       }
+    });
+    SB.listNav({
+      items: () => document.querySelectorAll('#plan-list .task, #backlog-list .task'),
+      keys: {
+        c: li => { const b = li.querySelector('.t-acts [data-key="done"]'); if (b) b.click(); },
+        s: li => { const b = li.querySelector('.t-acts [data-key="start"]'); if (b) b.click(); },
+      },
     });
   </script>
 {% endblock %}

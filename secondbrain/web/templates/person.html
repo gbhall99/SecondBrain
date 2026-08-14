@@ -30,6 +30,20 @@
     a.tracked:hover { text-decoration: underline; }
     .mention blockquote { margin: .55rem 0 .1rem; }
     .mention blockquote:last-child { margin-bottom: .1rem; }
+    .quick-acts { display: flex; flex-wrap: wrap; gap: .35rem; margin: .5rem 0 .2rem; }
+    details.sect { margin: .9rem 0; }
+    details.sect > summary { cursor: pointer; width: max-content; max-width: 100%;
+                             border-radius: 6px; padding: .15rem .2rem; }
+    details.sect > summary h2 { display: inline; font-size: 1.12rem; margin: 0; }
+    .prep-card .prep-top { display: flex; flex-wrap: wrap; align-items: baseline;
+                           gap: .2rem .6rem; }
+    .prep-card .prep-topic { margin: .2rem 0 0; font-weight: 600; overflow-wrap: anywhere; }
+    .overdue-count { color: var(--danger); font-size: .9rem; font-weight: 600; }
+    @media (max-width: 480px) {
+      .stats { gap: .6rem 1.2rem; }
+      .quick-acts .pill { flex: 1 0 auto; text-align: center; padding: .55rem .7rem; }
+      .commit .promote-btn { width: 100%; min-height: 44px; }
+    }
 {% endblock %}
 {% block content %}
   {% set who = 'you' if d.is_owner else d.label %}
@@ -57,6 +71,14 @@
     {%- if d.node_id %} · <a href="/graph#node={{ d.node_id }}"
       title="Explore everything linked to {{ who }} in the knowledge graph">view in knowledge graph</a>{% endif %}
   </p>
+  {% if not d.is_owner and not d.opted_out %}
+    <p class="quick-acts">
+      <a class="pill" href="/?speaker={{ d.speaker_id }}"
+         title="Search every transcript line {{ d.label }} said">Search their words</a>
+      <a class="pill" href="/chat?q={{ ('What did ' ~ d.label ~ ' commit to recently?') | urlencode }}"
+         title="Ask the local model, grounded in your conversations">Ask about them</a>
+    </p>
+  {% endif %}
 
   {% if d.name_duplicates %}
     {% set dup = d.name_duplicates[0] %}
@@ -154,31 +176,6 @@
       conversations are kept private. Only the interaction counts above remain.</div>
   {% else %}
 
-  <h2>Known facts</h2>
-  {% if d.facts %}
-    {% for f in d.facts %}
-      <div class="card">
-        {%- if f.direction == 'referenced' -%}
-          <span class="pill" title="A fact about {{ f.other_label or 'something else' }} that names {{ who }}">referenced</span>
-          {% if f.other_label %}{{ f.other_label }} — {% endif -%}
-          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
-        {%- else -%}
-          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
-        {%- endif %}
-        <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}% confident{% if f.source_day %}
-          · <a href="/day?date={{ f.source_day }}{% if f.source_seg %}#seg-{{ f.source_seg }}{% endif %}"
-               title="Open the conversation this was extracted from">source</a>{% endif %})</span></div>
-    {% endfor %}
-    {% if d.facts_total and d.facts_total > d.facts | length %}
-      <p class="meta">Showing the {{ d.facts | length }} most confident of {{ d.facts_total }}
-        facts{% if d.node_id %} —
-        <a href="/graph#node={{ d.node_id }}">explore them all in the knowledge graph</a>{% endif %}.</p>
-    {% endif %}
-  {% else %}
-    <p class="meta">No facts extracted about {{ who }} yet — they appear here as conversations
-      are processed by the knowledge graph.</p>
-  {% endif %}
-
   {% macro commitment_card(c, badge) %}
     <div class="card commit">
       <div class="c-main"><span class="pill who-badge">{{ badge }}</span>
@@ -203,12 +200,16 @@
     </div>
   {% endmacro %}
 
-  <h2>Commitments</h2>
+  {# Commitments first: it's the thing to check between meetings. Overdue rise
+     to the top; the heading counts them. #}
+  {% set n_overdue = (d.commitments.owed_by + d.commitments.owed_to)
+                     | selectattr('overdue') | list | length %}
+  <h2 id="commitments">Commitments{% if n_overdue %} <span class="overdue-count">· {{ n_overdue }} overdue</span>{% endif %}</h2>
   {% if d.commitments.owed_by or d.commitments.owed_to %}
-    {% for c in d.commitments.owed_by %}
+    {% for c in d.commitments.owed_by | sort(attribute='overdue', reverse=True) %}
       {{ commitment_card(c, 'You owe' if d.is_owner else d.label + ' owes') }}
     {% endfor %}
-    {% for c in d.commitments.owed_to %}
+    {% for c in d.commitments.owed_to | sort(attribute='overdue', reverse=True) %}
       {{ commitment_card(c, 'Owed to you' if d.is_owner else 'Owed to ' + d.label) }}
     {% endfor %}
   {% else %}
@@ -216,7 +217,35 @@
       in conversation land here.</p>
   {% endif %}
 
-  <h2>Mentions</h2>
+  <details class="sect" data-desktop-open>
+  <summary><h2>Known facts</h2></summary>
+  {% if d.facts %}
+    {% for f in d.facts %}
+      <div class="card">
+        {%- if f.direction == 'referenced' -%}
+          <span class="pill" title="A fact about {{ f.other_label or 'something else' }} that names {{ who }}">referenced</span>
+          {% if f.other_label %}{{ f.other_label }} — {% endif -%}
+          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
+        {%- else -%}
+          {{ (f.predicate or 'fact') | replace('_', ' ') }}: {{ f.object_text }}
+        {%- endif %}
+        <span class="meta">({{ "%.0f"|format((f.confidence or 0)*100) }}% confident{% if f.source_day %}
+          · <a href="/day?date={{ f.source_day }}{% if f.source_seg %}#seg-{{ f.source_seg }}{% endif %}"
+               title="Open the conversation this was extracted from">source</a>{% endif %})</span></div>
+    {% endfor %}
+    {% if d.facts_total and d.facts_total > d.facts | length %}
+      <p class="meta">Showing the {{ d.facts | length }} most confident of {{ d.facts_total }}
+        facts{% if d.node_id %} —
+        <a href="/graph#node={{ d.node_id }}">explore them all in the knowledge graph</a>{% endif %}.</p>
+    {% endif %}
+  {% else %}
+    <p class="meta">No facts extracted about {{ who }} yet — they appear here as conversations
+      are processed by the knowledge graph.</p>
+  {% endif %}
+  </details>
+
+  <details class="sect" data-desktop-open>
+  <summary><h2>Mentions</h2></summary>
   {% if d.mentions %}
     {% for m in d.mentions %}
       <div class="card mention">
@@ -258,6 +287,7 @@
       in decisions, ideas, or passing mentions from your conversations, they're collected here
       with the line that was heard.</p>
   {% endif %}
+  </details>
 
   <h2>Connections</h2>
   {% if d.connections %}
@@ -269,22 +299,32 @@
   {% endif %}
 
   <h2>Recent conversations</h2>
+  {% macro prep_card(c) %}
+    <div class="card prep-card">
+      <div class="prep-top">
+        {% if c.day %}
+          <a href="/day?date={{ c.day }}{% if c.anchor_segment_id %}#seg-{{ c.anchor_segment_id }}{% endif %}"
+             title="Open this conversation in the day view">
+            <time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time></a>
+        {% else %}
+          {% if c.first_at %}<time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time>{% else %}—{% endif %}
+        {% endif %}
+        {% if c.duration_label %}<span class="meta">{{ c.duration_label }}</span>{% endif %}
+        {% if c.participants %}<span class="meta">{{ c.participants | join(', ') }}</span>{% endif %}
+        <span class="meta">{{ c.segments }} line{{ '' if c.segments == 1 else 's' }} from {{ who }}</span>
+      </div>
+      {% if c.topic %}<p class="prep-topic meta" title="Top decision or action item from this conversation">“{{ c.topic }}”</p>{% endif %}
+    </div>
+  {% endmacro %}
   {% if d.recent_conversations %}
-    <ul class="convlist">
-      {% for c in d.recent_conversations %}
-        <li>
-          {% if c.day %}
-            <a href="/day?date={{ c.day }}{% if c.anchor_segment_id %}#seg-{{ c.anchor_segment_id }}{% endif %}"
-               title="Open this conversation in the day view">
-              <time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time></a>
-          {% else %}
-            {% if c.first_at %}<time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time>{% else %}—{% endif %}
-          {% endif %}
-          <span class="meta">{{ c.segments }} line{{ '' if c.segments == 1 else 's' }}
-            from {{ who }}{% if c.talk_minutes and c.talk_minutes >= 0.1 %} · {{ c.talk_minutes }} min{% endif %}</span>
-        </li>
-      {% endfor %}
-    </ul>
+    {% for c in d.recent_conversations[:5] %}{{ prep_card(c) }}{% endfor %}
+    {% if d.recent_conversations | length > 5 %}
+      <details class="sect">
+        <summary class="meta">Show {{ d.recent_conversations | length - 5 }} earlier
+          conversation{{ '' if d.recent_conversations | length - 5 == 1 else 's' }}</summary>
+        {% for c in d.recent_conversations[5:] %}{{ prep_card(c) }}{% endfor %}
+      </details>
+    {% endif %}
     {% if d.interactions.conversations > d.recent_conversations | length %}
       <p class="meta">Showing the latest {{ d.recent_conversations | length }} of
         {{ d.interactions.conversations }} conversations —
@@ -295,7 +335,8 @@
       recorder hears {{ 'you' if d.is_owner else 'them' }} speak.</p>
   {% endif %}
 
-  <h2>Recent quotes</h2>
+  <details class="sect" data-desktop-open>
+  <summary><h2>Recent quotes</h2></summary>
   {% if d.recent_quotes %}
     {% for q in d.recent_quotes %}
       <blockquote>
@@ -316,6 +357,7 @@
     <p class="meta">No transcript quotes yet — lines attributed to {{ who }} show up here
       once conversations are transcribed.</p>
   {% endif %}
+  </details>
 
   {% endif %}{# opted-out gate #}
 
@@ -357,6 +399,16 @@
 
       wireNameForm(document.getElementById('identify-form'), false);
       wireNameForm(document.getElementById('rename-form'), true);
+
+      // Facts / Mentions / Quotes: open on desktop, collapsed on phones (a
+      // details' open state can't be set from CSS, so gate it here once).
+      try {
+        if (window.matchMedia('(min-width: 641px)').matches) {
+          document.querySelectorAll('details.sect[data-desktop-open]').forEach(function (d) {
+            d.open = true;
+          });
+        }
+      } catch (e) { /* stay collapsed */ }
 
       // Inline rename (mirrors the People page pattern).
       var toggle = document.getElementById('rename-toggle');

@@ -160,11 +160,16 @@
       function announce(msg) { srStatus.textContent = msg; }
 
       function focusDetail() {
-        // Move focus for keyboard/AT users without yanking the page around:
-        // scroll only as far as needed (matters on phones, where the detail
-        // pane stacks below the list).
+        // Move focus for keyboard/AT users without yanking the page around.
+        // On phones the panes stack: bring the detail pane's top into view so
+        // a tapped result visibly opens something; on desktop scroll only as
+        // far as needed.
         try { detailBox.focus({ preventScroll: true }); } catch (e) { detailBox.focus(); }
-        if (detailBox.scrollIntoView) detailBox.scrollIntoView({ block: 'nearest' });
+        var stacked = false;
+        try { stacked = window.matchMedia('(max-width: 719px)').matches; } catch (e2) { /* desktop */ }
+        if (detailBox.scrollIntoView) {
+          detailBox.scrollIntoView({ block: stacked ? 'start' : 'nearest' });
+        }
       }
 
       function loadingSoon(box, msg) {
@@ -994,17 +999,8 @@
         }, 250);
       });
 
-      // "/" focuses search from anywhere on the page (except while typing).
-      document.addEventListener('keydown', function (e) {
-        if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
-        var t = e.target || {};
-        var tag = (t.tagName || '').toLowerCase();
-        if (tag === 'input' || tag === 'textarea' || tag === 'select'
-            || t.isContentEditable) return;
-        e.preventDefault();
-        input.focus();
-        input.select();
-      });
+      // "/" focuses this search box via the shared keyboard layer (app.js).
+      SB.registerSearch(input);
 
       applyHash(false);
     })();

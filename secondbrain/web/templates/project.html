@@ -26,6 +26,15 @@
                              font-size: .9rem; padding: .25rem .1rem; border-radius: 4px;
                              list-style-position: inside; }
     details.more > summary:hover { color: var(--fg); }
+    .convrows { list-style: none; margin: .4rem 0 0; padding: 0; }
+    .convrows li { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem;
+                   padding: .45rem 0; border-bottom: 1px solid var(--line); }
+    .convrows li:last-child { border-bottom: 0; }
+    .convrows time { font-variant-numeric: tabular-nums; }
+    @media (max-width: 480px) {
+      .stats { gap: .6rem 1.2rem; }
+      .commit .promote-btn { width: 100%; min-height: 44px; }
+    }
 {% endblock %}
 {% block content %}
   {# Node timestamps are usually full UTC ISO stamps, but early/imported rows
@@ -61,7 +70,9 @@
   <p class="meta crumb"><a href="/projects">← Projects</a></p>
   <h1>{{ d.label }}</h1>
   <p class="meta">Project
-    {%- if d.aliases %} · also known as {{ d.aliases | join(", ") }}{% endif %}</p>
+    {%- if d.aliases %} · also known as {{ d.aliases | join(", ") }}{% endif %}
+    · <a href="/chat?q={{ ('What is the latest on ' ~ d.label ~ '?') | urlencode }}"
+         title="Ask the local model, grounded in your conversations">Ask about this project</a></p>
 
   <div class="card stats">
     <div class="stat"><b>{{ d.activity.conversations }}</b>
@@ -123,28 +134,10 @@
       will show up here.</p>
   {% endif %}
 
-  {% macro decision_card(x) %}
-      <div class="card">{{ x.object_text }}
-        <span class="meta">({% if x.source_day %}heard {{ x.source_day | prettyday }} ·
-          {{ source_link(x) }}{% else %}source conversation unknown{% endif %})</span></div>
-  {% endmacro %}
-  <h2>Decisions</h2>
-  {% if d.decisions %}
-    {% set decision_cap = 15 %}
-    {% for x in d.decisions[:decision_cap] %}{{ decision_card(x) }}{% endfor %}
-    {% if d.decisions | length > decision_cap %}
-      <details class="more">
-        <summary>Show {{ d.decisions | length - decision_cap }} earlier
-          decision{{ '' if d.decisions | length - decision_cap == 1 else 's' }}</summary>
-        {% for x in d.decisions[decision_cap:] %}{{ decision_card(x) }}{% endfor %}
-      </details>
-    {% endif %}
-  {% else %}
-    <p class="meta">No decisions recorded yet — when a decision about this project is
-      heard in conversation, it lands here with a link to the moment it was made.</p>
-  {% endif %}
-
-  <h2>Action items{% if d.open_commitments %} <span class="meta">({{ n_open }} open{% if n_done %}, {{ n_done }} done{% endif %})</span>{% endif %}</h2>
+  {# Action items above Decisions: the actionable list comes first when
+     checking a project between meetings. Open items are already sorted
+     overdue/soonest-due first by the service; done items sink to the end. #}
+  <h2 id="action-items">Action items{% if d.open_commitments %} <span class="meta">({{ n_open }} open{% if n_done %}, {{ n_done }} done{% endif %})</span>{% endif %}</h2>
   {% if d.open_commitments %}
     {% for c in d.open_commitments %}
       <div class="card commit{{ ' commit-done' if c.done }}">
@@ -169,6 +162,50 @@
   {% else %}
     <p class="meta">No action items yet — commitments like “I'll send the report Friday”
       are picked out automatically and can be tracked as tasks from here.</p>
+  {% endif %}
+
+  {% macro decision_card(x) %}
+      <div class="card">{{ x.object_text }}
+        <span class="meta">({% if x.source_day %}heard {{ x.source_day | prettyday }} ·
+          {{ source_link(x) }}{% else %}source conversation unknown{% endif %})</span></div>
+  {% endmacro %}
+  <h2>Decisions</h2>
+  {% if d.decisions %}
+    {% set decision_cap = 15 %}
+    {% for x in d.decisions[:decision_cap] %}{{ decision_card(x) }}{% endfor %}
+    {% if d.decisions | length > decision_cap %}
+      <details class="more">
+        <summary>Show {{ d.decisions | length - decision_cap }} earlier
+          decision{{ '' if d.decisions | length - decision_cap == 1 else 's' }}</summary>
+        {% for x in d.decisions[decision_cap:] %}{{ decision_card(x) }}{% endfor %}
+      </details>
+    {% endif %}
+  {% else %}
+    <p class="meta">No decisions recorded yet — when a decision about this project is
+      heard in conversation, it lands here with a link to the moment it was made.</p>
+  {% endif %}
+
+  <h2>Recent conversations</h2>
+  {% if recent_conversations %}
+    <ul class="convrows">
+      {% for c in recent_conversations %}
+        <li>
+          {% if c.day %}
+            <a href="/day?date={{ c.day }}{% if c.anchor_segment_id %}#seg-{{ c.anchor_segment_id }}{% endif %}"
+               title="Open this conversation in the day view">
+              <time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time></a>
+          {% else %}
+            {% if c.first_at %}<time datetime="{{ c.first_at }}">{{ c.first_at | localdt }}</time>{% else %}—{% endif %}
+          {% endif %}
+          <span class="meta">{{ c.duration_label }}{% if c.participants %} ·
+            {{ c.participants | join(', ') }}{% endif %}</span>
+        </li>
+      {% endfor %}
+    </ul>
+    <p class="meta">The meetings where {{ d.label }} came up, newest first (up to 6).</p>
+  {% else %}
+    <p class="meta">No conversations tied to this project yet — they appear as it comes up
+      in recorded meetings.</p>
   {% endif %}
 
   {# A fact edge reads subject → predicate → object. When the subject is this

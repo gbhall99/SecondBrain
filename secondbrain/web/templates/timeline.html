@@ -41,6 +41,27 @@
     .conv { border-left: 3px solid var(--line); padding: .15rem 0 .15rem 1rem; margin: 1.25rem 0; }
     .conv:target { border-left-color: var(--fg); }
     .convhead { margin: .1rem 0 .25rem; font-size: .92rem; font-weight: 600; }
+    .conv-topic { margin: 0 0 .3rem; font-size: .95rem; font-weight: 600;
+                  overflow-wrap: anywhere; }
+    .mode-toggle { display: inline-flex; border: 1px solid var(--line);
+                   border-radius: 999px; overflow: hidden; }
+    .mode-toggle a { padding: .25rem .8rem; text-decoration: none; font-size: .85rem;
+                     color: var(--muted); }
+    .mode-toggle a + a { border-left: 1px solid var(--line); }
+    .mode-toggle a[aria-current="true"] { background: var(--fg); color: var(--bg);
+                                          font-weight: 600; }
+    /* Week view: 7 stacked mini strips. */
+    .week-row { margin: .7rem 0; }
+    .week-row h2 { margin: 0 0 .15rem; font-size: .92rem; }
+    .week-row h2 a { text-decoration: none; }
+    .week-row h2 a:hover { text-decoration: underline; }
+    .week-row .strip { height: calc(.4rem + var(--lanes, 1) * 1rem); }
+    .week-row .strip a.blk { top: calc(.2rem + var(--lane, 0) * 1rem); height: .75rem; }
+    .week-empty { color: var(--muted); font-size: .8rem; margin: .1rem 0 0; }
+    /* Extraction split: commitments by direction. */
+    .exgroup .trackbtn { font-size: .78rem; padding: .18rem .55rem; }
+    .exgroup .tracked { color: var(--ok); white-space: nowrap; font-size: .8rem; }
+    .ex-foot { margin: .2rem 0 0; font-size: .8rem; }
     .convhead a { text-decoration: none; display: flex; flex-wrap: wrap;
                   align-items: baseline; gap: .15rem .55rem; }
     .convhead .range { font-variant-numeric: tabular-nums; }
@@ -68,11 +89,67 @@
     .jump { margin-top: .7rem; display: flex; flex-wrap: wrap; gap: .3rem; justify-content: center; }
 {% endblock %}
 {% block content %}
+{% if range_mode == 'week' %}
+  <h1>Timeline · week to {{ pretty_day }}</h1>
+  <p class="meta">Seven days at a glance — each strip is one day, each bar a conversation.
+    Open a day for the full view.</p>
+
+  <nav class="daynav" aria-label="Week navigation">
+    <span class="mode-toggle" role="group" aria-label="Timeline range">
+      <a href="/timeline/{{ day }}">Day</a>
+      <a href="/timeline/{{ day }}?range=week" aria-current="true">Week</a>
+    </span>
+    <a class="pill" id="nav-prev" href="/timeline/{{ prev_week }}?range=week" rel="prev"
+       aria-label="Previous week, to {{ prev_week }}">← Prev week</a>
+    {% if day < today %}
+      <a class="pill" id="nav-next" href="/timeline/{{ next_week }}?range=week" rel="next"
+         aria-label="Next week, to {{ next_week }}">Next week →</a>
+    {% endif %}
+    {% if not is_today %}<a class="pill" href="/timeline?range=week">This week</a>{% endif %}
+  </nav>
+
+  {% if invalid_date %}
+    <div class="card baddate" role="alert">
+      <strong>“{{ invalid_date }}” doesn't look like a date.</strong>
+      <span class="meta">Dates are YYYY-MM-DD (e.g. {{ today }}) — showing this week instead.</span>
+    </div>
+  {% endif %}
+
+  {% for wd in week_days %}
+    <section class="week-row" aria-label="{{ wd.label }}">
+      <h2><a href="/timeline/{{ wd.day }}">{{ wd.label }}</a>
+        {%- if wd.is_today %} <span class="meta">· today</span>{% endif %}
+        {% if wd.blocks %}<span class="meta">· {{ wd.n_conversations }}
+          conversation{{ 's' if wd.n_conversations != 1 }} · {{ wd.total_talk }}</span>{% endif %}</h2>
+      {% if wd.blocks %}
+        <div class="strip" style="--lanes:{{ wd.strip.lanes }}" role="group"
+             aria-label="{{ wd.label }} — each bar is a conversation, midnight to midnight">
+          <span class="tick" style="left:25%" aria-hidden="true"></span>
+          <span class="tick" style="left:50%" aria-hidden="true"></span>
+          <span class="tick" style="left:75%" aria-hidden="true"></span>
+          {% for sp in wd.strip.spans %}
+            <a class="blk" style="left:{{ sp.left }}%;width:{{ sp.width }}%;--lane:{{ sp.lane }}"
+               href="/timeline/{{ wd.day }}#conv-{{ sp.index }}" title="{{ sp.label }}"
+               aria-label="{{ wd.label }}: {{ sp.label }}"></a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="week-empty">Nothing recorded.</p>
+      {% endif %}
+    </section>
+  {% endfor %}
+  <p class="meta">{% if tz_label %}Times in {{ tz_label }} · {% endif %}00:00 → 24:00 across
+    each strip.</p>
+{% else %}
   <h1>Timeline · {{ pretty_day }}{% if is_today %} <span class="today-tag meta">· today</span>{% endif %}</h1>
   <p class="meta">When conversations happened and how long they ran — open one to read it in full.
     <a href="/day?date={{ day }}">Open the full transcript &amp; fix speakers →</a></p>
 
   <nav class="daynav" aria-label="Day navigation">
+    <span class="mode-toggle" role="group" aria-label="Timeline range">
+      <a href="/timeline/{{ day }}" aria-current="true">Day</a>
+      <a href="/timeline/{{ day }}?range=week">Week</a>
+    </span>
     <a class="pill" id="nav-prev" href="/timeline/{{ prev_day }}" rel="prev"
        aria-label="Previous day, {{ prev_day }}">← Prev</a>
     <label class="visually-hidden" for="day-pick">Jump to date</label>
@@ -163,6 +240,9 @@
     {% set open_all = blocks|length <= 5 %}
     {% for b in blocks %}
       <article class="conv" id="conv-{{ loop.index }}" aria-labelledby="convh-{{ loop.index }}">
+        {% if b.topic %}
+          <p class="conv-topic" title="The most confident decision (or first action item) heard here">{{ b.topic }}</p>
+        {% endif %}
         <h2 class="convhead" id="convh-{{ loop.index }}">
           <a href="/day?date={{ day }}#seg-{{ b.segments[0].id }}"
              title="Open this conversation in the full day transcript">
@@ -176,17 +256,46 @@
           </a>
         </h2>
         {% if b.extractions %}
+          {% macro ex_item(it, with_track=false) -%}
+            {% set label = it.object_text or (it.predicate or '') | replace('_', ' ') %}
+            <li>{% if it.segment_ids %}<a href="/day?date={{ day }}#seg-{{ it.segment_ids[0] }}"
+                  title="Jump to the source line in the day view">{{ label }}</a>{% else %}{{ label }}{% endif %}
+              {%- if it.due_date %} <span class="meta">· due {{ it.due_date }}</span>{% endif %}
+              {%- if with_track %}
+                {% if it.task_id %} <span class="tracked" title="Already in your task backlog">✓ tracked</span>
+                {%- elif it.edge_id %} <button type="button" class="trackbtn" data-edge="{{ it.edge_id }}"
+                    title="Track it — it becomes a task in your backlog">Track as task</button>{% endif %}
+              {%- endif %}</li>
+          {%- endmacro %}
           <div class="extractions">
+            {# Commitments split by direction; decisions get their own group
+               with a route into /decisions; other kinds render generically. #}
+            {% set acts = b.extractions.get('action_item', []) %}
+            {% set owe = acts | selectattr('owed_direction', 'equalto', 'owed_by_me') | list %}
+            {% set owed = acts | selectattr('owed_direction', 'equalto', 'owed_to_me') | list %}
+            {% set other_acts = acts | selectattr('owed_direction', 'equalto', 'other') | list %}
+            {% if owe %}
+              <div class="exgroup"><span class="kind">You owe</span>
+                <ul>{% for it in owe %}{{ ex_item(it, true) }}{% endfor %}</ul></div>
+            {% endif %}
+            {% if owed %}
+              <div class="exgroup"><span class="kind">Owed to you</span>
+                <ul>{% for it in owed %}{{ ex_item(it, true) }}{% endfor %}</ul></div>
+            {% endif %}
+            {% if other_acts %}
+              <div class="exgroup"><span class="kind">Action items</span>
+                <ul>{% for it in other_acts %}{{ ex_item(it, true) }}{% endfor %}</ul></div>
+            {% endif %}
+            {% if b.extractions.get('decision') %}
+              <div class="exgroup"><span class="kind">Decisions</span>
+                <ul>{% for it in b.extractions['decision'] %}{{ ex_item(it) }}{% endfor %}</ul>
+                <p class="meta ex-foot"><a href="/decisions">All decisions →</a></p></div>
+            {% endif %}
             {% for kind, items in b.extractions.items() %}
-              <div class="exgroup"><span class="kind">{{ kind }}</span>
-                <ul>
-                  {% for it in items %}
-                    {% set label = it.object_text or (it.predicate or '') | replace('_', ' ') %}
-                    <li>{% if it.segment_ids %}<a href="/day?date={{ day }}#seg-{{ it.segment_ids[0] }}"
-                          title="Jump to the source line in the day view">{{ label }}</a>{% else %}{{ label }}{% endif %}</li>
-                  {% endfor %}
-                </ul>
-              </div>
+              {% if kind not in ('action_item', 'decision') %}
+                <div class="exgroup"><span class="kind">{{ kind }}</span>
+                  <ul>{% for it in items %}{{ ex_item(it) }}{% endfor %}</ul></div>
+              {% endif %}
             {% endfor %}
           </div>
         {% endif %}
@@ -227,7 +336,9 @@
     </div>
   {% endif %}
 
-  {% if is_today %}
+{% endif %}{# range_mode #}
+
+  {% if is_today and range_mode != 'week' %}
     {# The recorder keeps transcribing while today is open. A quiet poll fills
        this in ("2 new lines transcribed — refresh") instead of re-rendering
        under the reader — same pattern as the day view. #}
@@ -257,6 +368,23 @@
         if (go) location.href = go.href;
       });
 
+      // Track a detected commitment as a task, right from the extraction block.
+      document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest && e.target.closest('.extractions .trackbtn');
+        if (!btn) return;
+        SB.api('/api/actions/' + btn.dataset.edge + '/promote', { method: 'POST', button: btn })
+          .then(function (d) {
+            var ok = document.createElement('span');
+            ok.className = 'tracked';
+            ok.textContent = '✓ tracked';
+            ok.title = 'Now in your task backlog';
+            btn.replaceWith(ok);
+            SB.toast(d && d.title ? 'Added to your backlog: “' + d.title + '”.'
+                                  : 'Added to your backlog.', 'success');
+          })
+          .catch(function () { /* SB.api already toasted */ });
+      });
+
       // --- today keeps growing: offer fresh lines without yanking the page --
       // (Rendered only when viewing today.) Poll the day's cheap segment list
       // and, once it outgrows what this render showed, surface a persistent
@@ -264,14 +392,15 @@
       // up shortly after transcription holds for a tab left open.
       var fresh = document.getElementById('fresh-note');
       if (fresh) {
-        var knownLines = {{ total_lines }};
+        var knownLines = {{ raw_seg_count if raw_seg_count is defined else 0 }};
         var checkingFresh = false;
         var checkFresh = async function () {
           if (document.hidden || checkingFresh) return;
           checkingFresh = true;
           try {
-            var data = await SB.api('/api/day/{{ day }}', { quiet: true });
-            var n = data && data.segments ? data.segments.length : knownLines;
+            // Count-only endpoint: far cheaper than re-fetching every segment.
+            var data = await SB.api('/api/day/{{ day }}/count', { quiet: true });
+            var n = data && typeof data.count === 'number' ? data.count : knownLines;
             if (n > knownLines) {
               var added = n - knownLines;
               fresh.textContent = (knownLines === 0

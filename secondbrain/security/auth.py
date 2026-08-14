@@ -29,8 +29,11 @@ _PBKDF2_ROUNDS = 200_000
 MIN_PASSWORD_LENGTH = 8
 COOKIE_NAME = "sb_session"
 # /favicon.ico is exempt like /static: browsers fetch it unauthenticated and it
-# only serves the emoji icon (nothing personal).
-EXEMPT_PREFIXES = ("/health", "/login", "/logout", "/static", "/favicon.ico")
+# only serves the emoji icon (nothing personal). /manifest.json likewise — the
+# PWA manifest is static app chrome (name + icon), fetched by the browser
+# without credentials even from the login page.
+EXEMPT_PREFIXES = ("/health", "/login", "/logout", "/static", "/favicon.ico",
+                   "/manifest.json")
 
 
 # --- password hashing --------------------------------------------------------

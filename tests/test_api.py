@@ -2399,9 +2399,13 @@ def test_nav_active_state(client):
 
 
 def test_nav_active_state_person_page(client, conn):
+    # People points at /relationships now; a /person page still lights it up.
     conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (12, 'Dana', 'known', 0)")
     r = client.get("/person/12")
-    assert '<a href="/speakers" aria-current="page">People</a>' in r.text
+    assert '<a href="/relationships" aria-current="page">People</a>' in r.text
+    # the Voices entry (in the More overflow) marks /speakers pages active
+    r = client.get("/speakers")
+    assert '<a href="/speakers" aria-current="page">Voices</a>' in r.text
 
 
 def test_error_pages_html_for_browsers_json_for_api(client):
@@ -3625,3 +3629,257 @@ def test_priority_score_and_why_rendered(client):
     assert "Why this rank:" in page
     t = client.get("/api/tasks").json()["tasks"][0]
     assert "priority_why" in t and "value" in t["priority_why"]
+
+
+# --- between-meetings shell: nav badges, manifest, dashboard, week view --------
+
+
+def test_manifest_route(client):
+    r = client.get("/manifest.json")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "SecondBrain"
+    assert body["display"] == "standalone" and body["start_url"] == "/"
+    assert body["icons"][0]["src"] == "/static/favicon.svg"
+    # base.html links the manifest + theme-color for the PWA shell
+    html = client.get("/").text
+    assert 'rel="manifest"' in html
+    assert 'name="theme-color"' in html
+    assert 'rel="apple-touch-icon"' in html
+
+
+def test_nav_overflow_and_search(client):
+    html = client.get("/").text
+    # frequency-ordered primary links; Graph/Voices/Health live in the overflow
+    assert 'class="nav-more"' in html
+    assert '>Voices' in html and 'href="/speakers"' in html
+    assert 'href="/health"' in html
+    # compact global search submits to /?q=…
+    assert 'id="nav-q"' in html and 'name="q"' in html
+    # keyboard help overlay is rendered by the shell on every page
+    assert 'id="kbd-help"' in html
+    assert 'id="kbd-help"' in client.get("/tasks").text
+
+
+def test_nav_badges_render_counts(client, conn):
+    today = _local_today()
+    _seed_suggestion(conn, dedupe="h-badge-1")
+    conn.execute(
+        "INSERT INTO tasks (title, status, due_date) VALUES ('overdue one', 'backlog', "
+        "'2000-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO tasks (title, status, due_date) VALUES ('due now', 'backlog', ?)",
+        (today,),
+    )
+    conn.execute("INSERT INTO jobs (type, state) VALUES ('transcribe', 'failed')")
+    html = client.get("/timeline").text  # badges come from a context processor
+    assert 'class="nav-badge"' in html            # brief count badge
+    assert "1 overdue · 1 due today" in html      # tasks badge tooltip
+    assert 'class="nav-dot"' in html              # failed-jobs dot on More/Health
+    # the badge query set is cached in-process (15s TTL): a second render
+    # within the window must not lose the counters
+    assert 'class="nav-badge"' in client.get("/goals").text
+
+
+def test_home_between_meetings_block(client, conn):
+    from secondbrain.knowledge import graph
+
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (3, 'Me', 'owner', 1)")
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, status) "
+        "VALUES (7, '2026-06-16T09:00:00.000Z', 'diarized')"
+    )
+    conn.execute("UPDATE audio_files SET conversation_id=7")
+    conn.execute("UPDATE transcript_segments SET speaker_id=5")
+    me = graph.create_node(conn, type="person", name="Me", embedding=None,
+                           confidence=1.0, extraction_id=None, speaker_id=3)
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=1.0, extraction_id=None, speaker_id=5)
+    graph.upsert_edge(conn, src_node_id=me, dst_node_id=dana, predicate="action_item",
+                      kind="action_item", object_text="send the deck", confidence=0.9,
+                      conversation_id=7, source_segment_ids=[1])
+    html = client.get("/").text
+    assert "Between meetings" in html
+    assert "Top commitments you owe" in html
+    assert "send the deck" in html
+    # counterparty links to their person page; the item links to its source
+    assert 'href="/person/5"' in html
+    assert "#seg-1" in html
+    # today has no meetings in the fixture data (it's from 2026) — the block
+    # renders without a meetings section rather than lying
+    assert ("Today" in html)
+    # the vanity entities/facts pill is gone; the due/overdue tasks pill exists
+    assert 'id="stat-graph"' not in html
+    assert 'id="stat-due"' in html
+
+
+def test_home_search_no_unconditional_autofocus(client):
+    html = client.get("/").text
+    # autofocus is JS-gated (hover-capable devices with a ?q= deep link only)
+    assert 'id="q"' in html
+    import re
+    m = re.search(r'<input[^>]*id="q"[^>]*>', html)
+    assert m and "autofocus" not in m.group(0)
+
+
+def test_timeline_week_view(client, conn):
+    r = client.get("/timeline/2026-06-16?range=week")
+    assert r.status_code == 200
+    html = r.text
+    # seven day rows, labelled and linking to each day
+    assert html.count('class="week-row"') == 7
+    assert 'href="/timeline/2026-06-16"' in html   # the recorded day links out
+    assert 'href="/timeline/2026-06-10"' in html   # earliest of the seven
+    # the recorded day gets a strip with a conversation bar
+    assert 'class="strip"' in html
+    assert "Nothing recorded." in html             # empty days say so honestly
+    # week nav hops by 7 days and the Day|Week toggle is present
+    assert 'href="/timeline/2026-06-09?range=week"' in html   # prev week
+    assert 'href="/timeline/2026-06-23?range=week"' in html   # next week
+    assert ">Day</a>" in html and ">Week</a>" in html
+    # day mode is untouched and offers the toggle too
+    day_html = client.get("/timeline/2026-06-16").text
+    assert '?range=week"' in day_html
+    assert 'class="week-row"' not in day_html
+
+
+def test_timeline_conversation_topic_line(client, conn):
+    conn.execute("INSERT INTO kg_nodes (id, type, name) VALUES (30, 'person', 'Dana')")
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, status) "
+        "VALUES (7, '2026-06-16T09:00:00.000Z', 'diarized')"
+    )
+    conn.execute("UPDATE audio_files SET conversation_id=7")
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, kind, object_text, conversation_id, valid, "
+        "confidence, source_segment_ids) "
+        "VALUES (99, 30, 'decision', 'ship on friday', 7, 1, 0.9, '[1]')"
+    )
+    html = client.get("/timeline/2026-06-16").text
+    assert 'class="conv-topic"' in html
+    assert "ship on friday" in html
+    # extraction block routes into /decisions
+    assert "All decisions →" in html
+
+
+def test_health_retry_failed_endpoint(client, conn):
+    conn.execute(
+        "INSERT INTO jobs (type, state, attempts, max_attempts, error, finished_at) "
+        "VALUES ('transcribe', 'failed', 3, 3, 'boom', '2026-06-16T09:00:00.000Z')"
+    )
+    conn.execute(
+        "INSERT INTO jobs (type, state, attempts, max_attempts, error, finished_at) "
+        "VALUES ('extract_knowledge', 'failed', 3, 3, 'kaput', '2026-06-16T09:01:00.000Z')"
+    )
+    # narrow retry by type
+    r = client.post("/api/jobs/retry-failed", json={"type": "transcribe"})
+    assert r.status_code == 200 and r.json()["requeued"] == 1
+    states = {row["type"]: row["state"] for row in conn.execute(
+        "SELECT type, state FROM jobs").fetchall()}
+    assert states["transcribe"] == "pending" and states["extract_knowledge"] == "failed"
+    # retry-all sweeps the rest (and is a no-op the second time)
+    assert client.post("/api/jobs/retry-failed").json()["requeued"] == 1
+    assert client.post("/api/jobs/retry-failed").json()["requeued"] == 0
+
+
+def test_health_page_retry_buttons_and_hints(client, conn):
+    conn.execute(
+        "INSERT INTO jobs (type, state, attempts, max_attempts, error, finished_at) "
+        "VALUES ('transcribe', 'failed', 3, 3, 'boom', '2026-06-16T09:00:00.000Z')"
+    )
+    html = client.get("/health", headers=HTML).text
+    assert 'id="retry-all"' in html
+    assert 'class="retry-one"' in html and 'data-type="transcribe"' in html
+    assert 'id="rerun-btn"' in html               # fetch + re-render, no reload
+    # failing checks surface their remediation hint (the backups check fails
+    # in a fresh test data dir)
+    assert "Fix:" in html
+
+
+def test_person_page_commitments_first_with_overdue_count(client, conn):
+    from secondbrain.knowledge import graph
+
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=1.0, extraction_id=None, speaker_id=5)
+    graph.upsert_edge(conn, src_node_id=dana, dst_node_id=None, predicate="action_item",
+                      kind="action_item", object_text="late thing", confidence=0.9,
+                      due_date="2000-01-02")
+    html = client.get("/person/5").text
+    # commitments moved above facts, with an overdue count in the heading
+    assert html.index('id="commitments"') < html.index("Known facts")
+    assert "1 overdue" in html
+    # header quick actions: search their words + ask about them
+    assert '/?speaker=5' in html
+    assert "/chat?q=" in html and "Search their words" in html
+    # facts/mentions/quotes are collapsible sections now
+    assert 'class="sect"' in html
+
+
+def test_relationships_open_commitments_column(client, conn):
+    from secondbrain.knowledge import graph
+
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, status) "
+        "VALUES (7, '2026-06-16T09:00:00.000Z', 'diarized')"
+    )
+    conn.execute("UPDATE audio_files SET conversation_id=7")
+    conn.execute("UPDATE transcript_segments SET speaker_id=5")
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=1.0, extraction_id=None, speaker_id=5)
+    graph.upsert_edge(conn, src_node_id=dana, dst_node_id=None, predicate="action_item",
+                      kind="action_item", object_text="send figures", confidence=0.9)
+    html = client.get("/relationships").text
+    assert "Open commitments" in html
+    assert 'href="/person/5#commitments"' in html
+
+
+def test_error_404_offers_search_and_links(client):
+    r = client.get("/no-such-page", headers=HTML)
+    assert r.status_code == 404
+    assert 'role="search"' in r.text              # search box on the error page
+    assert "Today’s transcript" in r.text
+    assert 'href="/timeline"' in r.text
+
+
+def test_chat_page_deeplink_and_named_prompts(client, conn):
+    conn.execute(
+        "INSERT INTO speakers (id, name, kind, is_owner, segment_count, last_seen_at) "
+        "VALUES (5, 'Dana', 'known', 0, 3, '2026-06-16T09:00:00.000Z')"
+    )
+    html = client.get("/chat").text
+    # ?q= deep link support (prefill + auto-submit) is wired client-side
+    assert "initFromURL" in html
+    # context-aware canned prompt names a recently heard person
+    assert "What did Dana commit to?" in html
+    # thread persistence moved to localStorage with a size cap
+    assert "localStorage" in html and "STORE_MAX_BYTES" in html
+
+
+def test_day_page_toc_filter_and_extraction_strip(client, conn):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    conn.execute(
+        "INSERT INTO conversations (id, started_at, status) "
+        "VALUES (7, '2026-06-16T09:00:00.000Z', 'diarized')"
+    )
+    conn.execute("UPDATE audio_files SET conversation_id=7")
+    conn.execute("UPDATE transcript_segments SET speaker_id=5")
+    conn.execute("INSERT INTO kg_nodes (id, type, name, speaker_id) VALUES (40, 'person', 'Dana', 5)")
+    conn.execute(
+        "INSERT INTO kg_edges (id, src_node_id, kind, predicate, object_text, "
+        "conversation_id, valid, confidence, source_segment_ids) "
+        "VALUES (99, 40, 'action_item', 'action_item', 'send deck', 7, 1, 0.9, '[1]')"
+    )
+    html = client.get("/day?date=2026-06-16").text
+    # conversation sections carry anchors; the in-day filter row is present
+    assert 'id="conv-1"' in html
+    assert 'id="seg-filter"' in html and 'id="seg-person"' in html
+    # participants render in the conversation header
+    assert "Dana" in html
+    # extraction strip: the detected commitment with a one-tap track action
+    assert 'class="convex"' in html
+    assert "send deck" in html and "Track as task" in html
+    assert 'href="/decisions"' in html

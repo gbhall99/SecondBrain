@@ -12,21 +12,31 @@
     .chk-ok { color: var(--ok); }
     .chk-bad { color: var(--danger); }
     .chk-detail { color: var(--muted); font-size: .88rem; overflow-wrap: anywhere; }
-    .pills { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; }
+    .chk-hint { display: block; margin-top: .2rem; font-size: .82rem; color: var(--fg); }
+    .chk-hint code { background: var(--soft); border-radius: 5px; padding: .05rem .35rem;
+                     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                     font-size: .85em; }
+    .pills { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; align-items: center; }
     .pill-warn { background: transparent; border: 1px solid var(--danger);
                  color: var(--danger); font-weight: 600; }
-    #jobs { scroll-margin-top: .5rem; }
+    #jobs { scroll-margin-top: 3rem; }
     ul.fails { list-style: none; margin: .6rem 0; padding: 0; }
     .fail-head { margin: 0; display: flex; flex-wrap: wrap; gap: .2rem .5rem;
                  align-items: baseline; }
+    .fail-head .retry-one { margin-left: auto; font-size: .8rem; padding: .28rem .65rem; }
     .fail-err { margin: .45rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                 font-size: .82rem; color: var(--muted); }
+    #refresh-note { margin-left: auto; }
+    @media (max-width: 480px) {
+      .fail-head .retry-one { min-height: 44px; }
+    }
 {% endblock %}
 {% block content %}
   <h1>System health</h1>
   <p class="sub">Live checks of capture, storage, and the local models — everything runs on
-    this machine. <button type="button" class="linklike" onclick="location.reload()">Re-run checks</button></p>
+    this machine. <button type="button" class="linklike" id="rerun-btn">Re-run checks</button>
+    <span class="meta" id="refresh-note" role="status"></span></p>
 
   {% if health.status == 'ok' %}
   <p class="status-line okline"><span aria-hidden="true">✓</span>
@@ -61,7 +71,11 @@
           <th scope="row">{{ check_labels.get(c.name, c.name) }}</th>
           <td>{% if c.ok %}<span class="chk-ok"><span aria-hidden="true">✓</span> OK</span>
               {% else %}<span class="chk-bad"><span aria-hidden="true">✕</span> Needs attention</span>{% endif %}</td>
-          <td class="chk-detail">{{ c.detail }}</td>
+          <td class="chk-detail">{{ c.detail }}
+            {% if not c.ok and c.hint %}
+              <span class="chk-hint">Fix: {{ c.hint }}</span>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -77,6 +91,11 @@
     <span class="pill">{{ counts.get('running', 0) }} running</span>
     <span class="pill">{{ counts.get('done', 0) }} done</span>
     <span class="pill{{ ' pill-warn' if failed }}">{{ failed }} failed</span>
+    {% if failed %}
+      <button type="button" id="retry-all"
+              title="Put every failed job back in the queue with a fresh retry budget">
+        Retry all failed</button>
+    {% endif %}
   </div>
 
   {% if failures %}
@@ -89,7 +108,9 @@
     <li class="card">
       <p class="fail-head"><strong>{{ f.type_label }}</strong>
         <span class="meta">job #{{ f.id }}{% if f.when %} · gave up {{ f.when }}{% endif %}
-          · {{ f.attempts }} of {{ f.max_attempts }} attempts</span></p>
+          · {{ f.attempts }} of {{ f.max_attempts }} attempts</span>
+        <button type="button" class="retry-one" data-type="{{ f.type }}"
+                title="Re-queue every failed “{{ f.type_label }}” job for a fresh run">Retry</button></p>
       {% if f.error %}<pre class="fail-err">{{ f.error }}</pre>
       {% else %}<p class="fail-err">No error message was recorded for this job.</p>{% endif %}
     </li>
@@ -102,4 +123,72 @@
   <div class="empty"><strong>No failed jobs</strong>
     Everything queued has either completed or is still waiting its turn.</div>
   {% endif %}
+
+  <script>
+    (function () {
+      'use strict';
+
+      // Re-render #main from a fresh server render (no full reload): the
+      // Re-run button and a 30s visible-tab auto-refresh both use it, so the
+      // page keeps itself honest while a problem is being fixed.
+      var refreshing = false;
+      async function refreshHealth(manual, btn) {
+        if (refreshing) return;
+        refreshing = true;
+        if (btn) SB.busy(btn, true);
+        try {
+          var r = await fetch(location.pathname + location.search,
+                              { headers: { Accept: 'text/html' } });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          var doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+          var fresh = doc.getElementById('main');
+          var main = document.getElementById('main');
+          if (!fresh || !main) throw new Error('unexpected response');
+          main.replaceChildren.apply(main, Array.prototype.slice.call(fresh.childNodes));
+          wire();   // the swapped-in DOM needs its buttons re-wired
+          var note = document.getElementById('refresh-note');
+          if (note) {
+            note.textContent = 'Checked ' +
+              new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit',
+                                                  second: '2-digit' });
+          }
+        } catch (err) {
+          if (manual) SB.toast('Couldn’t re-run the checks — is SecondBrain running?', 'error');
+        } finally {
+          refreshing = false;
+          if (btn) SB.busy(btn, false);
+        }
+      }
+
+      async function retryFailed(type, btn) {
+        try {
+          var body = type ? { type: type } : {};
+          var d = await SB.api('/api/jobs/retry-failed',
+                               { method: 'POST', body: body, button: btn });
+          var n = (d && d.requeued) || 0;
+          SB.toast(n ? n + ' job' + (n === 1 ? '' : 's') + ' re-queued — they run shortly.'
+                     : 'Nothing left to retry.', n ? 'success' : 'info');
+          refreshHealth(false);
+        } catch (e) { /* SB.api already toasted */ }
+      }
+
+      function wire() {
+        var rerun = document.getElementById('rerun-btn');
+        if (rerun) rerun.addEventListener('click', function () { refreshHealth(true, rerun); });
+        var all = document.getElementById('retry-all');
+        if (all) all.addEventListener('click', function () { retryFailed(null, all); });
+        document.querySelectorAll('.retry-one').forEach(function (b) {
+          b.addEventListener('click', function () { retryFailed(b.dataset.type, b); });
+        });
+      }
+      wire();
+
+      // Auto-refresh every 30s while the tab is visible (same gate as the
+      // dashboard's status poll).
+      setInterval(function () { if (!document.hidden) refreshHealth(false); }, 30000);
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refreshHealth(false);
+      });
+    })();
+  </script>
 {% endblock %}
