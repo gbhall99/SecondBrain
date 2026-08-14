@@ -84,3 +84,113 @@ def test_agents_selection(include_menubar):
     a = deploy.agents(include_menubar=include_menubar)
     assert ("com.secondbrain.menubar" in a) == include_menubar
     assert "com.secondbrain.daemon" in a and "com.secondbrain.web" in a
+
+
+# --- batch 3: load reporting, status, stale detection --------------------------
+
+
+class _Proc:
+    def __init__(self, returncode=0, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_load_agents_reports_per_agent_success_and_failure(tmp_path):
+    written = deploy.install_launchd(
+        launch_agents_dir=tmp_path / "LA", runner=lambda *a, **k: _Proc()
+    )
+
+    def runner(cmd, **kwargs):
+        assert kwargs.get("capture_output") is True
+        if cmd[:2] == ["launchctl", "unload"]:
+            return _Proc(returncode=1, stderr="not loaded")  # ignored
+        if "daemon" in cmd[-1]:
+            return _Proc(returncode=0)
+        return _Proc(returncode=5, stderr="Load failed: 5: Input/output error")
+
+    results = deploy.load_agents(written, runner=runner)
+    by_label = {r.label: r for r in results}
+    assert by_label["com.secondbrain.daemon"].ok
+    assert not by_label["com.secondbrain.web"].ok
+    assert "Input/output error" in by_label["com.secondbrain.web"].stderr
+
+
+def test_agent_status_reports_installed_loaded_and_logs(tmp_path):
+    dest = tmp_path / "LA"
+    deploy.install_launchd(launch_agents_dir=dest, runner=lambda *a, **k: _Proc())
+
+    def runner(cmd, **kwargs):
+        assert cmd[:2] == ["launchctl", "list"]
+        return _Proc(returncode=0 if cmd[2] == "com.secondbrain.daemon" else 1)
+
+    statuses = deploy.agent_status(
+        launch_agents_dir=dest, runner=runner, have_launchctl=True, include_menubar=True
+    )
+    by = {s.label: s for s in statuses}
+    assert by["com.secondbrain.daemon"].installed and by["com.secondbrain.daemon"].loaded
+    assert by["com.secondbrain.web"].installed and not by["com.secondbrain.web"].loaded
+    assert not by["com.secondbrain.menubar"].installed  # never written
+    # log paths parsed from the rendered plist
+    assert any("daemon" in p for p in by["com.secondbrain.daemon"].log_paths)
+
+
+def test_agent_status_degrades_without_launchctl(tmp_path):
+    statuses = deploy.agent_status(
+        launch_agents_dir=tmp_path / "LA", have_launchctl=False,
+        runner=lambda *a, **k: pytest.fail("launchctl must not be invoked"),
+    )
+    assert all(s.loaded is None for s in statuses)
+    assert all(not s.installed for s in statuses)
+
+
+def test_stale_plists_detects_python_and_repo_mismatch(tmp_path):
+    dest = tmp_path / "LA"
+    deploy.install_launchd(
+        repo=tmp_path / "old-repo", python="/old/venv/bin/python",
+        launch_agents_dir=dest, runner=lambda *a, **k: _Proc(),
+    )
+    problems = deploy.stale_plists(
+        launch_agents_dir=dest, repo=tmp_path / "new-repo", python="/new/venv/bin/python"
+    )
+    assert problems
+    assert any("/old/venv/bin/python" in p for p in problems)
+    assert any("old-repo" in p for p in problems)
+    # matching environment → clean
+    assert deploy.stale_plists(
+        launch_agents_dir=dest, repo=tmp_path / "old-repo", python="/old/venv/bin/python"
+    ) == []
+    # nothing installed → clean
+    assert deploy.stale_plists(launch_agents_dir=tmp_path / "empty") == []
+
+
+def test_cli_deploy_launchd_refuses_non_macos(monkeypatch, settings):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr("sys.platform", "linux")
+    result = CliRunner().invoke(cli.app, ["deploy", "launchd"])
+    assert result.exit_code == 1
+    assert "macOS" in result.output
+
+
+def test_cli_deploy_status_degrades_off_macos(monkeypatch, settings, tmp_path):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    real_agent_status = deploy.agent_status
+    monkeypatch.setattr(
+        deploy, "agent_status",
+        lambda **kw: real_agent_status(
+            launch_agents_dir=tmp_path / "LA", have_launchctl=False,
+            runner=lambda *a, **k: None, **kw,
+        ),
+    )
+    result = CliRunner().invoke(cli.app, ["deploy", "status"])
+    assert result.exit_code == 0, result.output
+    assert "com.secondbrain.daemon" in result.output
+    assert "not installed" in result.output
+    assert "launchctl unavailable" in result.output

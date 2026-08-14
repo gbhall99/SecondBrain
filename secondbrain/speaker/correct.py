@@ -6,6 +6,7 @@ import sqlite3
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.speaker import registry
+from secondbrain.storage.db import transaction
 
 
 def _withdraw_stale_exemplar(
@@ -61,17 +62,25 @@ def _withdraw_stale_exemplar(
 
 
 def reassign_segment(
-    conn: sqlite3.Connection, segment_id: int, speaker_id: int, settings: Settings | None = None
+    conn: sqlite3.Connection, segment_id: int, speaker_id: int,
+    settings: Settings | None = None, *, propagate: bool = True,
 ) -> bool:
     """Reassign a segment to the correct speaker, lock it, and add a confirmed
     exemplar (so future matching improves). Returns True on success.
 
-    Also handles the two follow-on effects of a correction:
+    With ``propagate`` (the default) the correction also flows to every other
+    non-locked segment sharing the same diarized observation — one turn of
+    speech is one voice, so its sibling lines were wrong for the same reason —
+    and the observation itself moves to the corrected speaker (mirroring
+    re-attribution). Only the corrected line is locked.
+
+    Also handles the follow-on effects of a correction:
     - re-correcting an already-locked line withdraws the stale exemplar the
       earlier correction taught the old speaker (see _withdraw_stale_exemplar);
-    - both the old and the new speaker's segment_count / last_seen_at stay fresh.
+    - every affected speaker's profile/segment stats are refreshed once.
     Confirming the current guess (same speaker_id) is a supported teaching
     action: it locks the line and adds the exemplar exactly once (idempotent).
+    The whole write sequence is one atomic transaction.
     """
     settings = settings or get_settings()
     seg = conn.execute(
@@ -87,30 +96,60 @@ def reassign_segment(
     if conn.execute("SELECT 1 FROM speakers WHERE id=?", (target,)).fetchone() is None:
         return False
     old_speaker = seg["speaker_id"]
-    if seg["observation_id"]:
-        _withdraw_stale_exemplar(conn, segment_id, seg, target)
-    conn.execute(
-        "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=1.0, "
-        "speaker_locked=1, speaker_source='user' WHERE id=?",
-        (target, segment_id),
-    )
-    # Feed the correction back into the profile via the observation's embedding.
-    if seg["observation_id"]:
-        obs = conn.execute(
-            "SELECT embedding, start_at FROM speaker_observations WHERE id=?",
-            (seg["observation_id"],),
-        ).fetchone()
-        emb = registry.deserialize_embedding(obs["embedding"]) if obs else None
-        already_taught = obs is not None and conn.execute(
-            "SELECT 1 FROM speaker_observations WHERE speaker_id=? AND source='correction' "
-            "AND audio_file_id IS NULL AND embedding=? LIMIT 1",
-            (target, obs["embedding"]),
-        ).fetchone()
-        if emb and not already_taught:
-            registry.add_confirmed_exemplar(conn, target, emb, start_at=obs["start_at"])
-    registry._recount_segments(conn, target)
-    if old_speaker is not None and old_speaker != target:
-        registry._recount_segments(conn, old_speaker)
+    touched: set[int] = {target}
+    if old_speaker is not None:
+        touched.add(int(old_speaker))
+    with transaction(conn):
+        if seg["observation_id"]:
+            _withdraw_stale_exemplar(conn, segment_id, seg, target)
+        conn.execute(
+            "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=1.0, "
+            "speaker_locked=1, speaker_source='user' WHERE id=?",
+            (target, segment_id),
+        )
+        if propagate and seg["observation_id"]:
+            # The sibling lines of the same diarized turn carry the same voice:
+            # move every non-locked one along (locked lines are the user's word).
+            prev = conn.execute(
+                "SELECT DISTINCT speaker_id FROM transcript_segments "
+                "WHERE observation_id=? AND speaker_locked=0 AND speaker_id IS NOT NULL",
+                (seg["observation_id"],),
+            ).fetchall()
+            touched.update(int(r["speaker_id"]) for r in prev)
+            conn.execute(
+                "UPDATE transcript_segments SET speaker_id=?, speaker_confidence=1.0, "
+                "speaker_source='user' WHERE observation_id=? AND speaker_locked=0",
+                (target, seg["observation_id"]),
+            )
+            obs_row = conn.execute(
+                "SELECT speaker_id FROM speaker_observations WHERE id=?",
+                (seg["observation_id"],),
+            ).fetchone()
+            if obs_row is not None and obs_row["speaker_id"] is not None:
+                touched.add(int(obs_row["speaker_id"]))
+            conn.execute(
+                "UPDATE speaker_observations SET speaker_id=? WHERE id=?",
+                (target, seg["observation_id"]),
+            )
+        # Feed the correction back into the profile via the observation's embedding.
+        if seg["observation_id"]:
+            obs = conn.execute(
+                "SELECT embedding, start_at FROM speaker_observations WHERE id=?",
+                (seg["observation_id"],),
+            ).fetchone()
+            emb = registry.deserialize_embedding(obs["embedding"]) if obs else None
+            already_taught = obs is not None and conn.execute(
+                "SELECT 1 FROM speaker_observations WHERE speaker_id=? AND source='correction' "
+                "AND audio_file_id IS NULL AND embedding=? LIMIT 1",
+                (target, obs["embedding"]),
+            ).fetchone()
+            if emb and not already_taught:
+                registry.add_confirmed_exemplar(conn, target, emb, start_at=obs["start_at"])
+        # Recount/recompute every affected speaker exactly once, after all moves.
+        for sid in touched:
+            if sid != target and propagate and seg["observation_id"]:
+                registry.refresh_profile(conn, sid)  # observation may have moved away
+            registry._recount_segments(conn, sid)
     return True
 
 

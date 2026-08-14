@@ -1,4 +1,8 @@
+import logging
+import math
 from pathlib import Path
+
+import pytest
 
 from secondbrain.pipeline import conversation
 from secondbrain.pipeline.diarize import MockDiarizer, deterministic_embedding
@@ -64,7 +68,8 @@ def test_centroid_running_mean(conn):
 
 
 def test_enroll_owner_from_files(conn, settings):
-    diar = MockDiarizer(dim=settings.diarization.embedding_dim)
+    # 6s of speech per clip × 2 clips clears the 10s enrollment quality gate.
+    diar = MockDiarizer(dim=settings.diarization.embedding_dim, duration_s=6.0)
     owner = enroll.enroll_owner_from_files(
         conn, [Path("/tmp/a.flac"), Path("/tmp/b.flac")], diarizer=diar, settings=settings
     )
@@ -87,6 +92,7 @@ def _chunk(conn, started, ended, dur=2.0, status="transcribed"):
 
 
 def test_assign_chunk_groups_then_splits_on_gap(conn, settings):
+    settings.diarization.enabled = True
     settings.conversation.max_gap_minutes = 5
     a = _chunk(conn, "2026-06-16T09:00:00.000Z", "2026-06-16T09:01:00.000Z")
     c1 = conversation.assign_chunk(conn, a, settings)
@@ -155,6 +161,126 @@ def test_attribute_conversation_labels_segments(conn, settings):
     ).fetchone()["n"] == 2
 
 
+def test_attribution_cleans_up_concat_scratch_file(conn, settings, tmp_path):
+    conv = _seeded_conversation(conn)
+    scratch = tmp_path / "conv_concat_test.wav"
+
+    def builder(conn, chunks, s):
+        scratch.write_bytes(b"\x00")
+        return scratch, attribution.concat_offsets_from_db(conn, chunks)
+
+    attribution.attribute_conversation(
+        conn, conv,
+        diarizer=MockDiarizer(dim=settings.diarization.embedding_dim),
+        settings=settings, audio_builder=builder,
+    )
+    assert not scratch.exists()  # raw-audio scratch never lingers
+
+
+def test_missing_chunk_audio_marks_skipped_incomplete(conn, settings, caplog):
+    settings.extraction.enabled = True
+    conv = _seeded_conversation(conn)
+
+    def builder(conn, chunks, s):
+        # one of the two chunk files is gone → offsets shorter than chunks
+        return Path("/tmp/concat.wav"), attribution.concat_offsets_from_db(conn, chunks[:1])
+
+    with caplog.at_level(logging.WARNING, logger="secondbrain.attribution"):
+        n = attribution.attribute_conversation(
+            conn, conv,
+            diarizer=MockDiarizer(dim=settings.diarization.embedding_dim),
+            settings=settings, audio_builder=builder,
+        )
+    assert n == 0
+    assert any("skipping diarization" in r.message for r in caplog.records)
+    row = conn.execute(
+        "SELECT status, knowledge_status FROM conversations WHERE id=?", (conv,)
+    ).fetchone()
+    # distinct from 'diarized' (the skip stays visible), still extractable
+    assert row["status"] == "skipped_incomplete"
+    assert row["knowledge_status"] == "pending"
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE type='extract_knowledge'"
+    ).fetchone()["n"] == 1
+    # retention finalized so the surviving raw audio doesn't defer forever
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM audio_files "
+        "WHERE conversation_id=? AND retention_delete_after IS NULL",
+        (conv,),
+    ).fetchone()["n"] == 0
+
+
+def test_min_cluster_speech_drops_tiny_clusters(conn, settings):
+    settings.diarization.min_cluster_speech_s = 1.0
+    conv = _seeded_conversation(conn)
+    # S1 is a 0.4s cough — it must not mint an unknown speaker
+    diar = MockDiarizer(
+        turns=[(0.0, 2.0, "S0"), (3.0, 3.4, "S1")],
+        embeddings={"S0": deterministic_embedding("p0", settings.diarization.embedding_dim),
+                    "S1": deterministic_embedding("p1", settings.diarization.embedding_dim)},
+    )
+    attribution.attribute_conversation(
+        conn, conv, diarizer=diar, settings=settings, audio_builder=_fake_builder
+    )
+    assert conn.execute("SELECT COUNT(*) AS n FROM speakers").fetchone()["n"] == 1
+    rows = conn.execute(
+        "SELECT speaker_id FROM transcript_segments ORDER BY audio_file_id"
+    ).fetchall()
+    assert rows[0]["speaker_id"] is not None   # S0's segment labeled
+    assert rows[1]["speaker_id"] is None       # cough-only segment left unlabeled
+
+
+def _known_with_centroid(conn, name, centroid):
+    sid = conn.execute(
+        "INSERT INTO speakers (name, kind, display_label) VALUES (?, 'known', ?)", (name, name)
+    ).lastrowid
+    registry.update_centroid(conn, int(sid), centroid)
+    return int(sid)
+
+
+def test_low_margin_match_flagged_low_confidence(conn, settings):
+    # Two nearly-tied candidate voices: the label sticks but is flagged for
+    # review (confidence forced under low_confidence_threshold) instead of
+    # being confidently auto-assigned to whichever squeaked ahead.
+    settings.diarization.min_match_margin = 0.05
+    probe = [1.0, 0.0, 0.0, 0.0]
+    alice = _known_with_centroid(conn, "Alice", probe)
+    _known_with_centroid(conn, "Carol", registry.normalize([0.999, 0.04, 0.0, 0.0]))
+    conv = _seeded_conversation(conn)
+    diar = MockDiarizer(turns=[(0.0, 4.0, "S0")], embeddings={"S0": probe})
+    attribution.attribute_conversation(
+        conn, conv, diarizer=diar, settings=settings, audio_builder=_fake_builder
+    )
+    rows = conn.execute(
+        "SELECT speaker_id, speaker_confidence FROM transcript_segments"
+    ).fetchall()
+    assert all(r["speaker_id"] == alice for r in rows)  # still labeled
+    assert all(
+        r["speaker_confidence"] < settings.diarization.low_confidence_threshold for r in rows
+    )
+    # ambiguous matches must not steer the winning profile either
+    assert conn.execute(
+        "SELECT exemplar_count FROM speakers WHERE id=?", (alice,)
+    ).fetchone()["exemplar_count"] == 1  # only the initial centroid seed
+
+
+def test_margin_gate_disabled_keeps_full_confidence(conn, settings):
+    settings.diarization.min_match_margin = 0.0
+    probe = [1.0, 0.0, 0.0, 0.0]
+    alice = _known_with_centroid(conn, "Alice", probe)
+    _known_with_centroid(conn, "Carol", registry.normalize([0.999, 0.04, 0.0, 0.0]))
+    conv = _seeded_conversation(conn)
+    diar = MockDiarizer(turns=[(0.0, 4.0, "S0")], embeddings={"S0": probe})
+    attribution.attribute_conversation(
+        conn, conv, diarizer=diar, settings=settings, audio_builder=_fake_builder
+    )
+    rows = conn.execute(
+        "SELECT speaker_id, speaker_confidence FROM transcript_segments"
+    ).fetchall()
+    assert all(r["speaker_id"] == alice for r in rows)
+    assert all(r["speaker_confidence"] > 0.9 for r in rows)
+
+
 # --- clustering + retroactive relabel ---------------------------------------
 
 
@@ -186,6 +312,28 @@ def test_clustering_keeps_distinct_voices_apart(conn, settings):
     registry.update_centroid(conn, s1, deterministic_embedding("alpha", 32))
     registry.update_centroid(conn, s2, deterministic_embedding("omega", 32))
     assert cluster.run_clustering(conn, settings) == 0
+
+
+def test_clustering_skips_chained_distinct_voices(conn, settings, caplog):
+    # A~B and B~C are each within the linkage threshold, but A and C are
+    # clearly different people: single-linkage would chain all three into one.
+    settings.diarization.cluster_distance_threshold = 0.30
+
+    def vec(deg):
+        r = math.radians(deg)
+        return [math.cos(r), math.sin(r), 0.0, 0.0]
+
+    for deg in (0.0, 40.0, 80.0):  # cos40°≈0.77 (dist .23), cos80°≈0.17 (dist .83)
+        registry.update_centroid(conn, registry.create_unknown_speaker(conn), vec(deg))
+
+    with caplog.at_level(logging.WARNING, logger="secondbrain.cluster"):
+        merges = cluster.run_clustering(conn, settings)
+    assert merges == 0
+    assert all(
+        r["merged_into"] is None
+        for r in conn.execute("SELECT merged_into FROM speakers").fetchall()
+    )
+    assert any("non-cohesive" in r.message for r in caplog.records)
 
 
 # --- naming, merge, opt-out --------------------------------------------------
@@ -237,6 +385,76 @@ def test_merge_relabels_and_recounts(conn, settings):
     assert n == 1
     assert registry.resolve_speaker_id(conn, src) == dst
     assert conn.execute("SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=?", (dst,)).fetchone()["n"] == 2
+
+
+def test_merge_refuses_owner_as_source(conn, settings):
+    owner = registry.get_or_create_owner(conn, "Me")
+    other = registry.create_unknown_speaker(conn)
+    with pytest.raises(ValueError, match="owner"):
+        registry.merge_speakers(conn, owner, other, settings)
+    # nothing was soft-merged
+    assert conn.execute(
+        "SELECT merged_into FROM speakers WHERE id=?", (owner,)
+    ).fetchone()["merged_into"] is None
+    # the sanctioned direction (into the owner) still works
+    registry.merge_speakers(conn, other, owner, settings)
+    assert registry.resolve_speaker_id(conn, other) == owner
+
+
+def test_match_embedding_honors_preloaded_profile_snapshot(conn, settings):
+    probe_a = [1.0, 0.0, 0.0, 0.0]
+    alice = _known_with_centroid(conn, "Alice", probe_a)
+    profiles = registry.load_profile_index(conn)
+    # same answer as a direct (per-call loading) match
+    assert registry.match_embedding(conn, probe_a, settings, profiles=profiles).speaker_id == alice
+    # a voice added AFTER the snapshot is invisible through it — proof the
+    # batch path really reuses the preloaded map instead of reloading per call
+    probe_b = [0.0, 1.0, 0.0, 0.0]
+    bob = _known_with_centroid(conn, "Bob", probe_b)
+    assert registry.match_embedding(conn, probe_b, settings).speaker_id == bob
+    assert registry.match_embedding(conn, probe_b, settings, profiles=profiles).speaker_id is None
+
+
+def test_enroll_rejects_insufficient_speech(conn, settings):
+    # 2s of speech is nowhere near the 10s enrollment gate — and the failure
+    # must land BEFORE any DB write (no owner row, no observations).
+    diar = MockDiarizer(dim=settings.diarization.embedding_dim, duration_s=2.0)
+    with pytest.raises(ValueError, match="at least 10s"):
+        enroll.enroll_owner_from_files(
+            conn, [Path("/tmp/a.flac")], diarizer=diar, settings=settings
+        )
+    assert conn.execute("SELECT COUNT(*) AS n FROM speakers").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM speaker_observations").fetchone()["n"] == 0
+
+
+def test_reenroll_replace_resets_owner_profile(conn, settings):
+    dim = settings.diarization.embedding_dim
+    diar = MockDiarizer(dim=dim, duration_s=12.0)
+    owner = enroll.enroll_owner_from_files(
+        conn, [Path("/tmp/old.flac")], diarizer=diar, settings=settings
+    )
+    old_emb = registry.serialize_embedding(deterministic_embedding("old.flac:SPEAKER_00", dim))
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM speaker_observations WHERE speaker_id=? AND embedding=?",
+        (owner, old_emb),
+    ).fetchone()["n"] == 1
+
+    # redo: replace drops the prior enrollment exemplars instead of piling on
+    assert enroll.enroll_owner_from_files(
+        conn, [Path("/tmp/new.flac")], diarizer=diar, settings=settings, replace=True
+    ) == owner
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM speaker_observations WHERE speaker_id=?", (owner,)
+    ).fetchone()["n"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM speaker_observations WHERE speaker_id=? AND embedding=?",
+        (owner, old_emb),
+    ).fetchone()["n"] == 0
+    # centroid now reflects ONLY the new enrollment
+    row = conn.execute("SELECT centroid FROM speakers WHERE id=?", (owner,)).fetchone()
+    new_emb = deterministic_embedding("new.flac:SPEAKER_00", dim)
+    got = registry.deserialize_embedding(row["centroid"])
+    assert registry.cosine(got, new_emb) > 0.999
 
 
 def test_set_owner_from_history(conn):

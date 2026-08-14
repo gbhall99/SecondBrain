@@ -13,6 +13,7 @@ from secondbrain.storage.models import utcnow_iso
 
 FEEDBACK_WEIGHTS_KEY = "proactive_feedback_weights"
 SNOOZE_PREFIX = "proactive_snooze:"
+SNOOZE_HASH_PREFIX = "proactive_snooze_hash:"
 GENERATING_PREFIX = "proactive_generating:"
 GENERATING_STALE_S = 15 * 60  # markers older than this are crash leftovers
 
@@ -53,20 +54,52 @@ def unbump_feedback_weight(conn: sqlite3.Connection, kind: str, vote: str) -> No
 
 # --- snooze ------------------------------------------------------------------
 
+# Timestamps have been written with a couple of formats over time (the SQLite
+# '%f' idiom vs. Python's); comparisons parse instead of comparing strings so
+# a formatting difference can never silently extend or cut a snooze short.
+_TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%fZ")
+
+
+def _parse_ts(raw: str | None) -> datetime | None:
+    for fmt in _TS_FORMATS:
+        try:
+            return datetime.strptime(raw or "", fmt)
+        except ValueError:
+            continue
+    return None
+
 
 def snooze_kind(conn: sqlite3.Connection, kind: str, days: int = 7) -> None:
-    until = (datetime.now(UTC) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%fZ")
+    until = (datetime.now(UTC) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     state.set_state(conn, SNOOZE_PREFIX + kind, until)
 
 
-def snoozed_kinds(conn: sqlite3.Connection, now_iso: str) -> set[str]:
+def snooze_hash(conn: sqlite3.Connection, dedupe_hash: str, days: int = 7) -> None:
+    """Per-item snooze: hide just this suggestion (by dedupe hash) for a while."""
+    if not dedupe_hash:
+        return
+    until = (datetime.now(UTC) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    state.set_state(conn, SNOOZE_HASH_PREFIX + dedupe_hash, until)
+
+
+def _snoozed_keys(conn: sqlite3.Connection, prefix: str, now_iso: str) -> set[str]:
+    now = _parse_ts(now_iso) or datetime.now(UTC).replace(tzinfo=None)
     out = set()
     for r in conn.execute(
-        "SELECT key, value FROM app_state WHERE key LIKE ?", (SNOOZE_PREFIX + "%",)
+        "SELECT key, value FROM app_state WHERE key LIKE ?", (prefix + "%",)
     ).fetchall():
-        if (r["value"] or "") > now_iso:
-            out.add(r["key"][len(SNOOZE_PREFIX):])
+        until = _parse_ts(r["value"])
+        if until is not None and until > now:
+            out.add(r["key"][len(prefix):])
     return out
+
+
+def snoozed_kinds(conn: sqlite3.Connection, now_iso: str) -> set[str]:
+    return _snoozed_keys(conn, SNOOZE_PREFIX, now_iso)
+
+
+def snoozed_hashes(conn: sqlite3.Connection, now_iso: str) -> set[str]:
+    return _snoozed_keys(conn, SNOOZE_HASH_PREFIX, now_iso)
 
 
 # --- cross-day suppression ---------------------------------------------------
@@ -140,10 +173,16 @@ def list_suggestions(
     return [dict(r) for r in rows]
 
 
-def suggestion_action(conn: sqlite3.Connection, suggestion_id: int, action: str) -> bool:
-    """Apply ``action`` to a suggestion. Returns False when the id doesn't exist."""
+def suggestion_action(
+    conn: sqlite3.Connection, suggestion_id: int, action: str, *, days: int | None = None
+) -> bool:
+    """Apply ``action`` to a suggestion. Returns False when the id doesn't exist.
+
+    ``snooze`` hides just this item (by dedupe hash) for ``days`` (default 7);
+    ``snooze_kind`` keeps the old kind-wide behaviour as a secondary action.
+    """
     row = conn.execute(
-        "SELECT kind, dedupe_hash, digest_date, status FROM suggestions WHERE id=?",
+        "SELECT kind, dedupe_hash, digest_date, status, goal_id FROM suggestions WHERE id=?",
         (suggestion_id,),
     ).fetchone()
     if row is None:
@@ -152,10 +191,20 @@ def suggestion_action(conn: sqlite3.Connection, suggestion_id: int, action: str)
         new = "dismissed" if action == "dismiss" else "done"
         conn.execute("UPDATE suggestions SET status=? WHERE id=?", (new, suggestion_id))
     elif action == "snooze":
-        # Snooze promises to hide ALL items of this kind: suppress future
-        # detections for 7 days AND park today's open same-kind siblings, not
-        # just the acted row.
-        snooze_kind(conn, row["kind"])
+        # Per-item snooze: park just this row and suppress re-detections of the
+        # same item (same dedupe hash) until the chosen day.
+        snooze_hash(conn, row["dedupe_hash"] or "", days or 7)
+        conn.execute("UPDATE suggestions SET status='snoozed' WHERE id=?", (suggestion_id,))
+        if row["kind"] == "stale_goal" and row["goal_id"]:
+            # "Review later" on a stale goal counts as looking at it — stop
+            # the detector nagging until it actually goes stale again.
+            from secondbrain.goals import store as goal_store
+
+            goal_store.mark_progress(conn, row["goal_id"])
+    elif action == "snooze_kind":
+        # Kind-wide snooze: suppress future detections for 7 days AND park
+        # today's open same-kind siblings, not just the acted row.
+        snooze_kind(conn, row["kind"], days or 7)
         conn.execute(
             "UPDATE suggestions SET status='snoozed' "
             "WHERE digest_date=? AND kind=? AND status='open'",
@@ -163,12 +212,17 @@ def suggestion_action(conn: sqlite3.Connection, suggestion_id: int, action: str)
         )
         conn.execute("UPDATE suggestions SET status='snoozed' WHERE id=?", (suggestion_id,))
     elif action == "reopen":
-        # Undo for done/dismiss/snooze. Reopening a snoozed item lifts the
-        # kind-wide snooze — you asked to see this kind again — and restores
-        # the same-day siblings that snoozing hid (symmetric with snooze).
+        # Undo for done/dismiss/snooze. Reopening lifts this item's own snooze;
+        # when a kind-wide snooze is active it lifts that too — you asked to
+        # see this kind again — and restores the same-day siblings that the
+        # kind snooze hid (symmetric with snooze_kind). A per-item snooze
+        # never cascades onto siblings.
         was_snoozed = row["status"] == "snoozed"
         conn.execute("UPDATE suggestions SET status='open' WHERE id=?", (suggestion_id,))
-        if was_snoozed:
+        if row["dedupe_hash"]:
+            state.set_state(conn, SNOOZE_HASH_PREFIX + row["dedupe_hash"], "")
+        kind_active = bool(state.get_state(conn, SNOOZE_PREFIX + row["kind"]))
+        if was_snoozed and kind_active:
             conn.execute(
                 "UPDATE suggestions SET status='open' "
                 "WHERE digest_date=? AND kind=? AND status='snoozed'",
@@ -207,20 +261,23 @@ def suggestion_action(conn: sqlite3.Connection, suggestion_id: int, action: str)
 def save_digest(
     conn: sqlite3.Connection, digest_date: str, kind: str, summary_md: str,
     suggestion_ids: list[int], model: str | None, backend: str | None,
+    payload: dict | None = None,
 ) -> None:
     # Regenerating refreshes created_at: on quiet days the summary text can be
     # identical, so the "Generated <when>" stamp is the only visible proof that
     # a 1–2 minute regenerate actually did anything.
     conn.execute(
         """
-        INSERT INTO digests (digest_date, kind, summary_md, suggestion_ids, model, backend)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO digests (digest_date, kind, summary_md, suggestion_ids, model, backend,
+                             payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(digest_date, kind) DO UPDATE SET
             summary_md=excluded.summary_md, suggestion_ids=excluded.suggestion_ids,
-            model=excluded.model, backend=excluded.backend,
+            model=excluded.model, backend=excluded.backend, payload=excluded.payload,
             created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
         """,
-        (digest_date, kind, summary_md, json.dumps(suggestion_ids), model, backend),
+        (digest_date, kind, summary_md, json.dumps(suggestion_ids), model, backend,
+         json.dumps(payload or {})),
     )
 
 
@@ -228,7 +285,14 @@ def get_digest(conn: sqlite3.Connection, digest_date: str, kind: str = "daily") 
     row = conn.execute(
         "SELECT * FROM digests WHERE digest_date=? AND kind=?", (digest_date, kind)
     ).fetchone()
-    return dict(row) if row else None
+    if row is None:
+        return None
+    d = dict(row)
+    try:  # deterministic extras (weekly stats); {} for older/daily rows
+        d["payload"] = json.loads(d.get("payload") or "{}")
+    except (TypeError, ValueError):
+        d["payload"] = {}
+    return d
 
 
 def list_digest_dates(conn: sqlite3.Connection) -> dict[str, list[str]]:

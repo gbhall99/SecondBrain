@@ -138,21 +138,42 @@ def _speaker_score(emb: list[float], centroid: list[float], exemplars: list[list
     return best
 
 
+@dataclass
+class ProfileIndex:
+    """Preloaded candidate profiles + exemplar map for batch matching.
+
+    Loading every exemplar is the expensive part of :func:`match_embedding`;
+    batch flows (nightly re-attribution) load once via :func:`load_profile_index`
+    and pass it to every call, making the job O(observations) instead of
+    O(observations²). Single calls without it behave exactly as before.
+    """
+
+    candidates: list[tuple[int, str, list[float]]]
+    exemplars: dict[int, list[list[float]]]
+
+
+def load_profile_index(conn: sqlite3.Connection) -> ProfileIndex:
+    return ProfileIndex(_candidate_profiles(conn), _exemplars_by_speaker(conn))
+
+
 def match_embedding(
-    conn: sqlite3.Connection, emb: list[float], settings: Settings | None = None
+    conn: sqlite3.Connection, emb: list[float], settings: Settings | None = None,
+    *, profiles: ProfileIndex | None = None,
 ) -> MatchResult:
     """Resolve a cluster embedding to a known speaker, or no match.
 
     Exemplar-aware: each candidate is scored by the best of its centroid and its
     k-nearest stored exemplars (falls back to centroid-only when a speaker has no
-    exemplars, preserving prior behaviour). Owner is checked first.
+    exemplars, preserving prior behaviour). Owner is checked first. Pass a
+    preloaded ``profiles`` snapshot to skip the per-call exemplar load in batch
+    flows.
     """
     settings = settings or get_settings()
     d = settings.diarization
-    candidates = _candidate_profiles(conn)
+    candidates = profiles.candidates if profiles is not None else _candidate_profiles(conn)
     if not candidates:
         return MatchResult(None, 0.0)
-    exemplars = _exemplars_by_speaker(conn)
+    exemplars = profiles.exemplars if profiles is not None else _exemplars_by_speaker(conn)
 
     scored: list[tuple[float, int, str]] = []
     for sid, kind, vec in candidates:
@@ -350,6 +371,26 @@ def recompute_centroid(conn: sqlite3.Connection, speaker_id: int) -> None:
     )
 
 
+def refresh_profile(conn: sqlite3.Connection, speaker_id: int) -> None:
+    """Recompute a speaker's centroid, clearing it when no observations remain.
+
+    Unlike :func:`recompute_centroid` (which leaves the old centroid in place
+    when there is nothing to average), this never keeps a voiceprint built from
+    observations that have since moved away or been deleted.
+    """
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS n FROM speaker_observations "
+        "WHERE speaker_id=? AND pruned=0 AND embedding IS NOT NULL",
+        (speaker_id,),
+    ).fetchone()["n"]
+    if remaining:
+        recompute_centroid(conn, speaker_id)
+    else:
+        conn.execute(
+            "UPDATE speakers SET centroid=NULL, exemplar_count=0 WHERE id=?", (speaker_id,)
+        )
+
+
 def add_confirmed_exemplar(
     conn: sqlite3.Connection, speaker_id: int, embedding: list[float],
     *, start_at: str | None = None,
@@ -486,6 +527,14 @@ def merge_speakers(
     # Guard against creating a merge cycle (dst already resolves through src).
     if resolve_speaker_id(conn, dst) == src:
         raise ValueError(f"merge {src}->{dst} would create a cycle")
+    # Never merge the owner profile AWAY — that would silently retire the
+    # self-voiceprint everything else (owner matching, opt-out rules) hangs off.
+    src_owner = conn.execute("SELECT is_owner FROM speakers WHERE id=?", (src,)).fetchone()
+    if src_owner is not None and src_owner["is_owner"]:
+        raise ValueError(
+            "refusing to merge the owner profile away; "
+            "merge the other voice into the owner instead"
+        )
     with transaction(conn):
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM transcript_segments WHERE speaker_id=?", (src,)

@@ -16,24 +16,75 @@ def test_confidence_floor_drops_weak(conn, settings):
     assert out == []
 
 
-def test_top_n_and_per_kind_cap(conn, settings):
+def test_rank_returns_all_scored_and_caps_apply_at_render(conn, settings):
     settings.proactive.top_n = 2
     settings.proactive.per_kind_cap = 1
     sugs = [
-        _sug("commitment_overdue", 0.9, {"e": 1}),
-        _sug("commitment_overdue", 0.9, {"e": 2}),  # capped (per_kind=1)
         _sug("goal_alignment", 0.9, {"g": 1}),
-        _sug("connection", 0.9, {"c": 1}),          # cut by top_n=2
+        _sug("goal_alignment", 0.9, {"g": 2}),  # over per_kind cap → overflow
+        _sug("connection", 0.9, {"c": 1}),
+        _sug("stale_goal", 0.9, {"s": 1}),      # over top_n → overflow
     ]
     out = ranking.rank(conn, sugs, settings, now=NOW)
-    assert len(out) == 2
-    assert [s.kind for s in out] == ["commitment_overdue", "goal_alignment"]
+    assert len(out) == 4  # nothing is silently dropped any more
+    visible, overflow = ranking.apply_caps(out, settings)
+    assert [s.kind for s in visible] == ["goal_alignment", "connection"]
+    assert len(overflow) == 2
+
+
+def test_commitment_kinds_get_loose_per_kind_cap(conn, settings):
+    settings.proactive.top_n = 10
+    settings.proactive.per_kind_cap = 2
+    sugs = [_sug("commitment_overdue", 0.9, {"e": i}) for i in range(6)]
+    sugs += [_sug("connection", 0.9, {"c": i}) for i in range(4)]
+    out = ranking.rank(conn, sugs, settings, now=NOW)
+    visible, overflow = ranking.apply_caps(out, settings)
+    # all 6 commitments are visible (cap 10); connections stop at per_kind_cap=2
+    assert sum(1 for s in visible if s.kind == "commitment_overdue") == 6
+    assert sum(1 for s in visible if s.kind == "connection") == 2
+    assert len(overflow) == 2
+
+
+def test_apply_caps_works_on_dict_rows(conn, settings):
+    settings.proactive.top_n = 1
+    rows = [{"kind": "connection", "id": 1}, {"kind": "connection", "id": 2}]
+    visible, overflow = ranking.apply_caps(rows, settings)
+    assert visible == [rows[0]] and overflow == [rows[1]]
+
+
+def test_base_weights_cover_new_kinds_and_drop_dead_key():
+    assert "stale_commitment" not in ranking.BASE_WEIGHT
+    for kind in ("tasks_due", "plan_carryover", "goal_at_risk", "commitment_undated"):
+        assert kind in ranking.BASE_WEIGHT
 
 
 def test_snooze_kind_excludes(conn, settings):
     store.snooze_kind(conn, "connection", days=7)
     out = ranking.rank(conn, [_sug("connection", 0.9, {"a": 1})], settings, now=NOW)
     assert out == []
+
+
+def test_snooze_hash_excludes_single_item(conn, settings):
+    a = _sug("connection", 0.9, {"a": 1})
+    b = _sug("connection", 0.9, {"a": 2})
+    store.snooze_hash(conn, a.dedupe_hash, days=3)
+    out = ranking.rank(conn, [a, b], settings, now=NOW)
+    # only the snoozed item is hidden; its sibling survives
+    assert [s.dedupe_hash for s in out] == [b.dedupe_hash]
+
+
+def test_snoozed_kinds_parses_timestamps_not_lexical(conn):
+    from secondbrain.storage import state
+
+    # A stored no-milliseconds value sorts lexically AFTER a %f-style now
+    # ("...00Z" > "...00.000Z"), which the old string compare read as "still
+    # snoozed". Parsed properly, a past expiry is not snoozed.
+    state.set_state(conn, store.SNOOZE_PREFIX + "connection", "2020-01-01T00:00:00Z")
+    now_iso = NOW.strftime("%Y-%m-%dT%H:%M:%fZ")
+    assert store.snoozed_kinds(conn, now_iso) == set()
+    # and a genuinely-future expiry (any format) still snoozes
+    state.set_state(conn, store.SNOOZE_PREFIX + "connection", "2999-01-01T00:00:00Z")
+    assert store.snoozed_kinds(conn, now_iso) == {"connection"}
 
 
 def test_cross_day_suppression(conn, settings):

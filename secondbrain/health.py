@@ -42,23 +42,28 @@ class Check:
     ok: bool
     detail: str = ""
     severity: str = "error"  # 'error' | 'warn'
+    # Actionable next step, rendered by `sb doctor` as "→ fix: …" (empty = none).
+    hint: str = ""
 
 
 def _migration(conn: sqlite3.Connection) -> Check:
+    hint = "run `sb repair` (or `alembic upgrade head`) to bring the schema up to date"
     try:
         row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
         ver = row["version_num"] if row else None
-        return Check("migrations", ver == SCHEMA_VERSION, f"{ver} (head {SCHEMA_VERSION})")
+        return Check("migrations", ver == SCHEMA_VERSION, f"{ver} (head {SCHEMA_VERSION})",
+                     hint=hint)
     except sqlite3.Error as exc:
-        return Check("migrations", False, str(exc))
+        return Check("migrations", False, str(exc), hint=hint)
 
 
 def _disk(settings: Settings) -> Check:
+    hint = "free disk space, or run `sb sweep` to delete expired raw audio"
     try:
         free = round(retention.free_disk_gb(settings.data_path), 2)
-        return Check("disk", retention.disk_ok(settings), f"{free} GB free")
+        return Check("disk", retention.disk_ok(settings), f"{free} GB free", hint=hint)
     except OSError as exc:
-        return Check("disk", False, str(exc))
+        return Check("disk", False, str(exc), hint=hint)
 
 
 def _counts(conn: sqlite3.Connection) -> Check:
@@ -73,13 +78,27 @@ def _counts(conn: sqlite3.Connection) -> Check:
 def _llm(settings: Settings) -> Check:
     if settings.llm.backend != "ollama":
         return Check("llm", True, f"backend={settings.llm.backend}")
+    model = settings.llm.model
     try:
         import httpx
 
-        r = httpx.get(f"{settings.llm.host}/api/tags", timeout=2.0)
-        return Check("llm", r.status_code == 200, f"ollama {r.status_code}", severity="warn")
+        r = httpx.get(f"{settings.llm.host}/api/tags", timeout=5.0)
+        if r.status_code != 200:
+            return Check("llm", False, f"ollama {r.status_code}", severity="warn",
+                         hint="is Ollama healthy? try `ollama serve` / check its logs")
+        # Verify the configured model is actually pulled, not just that the
+        # server answers — a missing model fails only at first real use.
+        try:
+            names = {m.get("name", "") for m in (r.json().get("models") or [])}
+        except ValueError:
+            names = None  # unparsable body: don't guess about pulled models
+        if names is not None and model not in names and f"{model}:latest" not in names:
+            return Check("llm", False, f"model {model} not pulled", severity="warn",
+                         hint=f"run `ollama pull {model}`")
+        return Check("llm", True, f"ollama 200, model {model} available", severity="warn")
     except Exception as exc:  # noqa: BLE001 - reachability is best-effort
-        return Check("llm", False, f"ollama unreachable: {exc}", severity="warn")
+        return Check("llm", False, f"ollama unreachable: {exc}", severity="warn",
+                     hint=f"start it with `ollama serve` (expected at {settings.llm.host})")
 
 
 def _encryption(settings: Settings) -> Check:
@@ -89,9 +108,24 @@ def _encryption(settings: Settings) -> Check:
 
     has_driver = db.sqlcipher_available()
     has_pass = bool(settings.security.db_passphrase)
-    return Check("encryption", has_driver and has_pass,
-                 f"sqlcipher={'ok' if has_driver else 'missing'}, "
-                 f"passphrase={'set' if has_pass else 'missing'}")
+    if not (has_driver and has_pass):
+        return Check("encryption", False,
+                     f"sqlcipher={'ok' if has_driver else 'missing'}, "
+                     f"passphrase={'set' if has_pass else 'missing'}",
+                     hint="install with `pip install -e '.[secure]'` and set "
+                          "[security].db_passphrase in config.local.toml")
+    # A real keyed open: a wrong passphrase must fail doctor, not the daemon's
+    # next runtime connection.
+    try:
+        c = db.connect(settings=settings)
+        try:
+            c.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            c.close()
+    except Exception as exc:  # noqa: BLE001 - driver-specific DatabaseError types
+        return Check("encryption", False, f"encrypted DB failed to open: {exc}",
+                     hint="check [security].db_passphrase — it doesn't unlock this database")
+    return Check("encryption", True, "sqlcipher ok, passphrase unlocks the database")
 
 
 def _backups(conn: sqlite3.Connection, settings: Settings) -> Check:
@@ -113,7 +147,7 @@ def _backups(conn: sqlite3.Connection, settings: Settings) -> Check:
             return Check(
                 "backups", False,
                 f"none yet, but transcripts are >{BACKUP_NAG_DAYS}d old — run `sb backup`",
-                severity="warn",
+                severity="warn", hint="run `sb backup` (the daemon also snapshots daily)",
             )
         return Check("backups", True, "none yet — run `sb backup`", severity="warn")
     newest = snaps[0]
@@ -123,7 +157,7 @@ def _backups(conn: sqlite3.Connection, settings: Settings) -> Check:
         return Check("backups", True, f"{len(snaps)} snapshot(s)", severity="warn")
     ok = age_days <= 30
     return Check("backups", ok, f"{len(snaps)} snapshot(s), newest {age_days}d ago",
-                 severity="warn")
+                 severity="warn", hint="" if ok else "run `sb backup` to take a fresh snapshot")
 
 
 def _secrets() -> Check:
@@ -169,13 +203,15 @@ def _microphone(settings: Settings) -> Check:
         return Check(
             "microphone", False,
             "no input devices — check System Settings → Privacy & Security → Microphone",
+            hint="grant Microphone permission (or plug in a mic), then restart the daemon",
         )
     name = settings.capture.input_device
     if name:
         try:
             resolve_device(name)
         except DeviceNotFoundError:
-            return Check("microphone", False, f"device {name!r} not found (run `sb devices`)")
+            return Check("microphone", False, f"device {name!r} not found (run `sb devices`)",
+                         hint="run `sb devices` and set [capture].input_device to a listed name")
     detail = f"{len(devices)} input device(s)" + (f", using {name!r}" if name else ", default")
     return Check("microphone", True, detail)
 
@@ -187,7 +223,8 @@ def _input_device_alarm(conn: sqlite3.Connection) -> Check:
     except sqlite3.Error as exc:
         return Check("input_device", False, str(exc))
     if alarm:
-        return Check("input_device", False, alarm)
+        return Check("input_device", False, alarm,
+                     hint="run `sb devices` and fix [capture].input_device, or plug the mic in")
     return Check("input_device", True, "no alarm")
 
 
@@ -280,6 +317,7 @@ def _mic_signal(conn: sqlite3.Connection) -> Check:
             f"last {DEAD_MIC_CHUNKS} chunks near-silent (rms < {DEAD_MIC_RMS}) — "
             "mic may be dead or muted",
             severity="warn",
+            hint="check the mic's mute switch/input level, or pick another with `sb devices`",
         )
     return Check("mic_signal", True, "signal present")
 
@@ -294,7 +332,7 @@ def _failed_jobs(conn: sqlite3.Connection) -> Check:
     if n:
         return Check("failed_jobs", False,
                      f"{n} dead-lettered job(s) — run `sb queue --retry-failed`",
-                     severity="warn")
+                     severity="warn", hint="run `sb queue --retry-failed`")
     return Check("failed_jobs", True, "none")
 
 
@@ -321,6 +359,46 @@ def _queue_backlog(conn: sqlite3.Connection) -> Check:
     return Check("queue", ok, detail, severity="warn")
 
 
+def _local_config_perms() -> Check:
+    """config.local.toml holds secrets (hf_token, db_passphrase): warn when it's
+    readable by group/others."""
+    from secondbrain.config import REPO_ROOT
+
+    path = REPO_ROOT / "config.local.toml"
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return Check("config_perms", True, "no config.local.toml", severity="warn")
+    except OSError as exc:
+        return Check("config_perms", True, str(exc), severity="warn")
+    if mode & 0o077:
+        return Check(
+            "config_perms", False,
+            f"config.local.toml is group/world-readable (mode {oct(mode)})",
+            severity="warn",
+            hint=f"run `chmod 600 {path}` — it can hold secrets",
+        )
+    return Check("config_perms", True, f"config.local.toml mode {oct(mode)}", severity="warn")
+
+
+def _launchd_plists() -> Check:
+    """Warn when installed launchd plists point at a different interpreter or
+    repo than the one running now (venv moved / repo relocated → agents run old
+    code). Off-macOS or with nothing installed the check passes."""
+    try:
+        from secondbrain import deploy
+
+        problems = deploy.stale_plists()
+    except Exception as exc:  # noqa: BLE001 - best-effort inspection
+        return Check("launchd_plists", True, f"could not inspect plists: {exc}",
+                     severity="warn")
+    if problems:
+        return Check("launchd_plists", False, "; ".join(problems), severity="warn",
+                     hint="re-run `sb deploy launchd --load` to point the agents here")
+    return Check("launchd_plists", True, "installed plists match this environment",
+                 severity="warn")
+
+
 def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> list[Check]:
     settings = settings or get_settings()
     return [
@@ -330,6 +408,8 @@ def run_checks(conn: sqlite3.Connection, settings: Settings | None = None) -> li
         _llm(settings),
         _encryption(settings),
         _secrets(),
+        _local_config_perms(),
+        _launchd_plists(),
         _backups(conn, settings),
         _microphone(settings),
         _input_device_alarm(conn),
@@ -348,7 +428,8 @@ def summary(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
         "status": "ok" if all(c.ok for c in checks) else "degraded",
         "version": SCHEMA_VERSION,
         "checks": [
-            {"name": c.name, "ok": c.ok, "detail": c.detail, "severity": c.severity}
+            {"name": c.name, "ok": c.ok, "detail": c.detail, "severity": c.severity,
+             "hint": c.hint}
             for c in checks
         ],
     }

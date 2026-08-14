@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -31,6 +31,20 @@ class CaptureConfig(BaseModel):
     channels: int = 1
     chunk_seconds: int = 60
     min_free_disk_gb: float = 5.0
+
+    @field_validator("sample_rate")
+    @classmethod
+    def _check_sample_rate(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"capture.sample_rate must be > 0, got {v}")
+        return v
+
+    @field_validator("chunk_seconds")
+    @classmethod
+    def _check_chunk_seconds(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"capture.chunk_seconds must be > 0, got {v}")
+        return v
 
 
 class ConsentConfig(BaseModel):
@@ -84,6 +98,9 @@ class ConversationConfig(BaseModel):
     # larger idle gap closes the open conversation (→ enqueue diarization).
     max_gap_minutes: float = 5.0
     min_conversation_seconds: float = 5.0
+    # A chunk that would stretch a conversation past this closes it and starts a
+    # new one, so an all-day open mic can't accrete one giant "meeting".
+    max_conversation_minutes: float = 120.0
 
 
 class DiarizationConfig(BaseModel):
@@ -102,6 +119,12 @@ class DiarizationConfig(BaseModel):
     cluster_distance_threshold: float = 0.30  # nightly agglomerative (cosine dist)
     low_confidence_threshold: float = 0.5  # below this a label is flagged
     min_cluster_speech_s: float = 1.0      # ignore clusters too short to embed
+    # An exemplar match whose top1−top2 similarity margin is below this is
+    # labeled but flagged low-confidence instead of confidently auto-labeled
+    # (two candidate voices were nearly tied). 0.0 disables the gate.
+    min_match_margin: float = 0.05
+    # Owner enrollment needs at least this much total speech across the clips.
+    min_enroll_speech_s: float = 10.0
     # Phase 7 — quality/self-correction
     exemplar_k: int = 3                    # match vs k nearest stored exemplars
     max_exemplars_per_speaker: int = 50    # cap kept exemplars (prune beyond)
@@ -121,13 +144,34 @@ class DiarizationConfig(BaseModel):
     @field_validator(
         "match_threshold", "owner_match_threshold", "centroid_update_threshold",
         "cluster_distance_threshold", "low_confidence_threshold", "reattribute_threshold",
-        "prune_min_confidence", "segmentation_threshold",
+        "prune_min_confidence", "segmentation_threshold", "min_match_margin",
     )
     @classmethod
     def _check_unit_interval(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"threshold must be in [0.0, 1.0], got {v}")
         return v
+
+    @model_validator(mode="after")
+    def _check_threshold_ordering(self) -> DiarizationConfig:
+        # Documented in docs/OPERATIONS.md: relabeling past lines needs a HIGHER
+        # bar than live matching, the owner is checked slightly looser, and the
+        # low-confidence flag sits below all of them. A violation silently
+        # breaks attribution quality, so fail fast with the expected ordering.
+        ordered = (
+            ("reattribute_threshold", self.reattribute_threshold),
+            ("match_threshold", self.match_threshold),
+            ("owner_match_threshold", self.owner_match_threshold),
+            ("low_confidence_threshold", self.low_confidence_threshold),
+        )
+        for (hi_name, hi), (lo_name, lo) in zip(ordered, ordered[1:], strict=False):
+            if hi <= lo:
+                raise ValueError(
+                    "diarization thresholds must satisfy reattribute_threshold > "
+                    "match_threshold > owner_match_threshold > low_confidence_threshold; "
+                    f"got {hi_name}={hi} <= {lo_name}={lo}"
+                )
+        return self
 
 
 class ApiConfig(BaseModel):
@@ -153,6 +197,23 @@ class SecurityConfig(BaseModel):
     encrypt_db: bool = False
     db_passphrase: str = ""
 
+    @field_validator("session_max_age_days")
+    @classmethod
+    def _check_session_age(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"security.session_max_age_days must be >= 1, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_encrypt_db_has_passphrase(self) -> SecurityConfig:
+        # Fail at load time, not on the first DB open deep inside the daemon.
+        if self.encrypt_db and not self.db_passphrase:
+            raise ValueError(
+                "security.encrypt_db is true but security.db_passphrase is empty — "
+                "set it in config.local.toml or the SB_SECURITY__DB_PASSPHRASE env var"
+            )
+        return self
+
 
 class BackupConfig(BaseModel):
     # Automatic daily DB snapshots from the daemon's maintenance loop.
@@ -162,6 +223,8 @@ class BackupConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
+    # Also write logs to <data>/logs/secondbrain.log (rotated) besides stdout.
+    file_enabled: bool = True
 
     @field_validator("level")
     @classmethod
@@ -174,6 +237,9 @@ class TasksConfig(BaseModel):
     # Goal decomposition + tasks + daily planning (Phase 6). OFF by default.
     enabled: bool = False
     daily_capacity_minutes: int = 240
+    # Length of a working day; the planner suggests capacity = workday minus
+    # today's recorded meeting minutes (floored at 30).
+    workday_minutes: int = 480
     urgent_days: int = 2               # due within N days → "urgent" quadrant
     important_value: int = 4           # value ≥ this → "important" quadrant
     # Opt-in web research per task (local graph-RAG research is always available).
@@ -201,6 +267,9 @@ class ProactiveConfig(BaseModel):
     lookback_days: int = 30
     connection_threshold: float = 0.78
     goal_link_threshold: float = 0.72
+    # Jaccard keyword overlap is a much coarser signal than embedding cosine,
+    # so the keyword fallback gets its own (lower) linking threshold.
+    goal_link_keyword_threshold: float = 0.3
     due_soon_days: int = 3
     stale_goal_days: int = 14
     stale_days: int = 21
@@ -208,6 +277,8 @@ class ProactiveConfig(BaseModel):
     suppress_days: int = 30
     urgent_due_hours: int = 24
     reconnect_days: int = 30           # flag a known person not seen in N days
+    snooze_default_days: int = 7       # per-item snooze length when none chosen
+    goal_at_risk_days: int = 14        # target date within N days + low progress → at risk
 
     @field_validator("digest_hour")
     @classmethod
@@ -223,7 +294,10 @@ class ProactiveConfig(BaseModel):
             raise ValueError(f"proactive.weekly_review_weekday must be in [0, 6], got {v}")
         return v
 
-    @field_validator("connection_threshold", "goal_link_threshold", "confidence_floor")
+    @field_validator(
+        "connection_threshold", "goal_link_threshold", "goal_link_keyword_threshold",
+        "confidence_floor",
+    )
     @classmethod
     def _check_unit_interval(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
@@ -239,11 +313,27 @@ class LLMConfig(BaseModel):
     host: str = "http://127.0.0.1:11434"
     temperature: float = 0.0
     request_timeout_s: float = 120.0
+    # How long Ollama keeps the model loaded after a request ("30m", "1h", 0=unload).
+    keep_alive: str = "30m"
 
     @field_validator("backend")
     @classmethod
     def _check_backend(cls, v: str) -> str:
         return _one_of("llm.backend", v, {"mock", "ollama"})
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError(f"llm.host must start with http:// or https://, got {v!r}")
+        return v
+
+    @field_validator("request_timeout_s")
+    @classmethod
+    def _check_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"llm.request_timeout_s must be > 0, got {v}")
+        return v
 
     @field_validator("temperature")
     @classmethod
@@ -264,6 +354,9 @@ class ExtractionConfig(BaseModel):
     chat_max_hops: int = 1
     chat_max_facts: int = 40
     chat_max_context_chars: int = 32000
+    # How many retrieval hits feed the chat context (each expanded with a few
+    # neighboring lines from the same conversation, within the char budget).
+    chat_max_excerpts: int = 24
 
 
 class Settings(BaseSettings):

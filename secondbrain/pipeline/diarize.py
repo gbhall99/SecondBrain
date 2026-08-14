@@ -41,6 +41,53 @@ def _load_pipeline(pipeline_cls, model: str, token: str | None):
         return pipeline_cls.from_pretrained(model, use_auth_token=token)
 
 
+def _speaker_count_kwargs(pipeline, d) -> dict:
+    """Speaker-count hints from config for the diarization call.
+
+    ``[diarization] min_speakers / max_speakers`` (0 = auto) are forwarded only
+    when the loaded pipeline's ``apply`` signature actually accepts them, so a
+    pyannote version mismatch degrades to auto-detection instead of crashing.
+    Equal non-zero min/max collapse to a single ``num_speakers`` hint.
+    """
+    import inspect
+
+    target = getattr(pipeline, "apply", pipeline)
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return {}
+    if d.min_speakers > 0 and d.min_speakers == d.max_speakers and "num_speakers" in params:
+        return {"num_speakers": d.min_speakers}
+    out = {}
+    if d.min_speakers > 0 and "min_speakers" in params:
+        out["min_speakers"] = d.min_speakers
+    if d.max_speakers > 0 and "max_speakers" in params:
+        out["max_speakers"] = d.max_speakers
+    return out
+
+
+def _apply_segmentation_threshold(pipeline, threshold: float) -> bool:
+    """Best-effort: tune the segmentation threshold when the pipeline has one.
+
+    Some pyannote segmentation models expose a ``segmentation.threshold``
+    hyper-parameter; 3.1's powerset segmentation does not. Applied only when
+    present so the config knob is honored where it can be. Returns True when
+    the threshold was applied.
+    """
+    try:
+        params = pipeline.parameters(instantiated=True)
+    except Exception:  # noqa: BLE001 - purely optional tuning
+        return False
+    seg = params.get("segmentation") if isinstance(params, dict) else None
+    if not isinstance(seg, dict) or "threshold" not in seg:
+        return False
+    try:
+        pipeline.instantiate({**params, "segmentation": {**seg, "threshold": threshold}})
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def _unpack_diarize(out):
     """The 3.x pipeline returns ``(diarization, embeddings)`` when called with
     ``return_embeddings=True``. pyannote.audio 4.x changed this (ignores the kwarg
@@ -276,6 +323,9 @@ class PyannoteDiarizer(Diarizer):
             # pyannote checkpoints need weights_only=False on torch>=2.6
             with _trusted_torch_load():
                 self._pipeline = _load_pipeline(Pipeline, self.model, self._token())
+            _apply_segmentation_threshold(
+                self._pipeline, self.settings.diarization.segmentation_threshold
+            )
             if torch.backends.mps.is_available():
                 self._pipeline.to(torch.device("mps"))
         return self._pipeline
@@ -289,8 +339,9 @@ class PyannoteDiarizer(Diarizer):
         # block in _ensure() is harmless.
         with _trusted_torch_load():
             pipeline = self._ensure()
+            hints = _speaker_count_kwargs(pipeline, self.settings.diarization)
             diarization, embeddings = _unpack_diarize(
-                pipeline(str(audio_path), return_embeddings=True)
+                pipeline(str(audio_path), return_embeddings=True, **hints)
             )
 
         # `embeddings` is an (n_local_speakers, dim) array aligned to the sorted

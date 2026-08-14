@@ -57,3 +57,40 @@ def test_run_research_query_appends_task_detail(conn, settings):
     research.run_research(conn, tid, settings=settings, researcher=research.MockResearcher())
     q = conn.execute("SELECT query FROM task_research WHERE task_id=?", (tid,)).fetchone()["query"]
     assert q == "Book flights — Sydney in October, aim under $900"
+
+
+def test_query_includes_goal_title_and_counterparty(conn, settings):
+    from secondbrain.knowledge import graph
+
+    gid = conn.execute(
+        "INSERT INTO goals (title, status) VALUES ('Close the Acme deal', 'active')"
+    ).lastrowid
+    me = graph.create_node(conn, type="person", name="Me", embedding=None,
+                           confidence=1.0, extraction_id=None)
+    dana = graph.create_node(conn, type="person", name="Dana", embedding=None,
+                             confidence=0.9, extraction_id=None)
+    edge = graph.upsert_edge(conn, src_node_id=me, dst_node_id=dana,
+                             predicate="action_item", kind="action_item",
+                             object_text="send the pricing sheet",
+                             source_segment_ids=[1])
+    tid = store.create_task(conn, title="send the pricing sheet", goal_id=gid,
+                            source="conversation", source_edge_id=edge)
+    research.run_research(conn, tid, settings=settings,
+                          researcher=research.MockResearcher())
+    q = conn.execute(
+        "SELECT query FROM task_research WHERE task_id=?", (tid,)
+    ).fetchone()["query"]
+    # the FULL query is stored, goal + participants included
+    assert "send the pricing sheet" in q
+    assert "goal: Close the Acme deal" in q
+    assert "Dana" in q and "Me" in q
+
+
+def test_explicit_query_is_stored_verbatim(conn, settings):
+    tid = store.create_task(conn, title="whatever")
+    research.run_research(conn, tid, "my exact question", settings=settings,
+                          researcher=research.MockResearcher())
+    q = conn.execute(
+        "SELECT query FROM task_research WHERE task_id=?", (tid,)
+    ).fetchone()["query"]
+    assert q == "my exact question"

@@ -57,13 +57,17 @@ _SYSTEM = (
 )
 
 
-def _seg_info(conn: sqlite3.Connection, seg_ids: list[int]) -> dict[int, dict]:
+def _seg_info(
+    conn: sqlite3.Connection, seg_ids: list[int], settings: Settings | None = None
+) -> dict[int, dict]:
     if not seg_ids:
         return {}
+    low = (settings or get_settings()).diarization.low_confidence_threshold
     ph = ",".join("?" * len(seg_ids))
     rows = conn.execute(
         f"""
-        SELECT ts.id, ts.text, ts.start_at, ts.speaker_id, af.conversation_id,
+        SELECT ts.id, ts.text, ts.start_at, ts.speaker_id, ts.speaker_confidence,
+               af.conversation_id,
                COALESCE(sp.name, sp.display_label) AS speaker,
                CASE WHEN sp.is_owner THEN 1 ELSE 0 END AS is_owner
         FROM transcript_segments ts
@@ -80,7 +84,64 @@ def _seg_info(conn: sqlite3.Connection, seg_ids: list[int]) -> dict[int, dict]:
             continue
         d = dict(r)
         d["speaker"] = "Me" if r["is_owner"] else (r["speaker"] or "Unknown")
+        conf = r["speaker_confidence"]
+        d["speaker_low_confidence"] = bool(
+            r["speaker_id"] is not None and conf is not None and conf < low
+        )
         out[r["id"]] = d
+    return out
+
+
+def _expand_neighbors(
+    conn: sqlite3.Connection, seg_ids: list[int], radius: int = 2
+) -> dict[int, list[int]]:
+    """±``radius`` neighboring lines from the same conversation per hit.
+
+    A single matched line is often not enough to answer from — the question
+    and its answer usually sit in adjacent turns. Returns hit id → its window
+    (including itself), chronological.
+    """
+    out: dict[int, list[int]] = {}
+    for sid in seg_ids:
+        anchor = conn.execute(
+            """
+            SELECT ts.id, ts.start_at, af.conversation_id, ts.audio_file_id
+            FROM transcript_segments ts
+            JOIN audio_files af ON af.id = ts.audio_file_id
+            WHERE ts.id = ?
+            """,
+            (sid,),
+        ).fetchone()
+        if anchor is None:
+            out[sid] = [sid]
+            continue
+        conv = anchor["conversation_id"]
+        if conv is not None:
+            scope = "af.conversation_id = ?"
+            scope_param = conv
+        else:  # no conversation yet: stay within the same audio file
+            scope = "ts.audio_file_id = ?"
+            scope_param = anchor["audio_file_id"]
+        before = conn.execute(
+            f"""
+            SELECT ts.id FROM transcript_segments ts
+            JOIN audio_files af ON af.id = ts.audio_file_id
+            WHERE {scope} AND (ts.start_at, ts.id) < (?, ?)
+            ORDER BY ts.start_at DESC, ts.id DESC LIMIT ?
+            """,
+            (scope_param, anchor["start_at"], sid, radius),
+        ).fetchall()
+        after = conn.execute(
+            f"""
+            SELECT ts.id FROM transcript_segments ts
+            JOIN audio_files af ON af.id = ts.audio_file_id
+            WHERE {scope} AND (ts.start_at, ts.id) > (?, ?)
+            ORDER BY ts.start_at ASC, ts.id ASC LIMIT ?
+            """,
+            (scope_param, anchor["start_at"], sid, radius),
+        ).fetchall()
+        window = [r["id"] for r in reversed(before)] + [sid] + [r["id"] for r in after]
+        out[sid] = window
     return out
 
 
@@ -104,16 +165,18 @@ def _seed_nodes(conn: sqlite3.Connection, seg_ids: list[int], question: str) -> 
             if r["dst_node_id"]:
                 nodes.add(graph.resolve_node_id(conn, r["dst_node_id"]))
     # Nodes whose normalized name appears in the question (matched in SQL for
-    # the same reason — no full-table scan into Python).
+    # the same reason — no full-table scan into Python). Word-boundary match on
+    # names of 3+ chars, so a stray "hr"/"it" node can't attach itself to every
+    # question that contains those letters mid-word.
     qnorm = graph.normalize_name(question)
     if qnorm:
         rows = conn.execute(
             """
             SELECT id FROM kg_nodes
-            WHERE merged_into IS NULL AND normalized_name <> ''
-              AND instr(?, normalized_name) > 0
+            WHERE merged_into IS NULL AND LENGTH(normalized_name) >= 3
+              AND instr(?, ' ' || normalized_name || ' ') > 0
             """,
-            (qnorm,),
+            (f" {qnorm} ",),
         ).fetchall()
         nodes.update(int(r["id"]) for r in rows)
     return list(nodes)
@@ -125,20 +188,33 @@ def _subgraph_facts(
     if not node_ids:
         return []
     ph = ",".join("?" * len(node_ids))
+    # Superseded decisions (superseded_by set, still valid=1 for history views)
+    # are excluded — chat should state the CURRENT decision; the "supersedes"
+    # marker lets the model note that a decision replaced an earlier one.
     rows = conn.execute(
         f"""
         SELECT e.predicate, e.kind, e.object_text, e.due_date, e.source_segment_ids,
-               s.name AS src_name, d.name AS dst_name
+               e.first_seen, e.last_seen,
+               s.name AS src_name, d.name AS dst_name,
+               EXISTS(SELECT 1 FROM kg_edges o WHERE o.superseded_by = e.id)
+                   AS supersedes_earlier
         FROM kg_edges e
         JOIN kg_nodes s ON s.id = e.src_node_id
         LEFT JOIN kg_nodes d ON d.id = e.dst_node_id
-        WHERE e.valid=1 AND (e.src_node_id IN ({ph}) OR e.dst_node_id IN ({ph}))
+        WHERE e.valid=1 AND e.superseded_by IS NULL
+          AND (e.src_node_id IN ({ph}) OR e.dst_node_id IN ({ph}))
         ORDER BY e.confidence DESC
         LIMIT ?
         """,
         [*node_ids, *node_ids, settings.extraction.chat_max_facts],
     ).fetchall()
-    return [dict(r) for r in rows]
+    facts = [dict(r) for r in rows]
+    # Decisions first, newest first (decision recall is date-sensitive: "what
+    # did we decide LAST?"); everything else keeps its confidence order.
+    decisions = [f for f in facts if f["kind"] == "decision"]
+    decisions.sort(key=lambda f: f.get("first_seen") or "", reverse=True)
+    others = [f for f in facts if f["kind"] != "decision"]
+    return decisions + others
 
 
 def _fact_line(f: dict) -> str:
@@ -146,7 +222,14 @@ def _fact_line(f: dict) -> str:
     due = f" (due {f['due_date']})" if f.get("due_date") else ""
     cites = json.loads(f["source_segment_ids"] or "[]")
     cite = " " + " ".join(f"[{c}]" for c in cites) if cites else ""
-    return f"- {f['src_name']} {f['predicate'] or f['kind']} {obj}{due}{cite}"
+    day = (f.get("first_seen") or "")[:10]
+    date = f"[{day}] " if day else ""
+    note = (
+        " (supersedes an earlier decision)"
+        if f.get("kind") == "decision" and f.get("supersedes_earlier")
+        else ""
+    )
+    return f"- {date}{f['src_name']} {f['predicate'] or f['kind']} {obj}{due}{note}{cite}"
 
 
 def _history_block(history: list[dict] | None) -> tuple[str, list[int]]:
@@ -407,6 +490,9 @@ class PreparedAsk:
     prompt: str
     info: dict[int, dict] = field(default_factory=dict)
     time_window: dict | None = None
+    # Whether retrieval found ANY context (excerpts or known facts). Lets the
+    # UI distinguish "nothing matched" from "the model just didn't cite".
+    has_context: bool = False
 
 
 def prepare(
@@ -415,14 +501,52 @@ def prepare(
     *,
     settings: Settings | None = None,
     history: list[dict] | None = None,
+    speaker_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> PreparedAsk:
-    """Retrieve context and build the prompt (everything except the LLM call)."""
+    """Retrieve context and build the prompt (everything except the LLM call).
+
+    ``speaker_id``/``since``/``until`` optionally scope retrieval (a voice and
+    local calendar days, same contract as /api/search); they narrow the
+    retrieved excerpts, not the knowledge-graph facts.
+    """
     settings = settings or get_settings()
 
     convo, history_cited = _history_block(history)
 
-    hits = combined.search(conn, question, limit=8, settings=settings)
-    seg_ids = [h.segment_id for h in hits]
+    # Follow-ups ("and when?") carry almost no retrievable words of their own —
+    # fold the previous user question into the retrieval query so the search
+    # still lands on the right conversation.
+    retrieval_query = question
+    if history:
+        prev = next(
+            (
+                str(t.get("question") or "").strip()
+                for t in reversed(history)
+                if isinstance(t, dict) and str(t.get("question") or "").strip()
+            ),
+            "",
+        )
+        if prev and prev != question:
+            retrieval_query = f"{question} {prev}"
+
+    from secondbrain.query import service  # lazy: service imports search modules
+
+    since_utc = service._local_day_utc_bounds(since)[0] if since else None
+    until_utc = service._local_day_utc_bounds(until)[1] if until else None
+    hits = combined.search(
+        conn, retrieval_query, limit=max(1, settings.extraction.chat_max_excerpts),
+        settings=settings, since_utc=since_utc, until_utc=until_utc,
+        speaker_id=speaker_id,
+    )
+    hit_ids = [h.segment_id for h in hits]
+    # Each hit brings ±2 neighboring lines of the same conversation: the match
+    # alone is rarely answerable (question and answer sit in adjacent turns).
+    windows = _expand_neighbors(conn, hit_ids)
+    seg_ids: list[int] = []
+    for sid in hit_ids:
+        seg_ids.extend(windows.get(sid, [sid]))
 
     window = _temporal_window(question)
     window_ids = _window_segment_ids(conn, window) if window else []
@@ -434,7 +558,7 @@ def prepare(
         for c in json.loads(f["source_segment_ids"] or "[]"):
             seg_ids.append(c)
     seg_ids.extend(history_cited)  # …and sources carried over from prior turns
-    info = _seg_info(conn, sorted(set(seg_ids)))
+    info = _seg_info(conn, sorted(set(seg_ids)), settings)
 
     def _excerpt(sid: int) -> str:
         s = info[sid]
@@ -468,11 +592,41 @@ def prepare(
         prompt=f"{convo}{context}Question: {question}",
         info=info,
         time_window=window,
+        has_context=bool(excerpts or fact_block),
     )
 
 
+def _strip_dangling_citations(text: str, known: set[int]) -> tuple[str, int]:
+    """Remove [id] markers whose id isn't resolvable, returning (text, count).
+
+    A hallucinated ``[9999]`` would otherwise sit in the prose looking exactly
+    like a real citation.
+    """
+    dangling = 0
+
+    def repl(m: re.Match[str]) -> str:
+        nonlocal dangling
+        if int(m.group(1)) in known:
+            return m.group(0)
+        dangling += 1
+        return ""
+
+    out = _CITE.sub(repl, text)
+    if dangling:
+        out = re.sub(r"[ \t]+([.,;:!?])", r"\1", re.sub(r"[ \t]{2,}", " ", out))
+    return out, dangling
+
+
 def finalize(prep: PreparedAsk, text: str) -> dict:
-    """Resolve the model's citations against the prepared context."""
+    """Resolve the model's citations against the prepared context.
+
+    Grounding states are reported honestly: ``context_empty`` means retrieval
+    found nothing to answer from; ``uncited`` means context existed but the
+    model cited none of it (treat with care — it isn't the same failure).
+    Citation markers pointing at ids that were never in the context are
+    stripped from the prose and counted in ``dangling_citations``.
+    """
+    text, dangling = _strip_dangling_citations(text, set(prep.info))
     cited_ids = {int(m) for m in _CITE.findall(text)}
     citations = [
         {
@@ -480,6 +634,9 @@ def finalize(prep: PreparedAsk, text: str) -> dict:
             "conversation_id": prep.info[sid]["conversation_id"],
             "start_at": prep.info[sid]["start_at"],
             "speaker": prep.info[sid]["speaker"],
+            "speaker_low_confidence": bool(
+                prep.info[sid].get("speaker_low_confidence")
+            ),
             "text": prep.info[sid]["text"],
         }
         for sid in sorted(cited_ids)
@@ -491,6 +648,9 @@ def finalize(prep: PreparedAsk, text: str) -> dict:
         "citations": citations,
         "general_used": _GENERAL_TAG in text,
         "grounded": bool(citations),
+        "context_empty": not prep.has_context,
+        "uncited": prep.has_context and not citations,
+        "dangling_citations": dangling,
         "time_window": prep.time_window,
     }
 
@@ -502,9 +662,15 @@ def answer(
     llm: LLM | None = None,
     settings: Settings | None = None,
     history: list[dict] | None = None,
+    speaker_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict:
     settings = settings or get_settings()
     llm = llm or get_llm(settings)
-    prep = prepare(conn, question, settings=settings, history=history)
+    prep = prepare(
+        conn, question, settings=settings, history=history,
+        speaker_id=speaker_id, since=since, until=until,
+    )
     resp = llm.complete(system=prep.system, prompt=prep.prompt, max_tokens=MAX_ANSWER_TOKENS)
     return finalize(prep, resp.text)

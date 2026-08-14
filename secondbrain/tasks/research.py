@@ -133,6 +133,33 @@ def get_researcher(
     return LocalResearcher(conn, settings, llm)
 
 
+def _query_context(conn: sqlite3.Connection, row) -> list[str]:
+    """Extra grounding for an auto-built query: the task's goal title and the
+    people on the source conversation commitment (via source_edge_id)."""
+    extras: list[str] = []
+    if row["goal_id"]:
+        g = conn.execute("SELECT title FROM goals WHERE id=?", (row["goal_id"],)).fetchone()
+        if g and g["title"]:
+            extras.append(f"goal: {g['title']}")
+    if row["source_edge_id"]:
+        e = conn.execute(
+            """
+            SELECT COALESCE(s.display_label, s.name) AS src_name,
+                   COALESCE(d.display_label, d.name) AS dst_name
+            FROM kg_edges e
+            JOIN kg_nodes s ON s.id = e.src_node_id
+            LEFT JOIN kg_nodes d ON d.id = e.dst_node_id
+            WHERE e.id = ?
+            """,
+            (row["source_edge_id"],),
+        ).fetchone()
+        if e:
+            names = [n for n in (e["src_name"], e["dst_name"]) if n]
+            if names:
+                extras.append("with " + ", ".join(names))
+    return extras
+
+
 def run_research(
     conn: sqlite3.Connection,
     task_id: int,
@@ -143,14 +170,20 @@ def run_research(
     llm: LLM | None = None,
     researcher: Researcher | None = None,
 ) -> int:
-    """Run research for a task and store the note. Returns the note id."""
+    """Run research for a task and store the note (the full query is stored
+    alongside it, so a note is always auditable). Returns the note id."""
     settings = settings or get_settings()
     if query is None:
-        row = conn.execute("SELECT title, detail FROM tasks WHERE id=?", (task_id,)).fetchone()
+        row = conn.execute(
+            "SELECT title, detail, goal_id, source_edge_id FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
         query = row["title"] if row else ""
         detail = (row["detail"] or "").strip() if row else ""
         if detail:  # context-rich tasks get better-grounded notes
             query = f"{query} — {detail[:_QUERY_DETAIL_CHARS]}"
+        extras = _query_context(conn, row) if row else []
+        if extras:
+            query = f"{query} ({'; '.join(extras)})"
     researcher = researcher or get_researcher(conn, web=web, settings=settings, llm=llm)
     note = researcher.research(query)
     cur = conn.execute(

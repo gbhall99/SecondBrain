@@ -102,7 +102,7 @@ def test_upgrade_from_old_db(tmp_path):
     apply_base_schema(c)
     tables = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"speakers", "conversations", "kg_nodes", "goals", "tasks"} <= tables
-    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_reliability"
+    assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_planner"
     c.close()
 
 
@@ -129,18 +129,52 @@ def test_reliability_schema_present(conn):
     assert "idx_jobs_state_finished" in names
 
 
+def test_planner_schema_present(conn):
+    t_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert {"rollover_count", "last_planned_for"} <= t_cols
+    d_cols = {r["name"] for r in conn.execute("PRAGMA table_info(digests)").fetchall()}
+    assert "payload" in d_cols
+
+
 def test_apply_base_schema_is_idempotent(conn):
     # second application must not raise on the non-idempotent ADD COLUMNs
     from secondbrain.storage.schema import apply_base_schema
 
     apply_base_schema(conn)
     ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()["version_num"]
-    assert ver == "0008_reliability"
+    assert ver == "0010_planner"
 
 
 def test_pause_state_roundtrip(conn):
     assert state.is_paused(conn, default=False) is False
     state.set_paused(conn, True)
     assert state.is_paused(conn) is True
+    state.set_paused(conn, False)
+    assert state.is_paused(conn) is False
+
+
+def test_timed_pause_auto_resumes_after_expiry(conn):
+    from datetime import UTC, datetime, timedelta
+
+    from secondbrain.storage.models import iso_from_dt
+
+    # Timed pause still in the future → paused.
+    future = iso_from_dt(datetime.now(UTC) + timedelta(minutes=15))
+    state.set_paused(conn, True, until_iso=future)
+    assert state.is_paused(conn) is True
+
+    # Expired timed pause → auto-resume (and the flag is cleared persistently).
+    past = iso_from_dt(datetime.now(UTC) - timedelta(seconds=1))
+    state.set_paused(conn, True, until_iso=past)
+    assert state.is_paused(conn) is False
+    assert state.get_state(conn, state.PAUSED) == "0"
+    assert not state.get_state(conn, state.PAUSE_UNTIL)
+
+
+def test_untimed_pause_never_expires(conn):
+    state.set_paused(conn, True)
+    assert state.is_paused(conn) is True
+    assert not state.get_state(conn, state.PAUSE_UNTIL)
+    # resuming clears any leftover expiry
     state.set_paused(conn, False)
     assert state.is_paused(conn) is False

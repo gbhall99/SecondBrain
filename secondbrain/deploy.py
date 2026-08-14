@@ -8,8 +8,10 @@ side-effecting install so it stays testable on Linux/CI (no macOS required).
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_PLACEHOLDER = "__REPO__"
@@ -90,3 +92,113 @@ def install_launchd(
             runner(["launchctl", "unload", str(dest)], check=False)
             runner(["launchctl", "load", "-w", str(dest)], check=False)
     return written
+
+
+@dataclass
+class LoadResult:
+    """Outcome of one ``launchctl load`` invocation."""
+
+    label: str
+    ok: bool
+    stderr: str = ""
+
+
+def load_agents(paths: list[Path], runner=subprocess.run) -> list[LoadResult]:
+    """(Re)load each written plist via launchctl, capturing per-agent outcomes.
+
+    Unlike the fire-and-forget ``install_launchd(load=True)`` path, this reports
+    success/failure + stderr for every agent so the CLI can say which one broke
+    instead of an unconditional "Loaded".
+    """
+    results: list[LoadResult] = []
+    for dest in paths:
+        # Reload idempotently: unload (ignore failure) then load -w.
+        runner(["launchctl", "unload", str(dest)],
+               check=False, capture_output=True, text=True)
+        proc = runner(["launchctl", "load", "-w", str(dest)],
+                      check=False, capture_output=True, text=True)
+        ok = getattr(proc, "returncode", 0) == 0
+        stderr = ((getattr(proc, "stderr", "") or "").strip())
+        results.append(LoadResult(label=dest.stem, ok=ok, stderr=stderr))
+    return results
+
+
+@dataclass
+class AgentStatus:
+    """Install/load state of one launchd agent for ``sb deploy status``."""
+
+    label: str
+    installed: bool
+    loaded: bool | None  # None = launchctl unavailable (non-macOS)
+    plist_path: Path
+    log_paths: list[str] = field(default_factory=list)
+
+
+def agent_status(
+    *,
+    include_menubar: bool = True,
+    launch_agents_dir: Path | None = None,
+    runner=subprocess.run,
+    have_launchctl: bool | None = None,
+) -> list[AgentStatus]:
+    """Per-agent install + load status; degrades gracefully off-macOS."""
+    import shutil
+
+    dest_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
+    if have_launchctl is None:
+        have_launchctl = shutil.which("launchctl") is not None
+    out: list[AgentStatus] = []
+    for label in agents(include_menubar=include_menubar):
+        dest = dest_dir / f"{label}.plist"
+        installed = dest.exists()
+        loaded: bool | None = None
+        if have_launchctl:
+            proc = runner(["launchctl", "list", label],
+                          check=False, capture_output=True, text=True)
+            loaded = getattr(proc, "returncode", 1) == 0
+        logs: list[str] = []
+        if installed:
+            try:
+                data = plistlib.loads(dest.read_bytes())
+                for key in ("StandardOutPath", "StandardErrorPath"):
+                    if data.get(key):
+                        logs.append(str(data[key]))
+            except Exception:  # noqa: BLE001 - a corrupt plist still reports installed
+                pass
+        out.append(AgentStatus(label=label, installed=installed, loaded=loaded,
+                               plist_path=dest, log_paths=logs))
+    return out
+
+
+def stale_plists(
+    *,
+    launch_agents_dir: Path | None = None,
+    repo: Path | None = None,
+    python: str | None = None,
+) -> list[str]:
+    """Installed plists whose python path / repo directory no longer match this
+    environment (venv moved, repo relocated) — the agents would run old code.
+
+    Returns human-readable mismatch descriptions; empty when everything (or
+    nothing) is installed consistently.
+    """
+    dest_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
+    repo = Path(repo) if repo is not None else repo_root()
+    python = python or sys.executable
+    problems: list[str] = []
+    for label in agents(include_menubar=True):
+        dest = dest_dir / f"{label}.plist"
+        if not dest.exists():
+            continue
+        try:
+            data = plistlib.loads(dest.read_bytes())
+        except Exception:  # noqa: BLE001
+            problems.append(f"{label}: unreadable plist at {dest}")
+            continue
+        args = data.get("ProgramArguments") or []
+        if args and args[0] != python:
+            problems.append(f"{label}: runs {args[0]}, current interpreter is {python}")
+        wd = data.get("WorkingDirectory")
+        if wd and Path(wd) != repo:
+            problems.append(f"{label}: WorkingDirectory {wd}, current repo is {repo}")
+    return problems

@@ -15,10 +15,26 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.storage.db import transaction
+
+
+def _local_day_utc_bounds(day: str) -> tuple[str, str]:
+    """UTC ISO bounds [start, end) covering the *local* calendar day ``day``.
+
+    Mirrors ``query.service._local_day_utc_bounds`` (storage must not import
+    query): every read surface buckets days in the owner's local timezone, so
+    "forget Tuesday" must mean the same Tuesday the day view shows — not the
+    UTC one, which can differ by several hours at the edges.
+    """
+    start_local = datetime.strptime(day, "%Y-%m-%d")  # naive == system local time
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    start = start_local.astimezone(UTC).strftime(fmt)
+    end = (start_local + timedelta(days=1)).astimezone(UTC).strftime(fmt)
+    return start, end
 
 
 def _delete_segment_vectors(conn: sqlite3.Connection, seg_ids: list[int]) -> None:
@@ -68,18 +84,32 @@ def _prune_graph_citations(conn: sqlite3.Connection, seg_ids: list[int]) -> int:
     return deleted
 
 
-def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
+def _delete_orphan_audio(
+    conn: sqlite3.Connection, audio_ids: list[int]
+) -> tuple[int, set[int]]:
     """Delete audio_files (and their raw file on disk) that have no segments left.
 
-    Cascades to transcripts via ``ON DELETE CASCADE``. Returns files removed.
+    Cascades to transcripts and speaker_observations via ``ON DELETE CASCADE``.
+    Returns (files removed, speaker ids whose observations were cascaded away) —
+    the latter so callers can rebuild those voiceprints without the forgotten
+    audio.
     """
     removed = 0
+    affected_speakers: set[int] = set()
     for aid in audio_ids:
         still = conn.execute(
             "SELECT 1 FROM transcript_segments WHERE audio_file_id=? LIMIT 1", (aid,)
         ).fetchone()
         if still:
             continue
+        affected_speakers.update(
+            int(r["speaker_id"])
+            for r in conn.execute(
+                "SELECT DISTINCT speaker_id FROM speaker_observations "
+                "WHERE audio_file_id=? AND speaker_id IS NOT NULL",
+                (aid,),
+            ).fetchall()
+        )
         row = conn.execute("SELECT path FROM audio_files WHERE id=?", (aid,)).fetchone()
         if row and row["path"]:
             p = Path(row["path"])
@@ -87,7 +117,7 @@ def _delete_orphan_audio(conn: sqlite3.Connection, audio_ids: list[int]) -> int:
                 p.unlink(missing_ok=True)
         conn.execute("DELETE FROM audio_files WHERE id=?", (aid,))
         removed += 1
-    return removed
+    return removed, affected_speakers
 
 
 def _purge_forgotten_conversations(conn: sqlite3.Connection, conv_ids: set[int]) -> int:
@@ -130,35 +160,64 @@ def _purge_forgotten_conversations(conn: sqlite3.Connection, conv_ids: set[int])
     return removed
 
 
-def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> dict:
+def _purge_segments(conn: sqlite3.Connection, seg_ids: list[int]) -> tuple[dict, set[int]]:
     """Delete the given segments + their vectors; drop now-orphaned audio files.
 
     The FTS index is kept in sync by the AFTER DELETE trigger on the table.
+    Returns (result counts, speaker ids whose segments/observations were
+    affected) so callers can refresh those profiles.
     """
     if not seg_ids:
-        return {"segments": 0, "audio_files": 0, "kg_edges": 0, "conversations": 0}
+        return {"segments": 0, "audio_files": 0, "kg_edges": 0, "conversations": 0}, set()
+    ph = ",".join("?" * len(seg_ids))
     rows = conn.execute(
         f"SELECT DISTINCT af.id AS aid, af.conversation_id AS cid "
         f"FROM transcript_segments ts JOIN audio_files af ON af.id = ts.audio_file_id "
-        f"WHERE ts.id IN ({','.join('?' * len(seg_ids))})",
+        f"WHERE ts.id IN ({ph})",
         seg_ids,
     ).fetchall()
     audio_ids = [r["aid"] for r in rows]
     conv_ids = {r["cid"] for r in rows if r["cid"] is not None}
+    affected_speakers = {
+        int(r["speaker_id"])
+        for r in conn.execute(
+            f"SELECT DISTINCT speaker_id FROM transcript_segments "
+            f"WHERE id IN ({ph}) AND speaker_id IS NOT NULL",
+            seg_ids,
+        ).fetchall()
+    }
     _delete_segment_vectors(conn, seg_ids)
     edges_removed = _prune_graph_citations(conn, seg_ids)
-    conn.execute(
-        f"DELETE FROM transcript_segments WHERE id IN ({','.join('?' * len(seg_ids))})",
-        seg_ids,
-    )
-    audio_removed = _delete_orphan_audio(conn, audio_ids)
+    conn.execute(f"DELETE FROM transcript_segments WHERE id IN ({ph})", seg_ids)
+    audio_removed, obs_speakers = _delete_orphan_audio(conn, audio_ids)
+    affected_speakers |= obs_speakers
     convs_removed = _purge_forgotten_conversations(conn, conv_ids)
     return {
         "segments": len(seg_ids),
         "audio_files": audio_removed,
         "kg_edges": edges_removed,
         "conversations": convs_removed,
-    }
+    }, affected_speakers
+
+
+def _refresh_speaker_profiles(conn: sqlite3.Connection, speaker_ids: set[int]) -> int:
+    """Rebuild centroid/exemplar counts + segment stats for surviving speakers.
+
+    A forgotten day/person removes observations other voiceprints were built
+    from; recomputing (or clearing, when nothing remains) makes sure no profile
+    still encodes forgotten audio. Speakers deleted by the purge are skipped.
+    Returns the number of profiles refreshed.
+    """
+    from secondbrain.speaker import registry  # lazy: keep storage import-light
+
+    refreshed = 0
+    for sid in speaker_ids:
+        if conn.execute("SELECT 1 FROM speakers WHERE id=?", (sid,)).fetchone() is None:
+            continue
+        registry.refresh_profile(conn, sid)
+        registry._recount_segments(conn, sid)
+        refreshed += 1
+    return refreshed
 
 
 def forget_day(
@@ -176,17 +235,33 @@ def forget_range(
     *,
     vacuum: bool = False,
 ) -> dict:
-    """Forget everything captured between ``start_date`` and ``end_date`` (inclusive)."""
+    """Forget everything captured between ``start_date`` and ``end_date`` (inclusive).
+
+    Dates are *local* calendar days (matching every read surface). Segments
+    with no ``start_at`` of their own are pulled in via their audio file's
+    capture timestamp, so forgotten-day content can't survive as undated rows.
+    """
+    start_utc, _ = _local_day_utc_bounds(start_date)
+    _, end_utc = _local_day_utc_bounds(end_date)
     with transaction(conn):
         seg_ids = [
             r["id"]
             for r in conn.execute(
-                "SELECT id FROM transcript_segments "
-                "WHERE substr(start_at, 1, 10) BETWEEN ? AND ?",
-                (start_date, end_date),
+                "SELECT id FROM transcript_segments WHERE start_at >= ? AND start_at < ?",
+                (start_utc, end_utc),
             ).fetchall()
         ]
-        result = _purge_segments(conn, seg_ids)
+        seg_ids += [
+            r["id"]
+            for r in conn.execute(
+                "SELECT ts.id FROM transcript_segments ts "
+                "JOIN audio_files af ON af.id = ts.audio_file_id "
+                "WHERE ts.start_at IS NULL AND af.started_at >= ? AND af.started_at < ?",
+                (start_utc, end_utc),
+            ).fetchall()
+        ]
+        result, affected = _purge_segments(conn, seg_ids)
+        result["speakers_refreshed"] = _refresh_speaker_profiles(conn, affected)
     if vacuum:  # VACUUM cannot run inside a transaction
         _vacuum(conn)
     return result
@@ -231,7 +306,7 @@ def forget_person(
                 f"SELECT id FROM transcript_segments WHERE speaker_id IN ({ph})", id_list
             ).fetchall()
         ]
-        result = _purge_segments(conn, seg_ids)
+        result, affected = _purge_segments(conn, seg_ids)
 
         conn.execute(f"DELETE FROM speaker_observations WHERE speaker_id IN ({ph})", id_list)
         node_count = conn.execute(
@@ -240,6 +315,9 @@ def forget_person(
         # kg_edges + kg_aliases cascade via ON DELETE CASCADE.
         conn.execute(f"DELETE FROM kg_nodes WHERE speaker_id IN ({ph})", id_list)
         conn.execute(f"DELETE FROM speakers WHERE id IN ({ph})", id_list)
+        # OTHER speakers may have had observations on the deleted audio (shared
+        # conversations) — their voiceprints must forget it too.
+        result["speakers_refreshed"] = _refresh_speaker_profiles(conn, affected - ids)
 
     result["speakers"] = len(id_list)
     result["kg_nodes"] = node_count

@@ -20,16 +20,115 @@ from __future__ import annotations
 
 import json
 import os
+import tomllib
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
-from secondbrain.config import get_settings
+from secondbrain import __version__
+from secondbrain.config import Settings, get_settings
 from secondbrain.query import service
 from secondbrain.storage import retention, state
 from secondbrain.storage.db import db_session, init_db
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, help="SecondBrain CLI")
+app = typer.Typer(no_args_is_help=True, add_completion=True, help="SecondBrain CLI")
+
+
+# --- shared guards / helpers --------------------------------------------------
+
+
+def _config_error_line(exc: Exception) -> str:
+    """One actionable line for a broken config, instead of a traceback."""
+    where = "config.toml / config.local.toml (or SB_* env vars)"
+    if isinstance(exc, ValidationError):
+        err = exc.errors()[0]
+        loc = ".".join(str(p) for p in err["loc"]) or "settings"
+        return f"Config error: {loc}: {err['msg']} — fix it in {where}."
+    return f"Config error: could not parse TOML: {exc} — fix it in {where}."
+
+
+def _guarded_settings() -> Settings:
+    """get_settings(), turning config mistakes into a clean exit(2)."""
+    try:
+        return get_settings()
+    except (ValidationError, tomllib.TOMLDecodeError) as exc:
+        typer.echo(_config_error_line(exc), err=True)
+        raise typer.Exit(2) from exc
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"sb {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        None, "--version", callback=_version_callback, is_eager=True,
+        help="Show the SecondBrain version and exit.",
+    ),
+) -> None:
+    """SecondBrain CLI."""
+    # Load (and thereby validate) the configuration once for every command, so
+    # a typo in config.toml is a one-line message instead of a traceback.
+    _guarded_settings()
+
+
+@contextmanager
+def _read_db(settings: Settings):
+    """DB session for read commands: a missing database is a setup problem, not
+    a traceback (connecting would silently create an empty DB file)."""
+    if not settings.db_path.exists():
+        typer.echo("Not initialised — run `sb init`", err=True)
+        raise typer.Exit(2)
+    with db_session(settings=settings) as conn:
+        yield conn
+
+
+def _date_arg(value: str | None) -> str | None:
+    """Typer callback: validate YYYY-MM-DD date arguments/options."""
+    if value is None or value == "":
+        return value
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is not a date like 2026-07-02 (YYYY-MM-DD)"
+        ) from None
+    return value
+
+
+def _choice(allowed: tuple[str, ...]):
+    """Typer callback factory: reject values outside ``allowed`` with exit 2."""
+
+    def _check(value: str) -> str:
+        if value not in allowed:
+            raise typer.BadParameter(f"must be one of: {', '.join(allowed)}")
+        return value
+
+    return _check
+
+
+def _kv_block(pairs: list[tuple[str, object]]) -> str:
+    """Aligned ``key: value`` lines for human-readable command output."""
+    width = max(len(k) for k, _ in pairs)
+    return "\n".join(f"{k + ':':<{width + 2}}{v}" for k, v in pairs)
+
+
+def _llm_exit(exc: Exception, settings: Settings) -> None:
+    """Print a friendly message and exit(1) for LLM transport failures; re-raise
+    anything that isn't one."""
+    from secondbrain.llm.errors import llm_failure_detail
+
+    detail = llm_failure_detail(exc, settings)
+    if detail is None:
+        raise exc
+    typer.echo(detail, err=True)
+    raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -44,9 +143,18 @@ def init() -> None:
 @app.command()
 def devices() -> None:
     """List available audio input devices."""
-    from secondbrain.capture.devices import list_input_devices
+    try:
+        from secondbrain.capture.devices import list_input_devices
 
-    for d in list_input_devices():
+        found = list_input_devices()
+    except ImportError:
+        typer.echo(
+            "Audio capture support is not installed. "
+            "Install it with: pip install -e '.[audio]'",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    for d in found:
         mark = " (default)" if d.default else ""
         typer.echo(f"[{d.index}] {d.name} — {d.channels}ch{mark}")
 
@@ -87,27 +195,67 @@ def serve(
             if not auth.has_password(conn):
                 typer.echo("require_auth is set but no password. Run `sb auth set-password`.")
                 raise typer.Exit(1)
+    from secondbrain.logging_setup import configure_logging
+
+    configure_logging(settings)
     uvicorn.run(
         create_app(settings),
         host=bind_host,
         port=port or settings.api.port,
         log_level="info",
+        # Explicit proxy posture: only a reverse proxy on this machine may speak
+        # for a client via X-Forwarded-* — a remote client sending them itself
+        # must never look like loopback (that would bypass auth entirely).
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1",
     )
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+) -> None:
     """Show recording status, queue depth, and disk."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
-        typer.echo(json.dumps(service.status(conn, settings), indent=2))
+    with _read_db(settings) as conn:
+        st = service.status(conn, settings)
+    if json_out:
+        typer.echo(json.dumps(st, indent=2))
+        return
+    recording = "on" if st["recording"] else ("paused" if st["paused"] else "off")
+    if st.get("capture_stale"):
+        recording += f" — but no audio for {st.get('capture_stale_for') or '?'}!"
+    jobs = st["jobs"] or {}
+    job_line = ", ".join(f"{k}={v}" for k, v in sorted(jobs.items())) or "empty"
+    pairs: list[tuple[str, object]] = [
+        ("Recording", recording),
+        ("Last capture", st.get("last_capture_at") or "—"),
+        ("Disk free", f"{st['disk_free_gb']} GB" + ("" if st["disk_ok"] else " (LOW)")),
+        ("Queue", job_line),
+        ("Segments", f"{st['segments_total']} total, {st['segments_today']} today"),
+        ("Speakers", f"{st['speakers_known']} known, "
+                     f"{st['unknown_clusters_pending']} unknown pending"),
+        ("Diarization", "on" if st["diarization_enabled"] else "off"),
+        ("Proactive", "on" if st["proactive_enabled"] else "off"),
+    ]
+    if st.get("digest_count_today"):
+        pairs.append(("Suggestions", st["digest_count_today"]))
+    typer.echo(_kv_block(pairs))
 
 
 @app.command()
-def stats() -> None:
+def stats(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+) -> None:
     """Show a high-level overview of the captured corpus (graph, goals, tasks)."""
-    with db_session(settings=get_settings()) as conn:
-        typer.echo(json.dumps(service.corpus_stats(conn), indent=2))
+    with _read_db(get_settings()) as conn:
+        data = service.corpus_stats(conn)
+    if json_out:
+        typer.echo(json.dumps(data, indent=2))
+        return
+    pairs = [(k.replace("_", " ").capitalize(), v if v is not None else "—")
+             for k, v in data.items()]
+    typer.echo(_kv_block(pairs))
 
 
 @app.command()
@@ -116,7 +264,7 @@ def person(
     list_: bool = typer.Option(False, "--list", help="List people instead."),
 ) -> None:
     """Show a person dossier (identity, interactions, facts, commitments, quotes)."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         if list_ or speaker_id is None:
             typer.echo(json.dumps(service.list_speakers(conn), indent=2))
             return
@@ -130,28 +278,30 @@ def person(
 @app.command()
 def relationships() -> None:
     """List people you interact with, ranked (opted-out excluded)."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         typer.echo(json.dumps(service.relationships(conn, get_settings()), indent=2))
 
 
 @app.command()
-def timeline(day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).")) -> None:
+def timeline(
+    day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).", callback=_date_arg),
+) -> None:
     """Show a day as conversations with inline extracted knowledge."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         typer.echo(json.dumps(service.timeline(conn, day, get_settings()), indent=2))
 
 
 @app.command()
 def projects() -> None:
     """List projects from the knowledge graph, ranked by activity."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         typer.echo(json.dumps(service.list_projects(conn, get_settings()), indent=2))
 
 
 @app.command()
 def project(node_id: int = typer.Argument(..., help="Project kg node id.")) -> None:
     """Show a project dossier (people, goals, decisions, facts, commitments)."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         d = service.project_dossier(conn, node_id, get_settings())
     if d is None:
         typer.echo(f"No such project node: {node_id}")
@@ -165,31 +315,48 @@ def queue(
     retry_failed: bool = typer.Option(
         False, "--retry-failed", help="Re-queue dead-lettered ('failed') jobs for a fresh run."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
 ) -> None:
     """Show job-queue counts and recent failures (optionally reclaim stuck jobs)."""
     from secondbrain.pipeline import queue as q
 
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         if reclaim:
             n = service.reclaim_stale_jobs(conn)
             typer.echo(f"Reclaimed {n} stuck job(s).")
         if retry_failed:
             n = q.requeue_failed(conn)
             typer.echo(f"Re-queued {n} failed job(s).")
-        typer.echo(json.dumps(service.queue_overview(conn), indent=2))
+        over = service.queue_overview(conn)
+    if json_out:
+        typer.echo(json.dumps(over, indent=2))
+        return
+    counts = over["counts"] or {}
+    typer.echo(_kv_block([(s, counts.get(s, 0))
+                          for s in ("pending", "running", "done", "failed")]))
+    if over["recent_failures"]:
+        typer.echo("\nRecent failures:")
+        for f in over["recent_failures"]:
+            when = (f.get("finished_at") or "")[:19]
+            typer.echo(f"  #{f['id']} {f['type']} {when} — {(f.get('error') or '')[:120]}")
 
 
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Search phrase."),
     limit: int = typer.Option(20, "--limit", "-n"),
-    mode: str = typer.Option("auto", help="auto | fulltext | semantic"),
-    since: str = typer.Option(None, "--since", help="On/after this day (YYYY-MM-DD)."),
-    until: str = typer.Option(None, "--until", help="On/before this day (YYYY-MM-DD)."),
+    mode: str = typer.Option(
+        "auto", help="auto | fulltext | semantic",
+        callback=_choice(("auto", "fulltext", "semantic")),
+    ),
+    since: str = typer.Option(None, "--since", help="On/after this day (YYYY-MM-DD).",
+                              callback=_date_arg),
+    until: str = typer.Option(None, "--until", help="On/before this day (YYYY-MM-DD).",
+                              callback=_date_arg),
 ) -> None:
     """Search transcripts (full-text + semantic)."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
+    with _read_db(settings) as conn:
         hits = service.search(conn, query, limit, mode, settings, since=since, until=until)
     if not hits:
         typer.echo("No matches.")
@@ -237,8 +404,10 @@ def ask(question: str = typer.Argument(..., help="Question to answer from your d
     """Ask your second brain a question (grounded in your captured knowledge)."""
     settings = get_settings()
     try:
-        with db_session(settings=settings) as conn:
+        with _read_db(settings) as conn:
             result = service.ask(conn, question, settings)
+    except typer.Exit:
+        raise
     except Exception as exc:  # noqa: BLE001 - friendly hint instead of a traceback
         typer.echo(
             f"Could not answer ({exc}).\n"
@@ -255,10 +424,12 @@ def ask(question: str = typer.Argument(..., help="Question to answer from your d
 
 
 @app.command()
-def show(day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).")) -> None:
+def show(
+    day: str = typer.Argument(None, help="YYYY-MM-DD (default: today).", callback=_date_arg),
+) -> None:
     """Print all transcript segments for a day."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
+    with _read_db(settings) as conn:
         segs = service.day_segments(conn, day)
     if not segs:
         typer.echo("Nothing recorded for that day.")
@@ -369,18 +540,26 @@ def restore(
 
 @app.command()
 def export(
-    fmt: str = typer.Option("both", "--format", help="json | md | both."),
+    fmt: str = typer.Option(
+        "both", "--format", help="json | md | markdown | both.",
+        callback=_choice(("json", "md", "markdown", "both")),
+    ),
     out: str = typer.Option(None, "--out", help="Output directory."),
-    since: str = typer.Option(None, "--since", help="Segments on/after this day (YYYY-MM-DD)."),
-    until: str = typer.Option(None, "--until", help="Segments on/before this day (YYYY-MM-DD)."),
+    since: str = typer.Option(None, "--since", help="Segments on/after this day (YYYY-MM-DD).",
+                              callback=_date_arg),
+    until: str = typer.Option(None, "--until", help="Segments on/before this day (YYYY-MM-DD).",
+                              callback=_date_arg),
 ) -> None:
     """Export transcripts, graph, goals, and tasks (opted-out speakers excluded)."""
     settings = get_settings()
     out_dir = Path(out) if out else settings.data_path / "exports"
-    with db_session(settings=settings) as conn:
+    with _read_db(settings) as conn:
         paths = service.export_data(
             conn, out_dir, fmt=fmt, settings=settings, since=since, until=until
         )
+    if not paths:
+        typer.echo("No output written.")
+        return
     for p in paths:
         typer.echo(f"Exported {p}")
 
@@ -457,15 +636,23 @@ def speaker_enroll_owner(
                 p = settings.audio_processed_dir / f"enroll_{i}.flac"
                 record_clip(p, seconds, settings)
                 paths.append(p)
-    with db_session(settings=settings) as conn:
-        owner_id = enroll_owner_from_files(conn, paths, settings=settings, name=name)
+    try:
+        with db_session(settings=settings) as conn:
+            # Fresh recordings replace the prior enrollment exemplars (a redo),
+            # instead of piling on top of a possibly-bad first profile.
+            owner_id = enroll_owner_from_files(
+                conn, paths, settings=settings, name=name, replace=rerecord
+            )
+    except ValueError as exc:  # quality gate: too little speech in the clips
+        typer.echo(f"Enrollment failed: {exc}")
+        raise typer.Exit(1) from exc
     typer.echo(f"Enrolled owner '{name}' (speaker #{owner_id}) from {len(paths)} clip(s).")
 
 
 @speaker_app.command("list")
 def speaker_list() -> None:
     """List known and unknown speakers."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         for s in service.list_speakers(conn):
             label = s["name"] or s["display_label"] or f"#{s['id']}"
             owner = " (you)" if s["is_owner"] else ""
@@ -478,7 +665,7 @@ def speaker_list() -> None:
 @speaker_app.command("unknowns")
 def speaker_unknowns() -> None:
     """List unknown voices awaiting a name."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         rows = service.unknown_speakers(conn)
     if not rows:
         typer.echo("No unknown voices. 🎉")
@@ -568,7 +755,7 @@ def speaker_prune() -> None:
 @speaker_app.command("quality")
 def speaker_quality() -> None:
     """Show speaker-profile quality metrics."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         typer.echo(json.dumps(service.speaker_quality(conn), indent=2))
 
 
@@ -585,12 +772,14 @@ def digest(
 
     settings = get_settings()
     kind = "weekly" if weekly else "daily"
-    with db_session(settings=settings) as conn:
+    with _read_db(settings) as conn:
         try:
             d = service.generate_digest(conn, settings, kind=kind, force=regenerate)
         except DigestInFlight as exc:
             typer.echo(f"Hold on — {exc}. Try again in a minute.")
             raise typer.Exit(1) from exc
+        except Exception as exc:  # noqa: BLE001 - friendly LLM hint, else re-raise
+            _llm_exit(exc, settings)
         suggestions = service.list_suggestions(conn)
     if d:
         typer.echo(d["summary_md"].strip() + "\n")
@@ -617,7 +806,7 @@ app.add_typer(goals_app, name="goals")
 def goals_add(
     title: str,
     description: str = typer.Option(None, "--description", "-d"),
-    target_date: str = typer.Option(None, "--target-date"),
+    target_date: str = typer.Option(None, "--target-date", callback=_date_arg),
     priority: int = typer.Option(2, "--priority", "-p", help="1 high, 2 med, 3 low"),
 ) -> None:
     """Add a goal."""
@@ -631,7 +820,7 @@ def goals_add(
 @goals_app.command("list")
 def goals_list() -> None:
     """List goals."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         for g in service.list_goals(conn):
             due = f" by {g['target_date']}" if g["target_date"] else ""
             typer.echo(f"#{g['id']:<4} [{g['status']}] P{g['priority']} {g['title']}{due}")
@@ -666,7 +855,7 @@ def task_add(
     minutes: int = typer.Option(None, "--minutes", help="Estimate."),
     value: int = typer.Option(3, "--value"),
     effort: int = typer.Option(3, "--effort"),
-    due: str = typer.Option(None, "--due", help="YYYY-MM-DD"),
+    due: str = typer.Option(None, "--due", help="YYYY-MM-DD", callback=_date_arg),
 ) -> None:
     """Add a task."""
     settings = get_settings()
@@ -679,7 +868,7 @@ def task_add(
 @task_app.command("list")
 def task_list(status: str = typer.Option(None), goal: int = typer.Option(None)) -> None:
     """List tasks."""
-    with db_session(settings=get_settings()) as conn:
+    with _read_db(get_settings()) as conn:
         for t in service.list_tasks(conn, goal_id=goal, status=status):
             due = f" due {t['due_date']}" if t["due_date"] else ""
             typer.echo(f"#{t['id']:<4} [{t['status']}] {t['title']}{due}")
@@ -697,8 +886,11 @@ def task_done(task_id: int) -> None:
 def task_research(task_id: int, web: bool = typer.Option(False, "--web")) -> None:
     """Research a task (local graph-RAG by default; --web for opt-in web)."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
-        service.task_research(conn, task_id, web=web, settings=settings)
+    with _read_db(settings) as conn:
+        try:
+            service.task_research(conn, task_id, web=web, settings=settings)
+        except Exception as exc:  # noqa: BLE001 - friendly LLM hint, else re-raise
+            _llm_exit(exc, settings)
         notes = service.task_research_notes(conn, task_id)
     if notes:
         typer.echo(notes[0]["summary_md"])
@@ -728,8 +920,11 @@ def plan(
 def decompose(goal_id: int, accept: bool = typer.Option(False, "--accept")) -> None:
     """Propose an AI plan for a goal (use --accept to create the tasks)."""
     settings = get_settings()
-    with db_session(settings=settings) as conn:
-        proposal = service.decompose_goal(conn, goal_id, settings)
+    with _read_db(settings) as conn:
+        try:
+            proposal = service.decompose_goal(conn, goal_id, settings)
+        except Exception as exc:  # noqa: BLE001 - friendly LLM hint, else re-raise
+            _llm_exit(exc, settings)
         for ms in proposal.get("milestones", []):
             typer.echo(f"• {ms['title']}")
             for t in ms.get("tasks", []):
@@ -771,8 +966,44 @@ def repair() -> None:
 
 
 @app.command()
+def logs(
+    lines: int = typer.Option(50, "--lines", "-n", help="How many trailing lines to print."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Keep printing as lines arrive."),
+) -> None:
+    """Show the resolved log file path and tail it."""
+    import time as time_mod
+
+    from secondbrain.logging_setup import log_file_path
+
+    settings = get_settings()
+    path = log_file_path(settings)
+    typer.echo(f"Log file: {path}")
+    if not path.exists():
+        typer.echo("(no log file yet — it appears once the daemon or server runs)")
+        raise typer.Exit()
+    text = path.read_text(errors="replace")
+    tail = text.splitlines()[-max(lines, 0):]
+    for line in tail:
+        typer.echo(line)
+    if not follow:
+        return
+    try:
+        with path.open("r", errors="replace") as fh:
+            fh.seek(0, os.SEEK_END)
+            while True:
+                line = fh.readline()
+                if line:
+                    typer.echo(line.rstrip("\n"))
+                else:
+                    time_mod.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
+
+@app.command()
 def doctor(
     fix: bool = typer.Option(False, "--fix", help="Auto-repair before checking (self-heal)."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
 ) -> None:
     """Run health/preflight checks (config, disk, migrations, backends)."""
     from secondbrain import health
@@ -785,6 +1016,9 @@ def doctor(
             for a in repair_mod.repair(conn, settings):
                 if a.fixed:
                     typer.echo(f"  fixed {a.name}: {a.detail}")
+        if json_out:
+            typer.echo(json.dumps(health.summary(conn, settings), indent=2))
+            raise typer.Exit()
         checks = health.run_checks(conn, settings)
     errors = 0
     warnings = 0
@@ -798,6 +1032,8 @@ def doctor(
             errors += 1
             mark = "✗"
         typer.echo(f"  {mark} {c.name}: {c.detail}")
+        if not c.ok and c.hint:
+            typer.echo(f"      → fix: {c.hint}")
     if not errors and not warnings:
         typer.echo("\nAll checks passed.")
     else:
@@ -830,9 +1066,18 @@ def deploy_launchd(
 ) -> None:
     """Render deploy/*.plist into ~/Library/LaunchAgents with this venv's Python and
     repo path, then optionally (un)load them via launchctl."""
+    import shutil
+    import sys
+
     from secondbrain import deploy as deploy_mod
     from secondbrain import health
 
+    if sys.platform != "darwin":
+        typer.echo("`sb deploy launchd` needs macOS (launchd). This isn't a Mac.", err=True)
+        raise typer.Exit(1)
+    if (load or unload) and shutil.which("launchctl") is None:
+        typer.echo("launchctl not found on PATH — cannot (un)load agents.", err=True)
+        raise typer.Exit(1)
     if not unload:
         # Preflight: refuse to install agents on top of a broken setup.
         settings = get_settings()
@@ -852,16 +1097,49 @@ def deploy_launchd(
                 typer.echo(f"  ✗ {c.name}: {c.detail}")
             raise typer.Exit(1)
 
-    written = deploy_mod.install_launchd(load=load, include_menubar=include_menubar, unload=unload)
+    written = deploy_mod.install_launchd(
+        load=False, include_menubar=include_menubar, unload=unload
+    )
     if unload:
         typer.echo("Unloaded SecondBrain launchd agents.")
         return
     for p in written:
         typer.echo(f"Wrote {p}")
     if load:
+        failures = 0
+        for r in deploy_mod.load_agents(written):
+            if r.ok:
+                typer.echo(f"  ✓ {r.label} loaded")
+            else:
+                failures += 1
+                typer.echo(f"  ✗ {r.label} failed to load: {r.stderr or 'unknown error'}")
+        if failures:
+            typer.echo(f"{failures} agent(s) failed to load — see stderr above.")
+            raise typer.Exit(1)
         typer.echo("Loaded via launchctl. macOS will prompt for Microphone permission first run.")
     else:
         typer.echo("Re-run with --load to start them now (or `launchctl load <plist>`).")
+
+
+@deploy_app.command("status")
+def deploy_status(
+    include_menubar: bool = typer.Option(
+        True, help="Include the (optional) menu bar agent in the report."
+    ),
+) -> None:
+    """Report each launchd agent: plist installed? loaded? where its logs go."""
+    from secondbrain import deploy as deploy_mod
+
+    for st in deploy_mod.agent_status(include_menubar=include_menubar):
+        installed = "installed" if st.installed else "not installed"
+        if st.loaded is None:
+            loaded = "launchctl unavailable (not macOS?)"
+        else:
+            loaded = "loaded" if st.loaded else "not loaded"
+        typer.echo(f"{st.label}: {installed}, {loaded}")
+        typer.echo(f"    plist: {st.plist_path}")
+        for lp in st.log_paths:
+            typer.echo(f"    log:   {lp}")
 
 
 auth_app = typer.Typer(no_args_is_help=True, help="Authentication for remote access.")
@@ -871,19 +1149,48 @@ app.add_typer(auth_app, name="auth")
 @auth_app.command("set-password")
 def auth_set_password(
     username: str = typer.Option(None, help="Username (default from config)."),
-    password: str = typer.Option(
-        None, prompt=True, hide_input=True, confirmation_prompt=True,
-        help="Password (prompted if omitted).",
+    password: str = typer.Option(None, help="Password (prompted if omitted)."),
+    from_env: bool = typer.Option(
+        False, "--from-env",
+        help="Non-interactive: read the password from the SB_AUTH_PASSWORD env var.",
     ),
 ) -> None:
     """Set the web UI username/password (stored hashed in the database)."""
     from secondbrain.security import auth
 
     settings = get_settings()
+    if from_env:
+        password = auth.env_password()
+        if not password:
+            typer.echo("--from-env given but SB_AUTH_PASSWORD is not set.", err=True)
+            raise typer.Exit(2)
+    if password is None:
+        password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
     user = username or settings.security.username
     with db_session(settings=settings) as conn:
-        auth.set_password(conn, user, password)
-    typer.echo(f"Password set for '{user}'. Set [security].require_auth=true to enforce remotely.")
+        try:
+            auth.set_password(conn, user, password)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(2) from exc
+    typer.echo(
+        f"Password set for '{user}'. All existing sessions were signed out "
+        "(a running server picks this up within seconds). "
+        "Set [security].require_auth=true to enforce remotely."
+    )
+
+
+@auth_app.command("revoke-sessions")
+def auth_revoke_sessions() -> None:
+    """Sign out every session everywhere (revokes all outstanding cookies)."""
+    from secondbrain.security import auth
+
+    with db_session(settings=get_settings()) as conn:
+        gen = auth.bump_session_generation(conn)
+    typer.echo(
+        f"All sessions revoked (generation {gen}). "
+        "A running server picks this up within seconds."
+    )
 
 
 @auth_app.command("status")
@@ -928,10 +1235,15 @@ def config_set_hf_token(
 ) -> None:
     """Write [diarization].hf_token into config.local.toml (used by install.sh)."""
     from secondbrain import config_edit
+    from secondbrain.config import REPO_ROOT, reload_settings
 
-    path = Path("config.local.toml")
+    # Always the repo's config.local.toml — the file get_settings() reads —
+    # never a config.local.toml in whatever directory this happens to run from.
+    path = REPO_ROOT / "config.local.toml"
     config_edit.write_hf_token(path, token)
-    typer.echo(f"Wrote hf_token to {path}")
+    reload_settings()
+    typer.echo(f"Wrote hf_token to {path} (owner-only permissions). "
+               "Restart the daemon/server to apply.")
 
 
 forget_app = typer.Typer(no_args_is_help=True, help="Permanently delete captured data.")
@@ -945,7 +1257,7 @@ def _confirm_forget(yes: bool) -> None:
 
 @forget_app.command("day")
 def forget_day(
-    date: str = typer.Argument(..., help="Day to forget (YYYY-MM-DD)."),
+    date: str = typer.Argument(..., help="Day to forget (YYYY-MM-DD).", callback=_date_arg),
     vacuum: bool = typer.Option(False, help="Reclaim freed disk space afterwards."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
 ) -> None:
@@ -958,8 +1270,8 @@ def forget_day(
 
 @forget_app.command("range")
 def forget_range(
-    start: str = typer.Argument(..., help="Start day (YYYY-MM-DD)."),
-    end: str = typer.Argument(..., help="End day, inclusive (YYYY-MM-DD)."),
+    start: str = typer.Argument(..., help="Start day (YYYY-MM-DD).", callback=_date_arg),
+    end: str = typer.Argument(..., help="End day, inclusive (YYYY-MM-DD).", callback=_date_arg),
     vacuum: bool = typer.Option(False, help="Reclaim freed disk space afterwards."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
 ) -> None:

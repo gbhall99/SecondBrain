@@ -40,7 +40,7 @@ def test_full_pipeline_capture_to_graph(conn, settings):
     assert conv is not None
 
     # 3. close + diarize the conversation (inject fake audio builder)
-    conversation.close_conversation(conn, conv)
+    conversation.close_conversation(conn, conv, settings)
     diar = MockDiarizer(
         turns=[(0.0, 2.0, "S0")],
         embeddings={"S0": deterministic_embedding("dana", settings.diarization.embedding_dim)},

@@ -79,16 +79,16 @@ def test_rate_limiter_does_not_retain_empty_entries():
 
 
 def test_set_password_and_authenticate(conn):
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     assert auth.has_password(conn)
-    assert auth.authenticate(conn, "owner", "pw")
+    assert auth.authenticate(conn, "owner", "opensesame")
     assert not auth.authenticate(conn, "owner", "nope")
-    assert not auth.authenticate(conn, "intruder", "pw")
+    assert not auth.authenticate(conn, "intruder", "opensesame")
 
 
 def test_api_requires_auth_for_remote(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))  # TestClient host is non-loopback
 
     # health is always open
@@ -98,7 +98,7 @@ def test_api_requires_auth_for_remote(conn, settings):
     # bad login rejected
     assert client.post("/login", json={"username": "owner", "password": "x"}).status_code == 401
     # good login sets cookie (persisted by TestClient) → access granted
-    assert client.post("/login", json={"username": "owner", "password": "pw"}).status_code == 200
+    assert client.post("/login", json={"username": "owner", "password": "opensesame"}).status_code == 200
     assert client.get("/api/status").status_code == 200
     # logout revokes
     client.post("/logout")
@@ -113,12 +113,12 @@ def test_api_open_when_auth_disabled(conn, settings):
 
 def test_health_redacts_detail_for_unauthenticated_remote(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))  # non-loopback, no cookie
     body = client.get("/health").json()
     assert set(body) == {"status", "version"}  # no 'checks' (secret/device leak)
     # After login, full detail is returned.
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     assert "checks" in client.get("/health").json()
 
 
@@ -127,14 +127,14 @@ def test_health_html_page_only_for_authenticated_browsers(conn, settings):
     # (device names, job errors), so an unauthenticated remote browser must
     # keep getting the redacted probe JSON — never the page.
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     html = {"accept": "text/html"}
     r = client.get("/health", headers=html)
     assert r.headers["content-type"].startswith("application/json")
     assert set(r.json()) == {"status", "version"}
     # Once signed in, the same request renders the in-shell page.
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     r = client.get("/health", headers=html)
     assert r.headers["content-type"].startswith("text/html")
     assert "System health" in r.text
@@ -142,7 +142,7 @@ def test_health_html_page_only_for_authenticated_browsers(conn, settings):
 
 def test_security_headers_on_401(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     r = client.get("/api/status")  # 401, an early-return path
     assert r.status_code == 401
@@ -157,9 +157,9 @@ def test_security_headers_on_401(conn, settings):
 
 def test_html_no_store_only_when_auth_enabled(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     # Personal HTML pages must not outlive the session in a cache…
     assert client.get("/").headers.get("Cache-Control") == "no-store"
     # …but JSON API responses keep their exact header set (CLI/menu bar contract).
@@ -168,7 +168,7 @@ def test_html_no_store_only_when_auth_enabled(conn, settings):
 
 def test_login_next_roundtrip(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     # Unauthenticated page request → login redirect remembering the target.
     r = client.get("/timeline?q=x", follow_redirects=False)
@@ -180,7 +180,7 @@ def test_login_next_roundtrip(conn, settings):
     # API paths still get JSON 401s, never redirects.
     assert client.get("/api/status", follow_redirects=False).status_code == 401
     # Once signed in, /login?next=… forwards to the original target.
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     r = client.get("/login", params={"next": "/timeline?q=x"}, follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/timeline?q=x"
@@ -208,7 +208,7 @@ def test_login_page_states(conn, settings):
     assert "sb auth set-password" in r.text
     assert 'name="password"' not in r.text
     # Password set: real form with native semantics + password-manager hooks.
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     r = client.get("/login")
     assert 'name="username"' in r.text and 'name="password"' in r.text
     assert 'autocomplete="username"' in r.text
@@ -220,7 +220,7 @@ def test_login_page_states(conn, settings):
     r = client.get("/login", params={"signedout": "1"})
     assert "signed out" in r.text
     # Already signed in → no dead-end form, straight home.
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     r = client.get("/login", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/"
@@ -228,7 +228,7 @@ def test_login_page_states(conn, settings):
 
 def test_form_login_fallback_no_js(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     # Wrong password: re-rendered form, inline error, username preserved.
     r = client.post("/login", data={"username": "owner", "password": "x", "next": "/timeline"})
@@ -242,7 +242,7 @@ def test_form_login_fallback_no_js(conn, settings):
     # Right password: 303 to the validated next target, session works.
     r = client.post(
         "/login",
-        data={"username": "owner", "password": "pw", "next": "/timeline"},
+        data={"username": "owner", "password": "opensesame", "next": "/timeline"},
         follow_redirects=False,
     )
     assert r.status_code == 303 and r.headers["location"] == "/timeline"
@@ -251,7 +251,7 @@ def test_form_login_fallback_no_js(conn, settings):
     client.post("/logout")
     r = client.post(
         "/login",
-        data={"username": "owner", "password": "pw", "next": "https://evil.example/"},
+        data={"username": "owner", "password": "opensesame", "next": "https://evil.example/"},
         follow_redirects=False,
     )
     assert r.headers["location"] == "/"
@@ -259,9 +259,9 @@ def test_form_login_fallback_no_js(conn, settings):
 
 def test_json_login_contract_unchanged(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
-    r = client.post("/login", json={"username": "owner", "password": "pw"})
+    r = client.post("/login", json={"username": "owner", "password": "opensesame"})
     assert r.status_code == 200 and r.json() == {"ok": True}
     assert auth.COOKIE_NAME in r.headers.get("set-cookie", "")
     assert client.post("/logout").json() == {"ok": True}
@@ -275,21 +275,21 @@ def test_json_login_contract_unchanged(conn, settings):
 
 def test_login_rate_limit_message_and_form_variant(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     for _ in range(5):
         assert client.post("/login", json={"username": "owner", "password": "x"}).status_code == 401
-    r = client.post("/login", json={"username": "owner", "password": "pw"})
+    r = client.post("/login", json={"username": "owner", "password": "opensesame"})
     assert r.status_code == 429
     assert "try again" in r.json()["detail"]
     # The no-JS form variant shows the throttle inline instead of raw JSON.
-    r = client.post("/login", data={"username": "owner", "password": "pw"})
+    r = client.post("/login", data={"username": "owner", "password": "opensesame"})
     assert r.status_code == 429 and "Too many attempts" in r.text
 
 
 def test_signout_control_only_for_cookie_sessions(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     app = create_app(settings)
     # Loopback bypasses auth entirely → no Sign out control to click.
     local = TestClient(app, client=LOOPBACK)
@@ -298,7 +298,7 @@ def test_signout_control_only_for_cookie_sessions(conn, settings):
     assert 'class="nav-signout"' not in r.text
     # A remote cookie session gets the control in the shared nav.
     remote = TestClient(app)
-    remote.post("/login", json={"username": "owner", "password": "pw"})
+    remote.post("/login", json={"username": "owner", "password": "opensesame"})
     r = remote.get("/")
     assert r.status_code == 200
     assert 'class="nav-signout"' in r.text and ">Sign out</button>" in r.text
@@ -315,9 +315,9 @@ def test_signout_control_absent_when_auth_disabled(conn, settings):
 
 def test_logout_revokes_stolen_cookie_server_side(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     stolen = client.cookies.get(auth.COOKIE_NAME)
     assert stolen
     assert client.get("/api/status").status_code == 200
@@ -327,15 +327,15 @@ def test_logout_revokes_stolen_cookie_server_side(conn, settings):
     assert client.get("/api/status").status_code == 401
     # A fresh sign-in works under the new generation.
     client.cookies.delete(auth.COOKIE_NAME)  # drop the replayed copy from the jar
-    assert client.post("/login", json={"username": "owner", "password": "pw"}).status_code == 200
+    assert client.post("/login", json={"username": "owner", "password": "opensesame"}).status_code == 200
     assert client.get("/api/status").status_code == 200
 
 
 def test_logout_revocation_survives_restart(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
-    client.post("/login", json={"username": "owner", "password": "pw"})
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
     stolen = client.cookies.get(auth.COOKIE_NAME)
     client.post("/logout")
     # A brand-new app process reads the bumped generation from app_state.
@@ -348,19 +348,132 @@ def test_unauthenticated_logout_cannot_revoke_sessions(conn, settings):
     # /logout is auth-exempt; a drive-by POST without a valid session must not
     # bump the generation and kill the owner's real sessions.
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     app = create_app(settings)
     owner = TestClient(app)
-    owner.post("/login", json={"username": "owner", "password": "pw"})
+    owner.post("/login", json={"username": "owner", "password": "opensesame"})
     assert owner.get("/api/status").status_code == 200
     drive_by = TestClient(app)
     assert drive_by.post("/logout").status_code == 200  # harmless no-op
     assert owner.get("/api/status").status_code == 200  # owner unaffected
 
 
+# --- batch 3: password policy + revocation propagation ------------------------
+
+
+def test_set_password_enforces_minimum_length(conn):
+    with pytest.raises(ValueError, match="at least 8 characters"):
+        auth.set_password(conn, "owner", "short")
+    assert not auth.has_password(conn)
+    auth.set_password(conn, "owner", "12345678")  # exactly the minimum
+    assert auth.has_password(conn)
+
+
+def test_set_password_bumps_session_generation(conn):
+    assert auth.session_generation(conn) == 0
+    auth.set_password(conn, "owner", "opensesame")
+    assert auth.session_generation(conn) == 1
+    auth.set_password(conn, "owner", "opensesame2")
+    assert auth.session_generation(conn) == 2
+
+
+def test_password_change_revokes_running_server_sessions(conn, settings, monkeypatch):
+    """An out-of-process `sb auth set-password` must sign existing sessions out
+    of a RUNNING server (via the TTL-refreshed generation), not only after a
+    restart."""
+    from secondbrain.query import api as api_mod
+
+    monkeypatch.setattr(api_mod, "SESSION_GEN_TTL_S", 0.0)  # observe immediately
+    settings.security.require_auth = True
+    auth.set_password(conn, "owner", "opensesame")
+    client = TestClient(create_app(settings))
+    client.post("/login", json={"username": "owner", "password": "opensesame"})
+    assert client.get("/api/status").status_code == 200
+    # Password change from another process (same DB) bumps the generation…
+    auth.set_password(conn, "owner", "freshpassword")
+    # …and the running server challenges the old cookie on the next request.
+    assert client.get("/api/status").status_code == 401
+    client.post("/login", json={"username": "owner", "password": "freshpassword"})
+    assert client.get("/api/status").status_code == 200
+
+
+def test_cli_revoke_sessions_bumps_generation(conn, settings, monkeypatch):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    before = auth.session_generation(conn)
+    result = CliRunner().invoke(cli.app, ["auth", "revoke-sessions"])
+    assert result.exit_code == 0, result.output
+    assert "revoked" in result.output
+    assert auth.session_generation(conn) == before + 1
+
+
+def test_cli_set_password_reports_signout_and_rejects_short(conn, settings, monkeypatch):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    result = CliRunner().invoke(
+        cli.app, ["auth", "set-password", "--password", "opensesame"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "signed out" in result.output
+    assert auth.has_password(conn)
+
+    result = CliRunner().invoke(cli.app, ["auth", "set-password", "--password", "nope"])
+    assert result.exit_code == 2
+    assert "at least 8 characters" in result.output
+
+
+def test_cli_set_password_from_env(conn, settings, monkeypatch):
+    from typer.testing import CliRunner
+
+    from secondbrain import cli
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.delenv("SB_AUTH_PASSWORD", raising=False)
+    result = CliRunner().invoke(cli.app, ["auth", "set-password", "--from-env"])
+    assert result.exit_code == 2
+    assert "SB_AUTH_PASSWORD" in result.output
+
+    monkeypatch.setenv("SB_AUTH_PASSWORD", "envpassword123")
+    result = CliRunner().invoke(cli.app, ["auth", "set-password", "--from-env"])
+    assert result.exit_code == 0, result.output
+    assert auth.authenticate(conn, settings.security.username, "envpassword123")
+
+
+def test_spoofed_forwarded_for_header_still_challenged(conn, settings):
+    """With uvicorn's proxy middleware trusting only 127.0.0.1, a REMOTE client
+    sending X-Forwarded-For: 127.0.0.1 itself must not become loopback (which
+    would bypass auth entirely)."""
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    settings.security.require_auth = True
+    auth.set_password(conn, "owner", "opensesame")
+    app = ProxyHeadersMiddleware(create_app(settings), trusted_hosts="127.0.0.1")
+
+    # Remote peer spoofing the header: challenged.
+    remote = TestClient(app, client=("100.64.0.9", 40000))
+    r = remote.get("/api/status", headers={"X-Forwarded-For": "127.0.0.1"})
+    assert r.status_code == 401
+
+    # A local reverse proxy (trusted peer) forwarding a remote client: the
+    # remote address is honoured → still challenged.
+    proxied = TestClient(app, client=LOOPBACK)
+    r = proxied.get("/api/status", headers={"X-Forwarded-For": "100.64.0.9"})
+    assert r.status_code == 401
+
+    # And the trusted proxy forwarding loopback stays loopback (auth bypassed).
+    r = proxied.get("/api/status", headers={"X-Forwarded-For": "127.0.0.1"})
+    assert r.status_code == 200
+
+
 def test_favicon_served_without_auth(conn, settings):
     settings.security.require_auth = True
-    auth.set_password(conn, "owner", "pw")
+    auth.set_password(conn, "owner", "opensesame")
     client = TestClient(create_app(settings))
     r = client.get("/favicon.ico", follow_redirects=False)
     assert r.status_code == 200  # exempt asset, no /login?next=/favicon.ico junk

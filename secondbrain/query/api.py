@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -34,6 +35,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from secondbrain import health
 from secondbrain.config import Settings, get_settings
+from secondbrain.llm.errors import llm_failure_detail
 from secondbrain.query import service
 from secondbrain.search import semantic
 from secondbrain.security import auth
@@ -49,6 +51,11 @@ _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # path/query params that reach SQL are bounded by this instead, so a fuzzed or
 # copy-mangled id fails validation cleanly (422) like any other bad input.
 _SQLITE_MAX_INT = 2**63 - 1
+
+# How long the in-process session-generation mirror may lag the stored value.
+# An out-of-process revocation (`sb auth set-password` / `sb auth
+# revoke-sessions`) takes effect within this window without a server restart.
+SESSION_GEN_TTL_S = 5.0
 
 # Friendly copy for the HTML error page (browser navigations only; API clients
 # and non-HTML callers keep the standard JSON error bodies).
@@ -306,11 +313,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     init_db(settings=settings).close()
     with db_session(settings=settings) as _c:
         secret = auth.session_secret(_c)
-        # In-process mirror of the persisted session generation. /logout bumps
-        # it to revoke every outstanding cookie at once; the stored value keeps
-        # those revocations effective across restarts (single-worker server, so
-        # a plain dict is a safe cache).
-        session_gen = {"value": auth.session_generation(_c)}
+        # TTL-cached mirror of the persisted session generation. /logout bumps
+        # it to revoke every outstanding cookie at once; the short TTL means a
+        # bump made *outside* this process (`sb auth set-password`,
+        # `sb auth revoke-sessions`) is observed within seconds instead of
+        # only after a restart (single-worker server, so a dict is safe).
+        session_gen = {
+            "value": auth.session_generation(_c),
+            "read_at": time.monotonic(),
+        }
+
+    def _current_generation() -> int:
+        now = time.monotonic()
+        if now - session_gen["read_at"] > SESSION_GEN_TTL_S:
+            with db_session(settings=settings) as conn:
+                session_gen["value"] = auth.session_generation(conn)
+            session_gen["read_at"] = now
+        return session_gen["value"]
 
     # Embed any transcripts recorded before vector indexing existed (or while
     # the embedding backend was broken) so natural-language questions can
@@ -339,7 +358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _cookie_user(request: Request) -> str | None:
         """Username from a valid, current-generation session cookie (else None)."""
         cookie = request.cookies.get(auth.COOKIE_NAME, "")
-        return auth.verify_cookie(cookie, secret, generation=session_gen["value"])
+        return auth.verify_cookie(cookie, secret, generation=_current_generation())
 
     def _authed(request: Request) -> bool:
         """Whether the caller may see privileged detail (mirrors the auth gate)."""
@@ -556,7 +575,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 username,
                 secret,
                 settings.security.session_max_age_days,
-                generation=session_gen["value"],
+                generation=_current_generation(),
             ),
             max_age=settings.security.session_max_age_days * 86400,
             httponly=True,
@@ -574,6 +593,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.security.require_auth and _cookie_user(request) is not None:
             with db() as conn:
                 session_gen["value"] = auth.bump_session_generation(conn)
+                session_gen["read_at"] = time.monotonic()
         resp = JSONResponse({"ok": True})
         resp.delete_cookie(auth.COOKIE_NAME)
         return resp
@@ -603,14 +623,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with db() as conn:
             return service.corpus_stats(conn)
 
+    def _speaker_param(value: str | None, name: str = "speaker") -> int | None:
+        """'' = no filter; anything else must be a plausible numeric voice id."""
+        if not value:
+            return None
+        # Upper bound too: ids beyond SQLite's 64-bit range would raise
+        # OverflowError inside the driver (a 500) instead of a clean 422.
+        if not value.isdigit() or not 1 <= int(value) <= _SQLITE_MAX_INT:
+            raise HTTPException(422, f"{name} must be a numeric speaker id")
+        return int(value)
+
     @app.get("/api/search")
     def api_search(
         q: str = Query(..., min_length=1),
         limit: int = Query(20, ge=1, le=200),
         mode: str = Query("auto", pattern="^(auto|fulltext|semantic)$"),
+        scope: str = Query("transcripts", pattern="^(transcripts|decisions)$"),
         since: str | None = Query(None),
         until: str | None = Query(None),
         speaker: str | None = Query(None),
+        not_speaker: str | None = Query(None),
     ):
         # Same date contract as /api/day: empty string means "no filter" (a
         # cleared form field), anything else must be a real day — silently
@@ -622,35 +654,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Speaker follows the same contract: '' = no filter; anything else must
         # be a real voice — a stale id silently matching nothing would read as
         # "no results".
-        speaker_id: int | None = None
-        if speaker:
-            # Upper bound too: ids beyond SQLite's 64-bit range would raise
-            # OverflowError inside the driver (a 500) instead of a clean 422.
-            if not speaker.isdigit() or not 1 <= int(speaker) <= _SQLITE_MAX_INT:
-                raise HTTPException(422, "speaker must be a numeric speaker id")
-            speaker_id = int(speaker)
+        speaker_id = _speaker_param(speaker)
+        not_speaker_id = _speaker_param(not_speaker, "not_speaker")
         with db() as conn:
+            if scope == "decisions":
+                # Decisions & commitments scope: full-text over extracted
+                # decision/action-item text, with provenance for deep-linking.
+                results = service.search_edges(conn, q, limit=limit, settings=settings)
+                return {
+                    "query": q,
+                    "mode": mode,
+                    "scope": "decisions",
+                    "results": results,
+                    "count": len(results),
+                    "limit": limit,
+                }
             if speaker_id is not None:
                 if service.speaker_label_for(conn, speaker_id) is None:
                     raise HTTPException(
                         422, "that speaker doesn't exist — it may have been merged or removed"
                     )
                 speaker_id = service.resolve(conn, speaker_id)  # merge-safe canonical id
+            if not_speaker_id is not None:
+                if service.speaker_label_for(conn, not_speaker_id) is None:
+                    raise HTTPException(
+                        422, "that speaker doesn't exist — it may have been merged or removed"
+                    )
+                not_speaker_id = service.resolve(conn, not_speaker_id)
             results = service.search(
-                conn, q, limit, mode, settings, since=since, until=until, speaker=speaker_id
+                conn, q, limit, mode, settings, since=since, until=until,
+                speaker=speaker_id, not_speaker=not_speaker_id,
+            )
+            total = service.search_total(
+                conn, q, since=since, until=until, speaker=speaker_id,
+                not_speaker=not_speaker_id, settings=settings,
             )
             # Lets the UI explain an empty result honestly (e.g. "semantic
             # search isn't available on this machine" instead of "no matches").
             sem_ok = semantic.is_available(conn, settings)
+            sem_index = semantic.index_status(conn, settings)
         return {
             "query": q,
             "mode": mode,
+            "scope": "transcripts",
             "results": results,
             "count": len(results),
+            # Corpus-wide keyword match count (capped at 1000) so the UI can
+            # say "Showing 50 of ~340"; semantic-only extras aren't counted.
+            "total": max(total, len(results)),
+            "total_capped": total >= 1000,
             "limit": limit,
             "semantic_available": sem_ok,
-            # Additive: the (merge-resolved) speaker filter that was applied.
+            # Embedding coverage + index/config model agreement (additive).
+            "semantic_index": sem_index,
+            # Additive: the (merge-resolved) speaker filters that were applied.
             "speaker": speaker_id,
+            "not_speaker": not_speaker_id,
         }
 
     @app.get("/api/day/{day}")
@@ -1009,6 +1068,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_reassign_segment(
         segment_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         speaker_id: int = Body(..., embed=True, ge=1, le=_SQLITE_MAX_INT),
+        # Default ON: the correction flows to the other non-locked lines of the
+        # same diarized turn. Pass false to correct just this one line.
+        propagate: bool = Body(True, embed=True),
     ):
         with db() as conn:
             seg = service.get_segment(conn, segment_id)
@@ -1022,7 +1084,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # but the API must enforce it too).
             if service.is_opted_out(conn, speaker_id, settings):
                 raise HTTPException(403, "speaker opted out")
-            ok = service.reassign_segment(conn, segment_id, speaker_id, settings)
+            ok = service.reassign_segment(
+                conn, segment_id, speaker_id, settings, propagate=propagate
+            )
             if not ok:
                 raise HTTPException(404, "segment not found")
         # Extra fields are additive; "ok" keeps its original shape for the CLI.
@@ -1285,12 +1349,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try_first = "What did I talk about yesterday?"
             else:
                 try_first = "What have I talked about recently?"
+            # Voices for the optional chat scope filter (same rules as the
+            # search speaker filter: only people with lines, never opted-out).
+            speakers = [
+                s for s in service.list_speakers(conn)
+                if not s["opted_out"] and (s["segment_count"] or 0) > 0
+            ]
         return templates.TemplateResponse(
             request,
             "chat.html",
             {
                 "seg_count": seg_count["n"] if seg_count else 0,
                 "try_first": try_first,
+                "speakers": speakers,
                 "llm_model": settings.llm.model,
                 # The client aborts a little after the server would give up, so
                 # a wedged model can never leave the page spinning forever.
@@ -1313,38 +1384,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _llm_failure_detail(exc: Exception) -> str | None:
         """Human-readable message for an Ollama transport failure, else None."""
-        import httpx
+        return llm_failure_detail(exc, settings)
 
-        if isinstance(exc, httpx.ConnectError):
-            return (
-                "Couldn't reach the local model — is Ollama running? "
-                f"(expected at {settings.llm.host})"
-            )
-        if isinstance(exc, httpx.TimeoutException):
-            return (
-                f"The local model didn't answer within {int(settings.llm.request_timeout_s)}s. "
-                "It may be busy loading — try again, or ask a simpler question."
-            )
-        if isinstance(exc, httpx.HTTPStatusError):
-            hint = (
-                f" Model '{settings.llm.model}' may not be pulled — try `ollama pull "
-                f"{settings.llm.model}`." if exc.response.status_code == 404 else ""
-            )
-            return f"The local model returned an error (HTTP {exc.response.status_code}).{hint}"
-        return None
+    def _ask_scope(speaker_id: int | None, since: str | None, until: str | None) -> dict:
+        """Validate the optional chat retrieval scope (mirrors /api/search)."""
+        since, until = since or None, until or None
+        for name, value in (("since", since), ("until", until)):
+            if value is not None and _parse_day(value) is None:
+                raise HTTPException(422, f"{name} must be a date like 2026-07-02 (YYYY-MM-DD)")
+        return {"speaker_id": speaker_id, "since": since, "until": until}
 
     @app.post("/api/ask")
     def api_ask(
         question: str = Body(..., embed=True, min_length=1, max_length=4000),
         history: list[dict] | None = Body(None, embed=True),
+        speaker_id: int | None = Body(None, embed=True, ge=1, le=_SQLITE_MAX_INT),
+        since: str | None = Body(None, embed=True),
+        until: str | None = Body(None, embed=True),
     ):
         question = question.strip()
         if not question:
             raise HTTPException(400, "question is empty")
         turns = _clean_history(history)
+        scope = _ask_scope(speaker_id, since, until)
         try:
             with db() as conn:
-                return service.ask(conn, question, settings, history=turns)
+                return service.ask(conn, question, settings, history=turns, **scope)
         except Exception as e:
             detail = _llm_failure_detail(e)
             if detail is None:
@@ -1355,6 +1420,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_ask_stream(
         question: str = Body(..., embed=True, min_length=1, max_length=4000),
         history: list[dict] | None = Body(None, embed=True),
+        speaker_id: int | None = Body(None, embed=True, ge=1, le=_SQLITE_MAX_INT),
+        since: str | None = Body(None, embed=True),
+        until: str | None = Body(None, embed=True),
     ):
         """Streaming variant of /api/ask used by the web chat (NDJSON lines:
         {"event":"delta","text":…}* then {"event":"done","result":<ask payload>},
@@ -1370,6 +1438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not q:
             raise HTTPException(400, "question is empty")
         turns = _clean_history(history)
+        scope = _ask_scope(speaker_id, since, until)
 
         async def gen():
             def line(obj: dict) -> str:
@@ -1379,7 +1448,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # Retrieval is quick (SQLite); the connection is released before
                 # the minutes-long generation starts.
                 with db() as conn:
-                    prep = chat.prepare(conn, q, settings=settings, history=turns)
+                    sid = (
+                        service.resolve(conn, scope["speaker_id"])
+                        if scope["speaker_id"] is not None
+                        else None
+                    )
+                    prep = chat.prepare(
+                        conn, q, settings=settings, history=turns,
+                        speaker_id=sid, since=scope["since"], until=scope["until"],
+                    )
                 llm = get_llm(settings)
                 parts: list[str] = []
                 async for piece in llm.astream(
@@ -1423,16 +1500,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         q = q.strip()
         node_type = node_type or None  # "" ≡ omitted: no type filter
         with db() as conn:
-            nodes = service.graph_search(conn, q, limit, offset, node_type=node_type)
-            total = service.graph_search_total(conn, q, node_type=node_type)
+            # Rows + total come from one pass (window function) so the WHERE
+            # clause is evaluated once per request, not once for rows and
+            # again for the count.
+            nodes, total = service.graph_search_with_total(
+                conn, q, limit, offset, node_type=node_type
+            )
             unfiltered = not q and node_type is None
             node_total = total if unfiltered else service.graph_search_total(conn, "")
         return {"nodes": nodes, "total": total, "node_total": node_total, "offset": offset}
 
     @app.get("/api/graph/node/{node_id}")
-    def api_graph_node(node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
+    def api_graph_node(
+        node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        per_kind: int = Query(30, ge=1, le=200),
+        kind: str | None = Query(
+            None, pattern="^(fact|decision|action_item|idea|mention)?$"
+        ),
+        kind_offset: int = Query(0, ge=0, le=1_000_000_000),
+    ):
+        """One node with per-kind-paged edges (most recent first). ``kind`` +
+        ``kind_offset`` fetch one kind's next page for the UI's "show more";
+        ``kind_totals`` reports full counts either way."""
         with db() as conn:
-            node = service.graph_node(conn, node_id, settings)
+            node = service.graph_node(
+                conn, node_id, settings,
+                per_kind=per_kind, kind=kind or None, kind_offset=kind_offset,
+            )
         if node is None:
             raise HTTPException(
                 404,
@@ -1440,6 +1534,199 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "it may have been merged into another or forgotten.",
             )
         return node
+
+    @app.post("/api/graph/nodes/{node_id}/merge")
+    def api_graph_merge(
+        node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        into_id: int = Body(..., embed=True, ge=1, le=_SQLITE_MAX_INT),
+    ):
+        """Merge one graph entity into another (duplicates from imperfect
+        entity resolution). Edges/aliases move; the merged node's name stays
+        findable as an alias — mirrors the speaker merge."""
+        from secondbrain.knowledge import graph as kg
+
+        with db() as conn:
+            src = kg.get_node(conn, kg.resolve_node_id(conn, node_id))
+            dst = kg.get_node(conn, kg.resolve_node_id(conn, into_id))
+            if src is None or dst is None:
+                raise HTTPException(404, "entity not found — it may have been removed")
+            if src["id"] == dst["id"]:
+                raise HTTPException(400, "those are already the same entity")
+            try:
+                moved = kg.merge_nodes(conn, int(src["id"]), int(dst["id"]))
+            except ValueError as exc:  # cycle guard
+                raise HTTPException(400, str(exc)) from None
+        return {
+            "ok": True,
+            "moved_edges": moved,
+            "into": {"id": dst["id"], "label": dst["display_label"] or dst["name"]},
+        }
+
+    @app.post("/api/graph/nodes/{node_id}/rename")
+    def api_graph_rename(
+        node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        name: str = Body(..., embed=True),
+    ):
+        """Set the display label shown for an entity (the stored heard name is
+        kept for matching — mirrors the person rename)."""
+        from secondbrain.knowledge import graph as kg
+
+        name = name.strip()
+        if not name:
+            raise HTTPException(400, "name can't be empty")
+        if len(name) > 120:
+            raise HTTPException(400, "name too long (max 120 characters)")
+        with db() as conn:
+            nid = kg.resolve_node_id(conn, node_id)
+            if kg.get_node(conn, nid) is None:
+                raise HTTPException(404, "entity not found — it may have been removed")
+            kg.rename_node(conn, nid, name)
+        return {"ok": True, "id": nid, "label": name}
+
+    @app.post("/api/graph/nodes/{node_id}/aliases/{alias_id}/remove")
+    def api_graph_remove_alias(
+        node_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        alias_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+    ):
+        """Detach a wrong/generic alias from an entity (aliases drive search
+        matching, so a bad one makes unrelated queries surface the entity)."""
+        from secondbrain.knowledge import graph as kg
+
+        with db() as conn:
+            nid = kg.resolve_node_id(conn, node_id)
+            if not kg.remove_alias(conn, nid, alias_id):
+                raise HTTPException(404, "alias not found on that entity")
+        return {"ok": True}
+
+    @app.post("/api/graph/edges/{edge_id}/invalidate")
+    def api_graph_invalidate_edge(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
+        """Mark an extracted fact/decision/mention/action item as wrong (soft:
+        valid=0, never deleted — /revalidate undoes it). Generalizes the
+        action-item dismiss to every correctable edge kind."""
+        with db() as conn:
+            if not service.invalidate_edge(conn, edge_id):
+                raise HTTPException(404, "edge not found — it may have been removed")
+        return {"ok": True, "edge_id": edge_id, "valid": False}
+
+    @app.post("/api/graph/edges/{edge_id}/revalidate")
+    def api_graph_revalidate_edge(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
+        """Undo /invalidate (the UI's short undo window calls this)."""
+        with db() as conn:
+            if not service.revalidate_edge(conn, edge_id):
+                raise HTTPException(404, "edge not found — it may have been removed")
+        return {"ok": True, "edge_id": edge_id, "valid": True}
+
+    @app.post("/api/conversations/{conversation_id}/reextract")
+    def api_reextract_conversation(
+        conversation_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+    ):
+        """Clear a conversation's extracted knowledge and queue a re-run (e.g.
+        after fixing speakers or upgrading the model). Keeps user-invalidated
+        edges suppressed and already-promoted tasks; see
+        service.reextract_conversation for exactly what is kept."""
+        with db() as conn:
+            res = service.reextract_conversation(conn, conversation_id)
+        if res is None:
+            raise HTTPException(404, "conversation not found")
+        return {"ok": True, **res}
+
+    # --- decision tracking (Phase 11) ----------------------------------------
+
+    def _decision_filters_or_422(
+        since: str | None, until: str | None, node: str | None
+    ) -> tuple[str | None, str | None, int | None]:
+        since, until = since or None, until or None
+        for name, value in (("since", since), ("until", until)):
+            if value is not None and _parse_day(value) is None:
+                raise HTTPException(422, f"{name} must be a date like 2026-07-02 (YYYY-MM-DD)")
+        node_id: int | None = None
+        if node:
+            if not node.isdigit() or not 1 <= int(node) <= _SQLITE_MAX_INT:
+                raise HTTPException(422, "node must be a numeric entity id")
+            node_id = int(node)
+        return since, until, node_id
+
+    @app.get("/api/decisions")
+    def api_decisions(
+        q: str | None = Query(None, max_length=200),
+        since: str | None = Query(None),
+        until: str | None = Query(None),
+        node: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0, le=1_000_000_000),
+    ):
+        """Decisions heard in conversations, newest first, with subject,
+        provenance and supersede chain. Filters: q (full-text over the
+        decision text), since/until (local days), node (entity id)."""
+        since, until, node_id = _decision_filters_or_422(since, until, node)
+        q = (q or "").strip() or None
+        with db() as conn:
+            decisions = service.list_decisions(
+                conn, q=q, since=since, until=until, node_id=node_id,
+                limit=limit, offset=offset, settings=settings,
+            )
+            total = service.count_decisions(
+                conn, q=q, since=since, until=until, node_id=node_id
+            )
+        return {
+            "decisions": decisions,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/decisions", response_class=HTMLResponse)
+    def decisions_page(
+        request: Request,
+        q: str = Query("", max_length=200),
+        since: str = Query(""),
+        until: str = Query(""),
+        node: str = Query(""),
+        offset: int = Query(0, ge=0, le=1_000_000_000),
+    ):
+        # HTML page: fall back gracefully on hand-mangled query params (the
+        # JSON API validates strictly and 422s instead).
+        q = q.strip()
+        since = since if _parse_day(since) else ""
+        until = until if _parse_day(until) else ""
+        node_id = int(node) if node.isdigit() and 1 <= int(node) <= _SQLITE_MAX_INT else None
+        page_size = 50
+        with db() as conn:
+            decisions = service.list_decisions(
+                conn, q=q or None, since=since or None, until=until or None,
+                node_id=node_id, limit=page_size, offset=offset, settings=settings,
+            )
+            total = service.count_decisions(
+                conn, q=q or None, since=since or None, until=until or None,
+                node_id=node_id,
+            )
+            node_label = service._node_label(conn, node_id) if node_id else None
+        filtered = bool(q or since or until or node_id)
+        # Query-string prefix the pager links reuse (filters preserved, offset
+        # appended by the template).
+        pairs = [("q", q), ("since", since), ("until", until),
+                 ("node", str(node_id) if node_id else "")]
+        base_qs = "".join(f"{k}={quote(v, safe='')}&" for k, v in pairs if v)
+        return templates.TemplateResponse(
+            request,
+            "decisions.html",
+            {
+                "base_qs": base_qs,
+                "decisions": decisions,
+                "total": total,
+                "q": q,
+                "since": since,
+                "until": until,
+                "node": node_id,
+                "node_label": node_label,
+                "offset": offset,
+                "page_size": page_size,
+                "filtered": filtered,
+                "prev_offset": max(offset - page_size, 0),
+                "next_offset": offset + page_size,
+                "has_more": offset + len(decisions) < total,
+            },
+        )
 
     # --- proactivity + goals (Phase 4) ---------------------------------------
 
@@ -1468,14 +1755,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 day = today
             digest = service.get_digest(conn, day, kind)
-            suggestions = service.list_suggestions(conn, day)
-            cite_meta = {c["segment_id"]: c for c in _suggestion_citation_meta(conn, suggestions)}
+            all_open = service.list_suggestions(conn, day)
+            cite_meta = {c["segment_id"]: c for c in _suggestion_citation_meta(conn, all_open)}
             for c in (digest or {}).get("citations", []):
                 cite_meta[c["segment_id"]] = c
             generating = service.digest_generating(conn)
+        suggestions, more = service.cap_suggestions(all_open, settings)
         state_payload = {
             "kind": kind, "date": day, "today": today, "dates": dates,
             "digest": digest, "suggestions": suggestions,
+            # everything below the display cut — persisted, revealed by the
+            # page's "show N more" without another generation run
+            "more": more,
             # per-kind started-at of an in-flight generate run, so the page can
             # resume its progress line after a reload instead of going silent
             "generating": generating,
@@ -1484,8 +1775,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "brief.html",
-            {"digest": digest, "suggestions": suggestions, "kind": kind,
-             "date": day, "today": today, "state": state_payload},
+            {"digest": digest, "suggestions": suggestions, "more_count": len(more),
+             "kind": kind, "date": day, "today": today, "state": state_payload},
         )
 
     @app.get("/api/digest")
@@ -1507,22 +1798,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_digest_generate(
         kind: str = Body("daily", embed=True), force: bool = Body(True, embed=True)
     ):
+        from secondbrain.proactive import store as pstore
         from secondbrain.proactive.engine import DigestInFlight
 
         if kind not in ("daily", "weekly"):
             raise HTTPException(422, "kind must be 'daily' or 'weekly'")
+
+        def _conflict(started_at: str | None):
+            what = "weekly review" if kind == "weekly" else "daily brief"
+            elapsed = _elapsed_s(started_at)
+            return HTTPException(
+                409,
+                f"That {what} is already being written"
+                + (f" (started {elapsed}s ago)" if elapsed is not None else "")
+                + " — it will appear here when it's done.",
+            )
+
         with db() as conn:
+            if settings.llm.backend != "mock":
+                # A real model takes minutes: enqueue on the daemon's worker
+                # (same job type it schedules) instead of blocking a request
+                # thread; the /api/digest/status poller follows the run.
+                started = pstore.generating_since(conn, kind)
+                if started:
+                    raise _conflict(started)
+                service.enqueue_digest(conn, kind)  # deduped per kind
+                return JSONResponse({"queued": True, "kind": kind}, status_code=202)
+            # Mock LLM (tests/dev): synchronous is instant and keeps the
+            # original response shape.
             try:
                 return service.generate_digest(conn, settings, kind=kind, force=force) or {}
             except DigestInFlight as exc:
-                what = "weekly review" if kind == "weekly" else "daily brief"
-                elapsed = _elapsed_s(exc.started_at)
-                raise HTTPException(
-                    409,
-                    f"That {what} is already being written"
-                    + (f" (started {elapsed}s ago)" if elapsed is not None else "")
-                    + " — it will appear here when it's done.",
-                ) from exc
+                raise _conflict(exc.started_at) from exc
 
     @app.get("/api/digest/status")
     def api_digest_status(kind: str = Query("daily", pattern="^(daily|weekly)$")):
@@ -1536,26 +1843,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         date: str = Query(None),
         status: str = Query("open", pattern="^(open|done|dismissed|snoozed)$"),
     ):
+        """Suggestions for a day. Open items are split for display: the capped
+        ``suggestions`` list plus the ``more`` overflow (revealed by the brief
+        page's "show more"); ``total`` counts both. Handled statuses are never
+        capped."""
         if date is not None and _parse_day(date) is None:
             raise HTTPException(422, "date must be a real YYYY-MM-DD date")
         with db() as conn:
             suggestions = service.list_suggestions(conn, date, status)
             citations = _suggestion_citation_meta(conn, suggestions)
-        return {"suggestions": suggestions, "citations": citations}
+        more: list = []
+        if status == "open":
+            suggestions, more = service.cap_suggestions(suggestions, settings)
+        return {
+            "suggestions": suggestions,
+            "more": more,
+            "total": len(suggestions) + len(more),
+            "citations": citations,
+        }
 
-    _SUGGESTION_ACTIONS = ("done", "dismiss", "snooze", "up", "down", "reopen")
+    _SUGGESTION_ACTIONS = (
+        "done", "dismiss", "snooze", "snooze_kind", "up", "down", "reopen"
+    )
 
     @app.post("/api/suggestions/{suggestion_id}/action")
     def api_suggestion_action(
         suggestion_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
         action: str = Body(..., embed=True),
+        days: int = Body(None, embed=True, ge=1, le=90),
     ):
         if action not in _SUGGESTION_ACTIONS:
             raise HTTPException(
                 422, f"action must be one of: {', '.join(_SUGGESTION_ACTIONS)}"
             )
         with db() as conn:
-            found = service.suggestion_action(conn, suggestion_id, action)
+            found = service.suggestion_action(
+                conn, suggestion_id, action, days=days, settings=settings
+            )
         if not found:
             raise HTTPException(404, "suggestion not found — it may have been cleaned up")
         return {"ok": True}
@@ -1708,7 +2032,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tasks = service.annotate_task_priorities(conn, service.list_tasks(conn), settings)
             note_counts = service.task_research_note_counts(conn)
             actions = service.list_action_items(conn)
-            goal_titles = {g["id"]: g["title"] for g in service.list_goals(conn)}
+            goals = service.list_goals(conn)
+            meeting_min = service.meeting_minutes_today(conn)
+        goal_titles = {g["id"]: g["title"] for g in goals}
+        suggested_cap = service.suggested_capacity(settings, meeting_min)
 
         for t in tasks:  # display-only annotations
             t.update(_due_info(t["due_date"], today))
@@ -1720,11 +2047,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Today section, everything else in Backlog / Completed.
         plan_ids = set(plan["task_ids"]) if plan else set()
         plan_tasks = [by_id[tid] for tid in plan["task_ids"] if tid in by_id] if plan else []
+        if plan:
+            for t in plan_tasks:
+                # Big-rock flag: a planned task bigger than the whole capacity
+                # can't be "fitted" — say so instead of pretending.
+                t["wont_fit"] = (
+                    (t["estimate_minutes"] or _DEFAULT_TASK_MINUTES)
+                    > plan["capacity_minutes"]
+                )
         open_tasks = [
             t for t in tasks
             if t["status"] not in ("done", "dropped") and t["id"] not in plan_ids
         ]
         open_tasks.sort(key=lambda t: t["priority_score"], reverse=True)
+        # Sub-tasks group under their (open, on-page) parent instead of
+        # rendering as flat siblings; orphans stay top-level.
+        open_ids = {t["id"] for t in open_tasks}
+        children: dict[int, list[dict]] = {}
+        roots = []
+        for t in open_tasks:
+            pid = t.get("parent_task_id")
+            if pid and pid in open_ids:
+                children.setdefault(pid, []).append(t)
+            else:
+                roots.append(t)
+        backlog_tree = [(t, children.get(t["id"], [])) for t in roots]
         completed = [
             t for t in tasks
             if t["status"] in ("done", "dropped") and t["id"] not in plan_ids
@@ -1732,25 +2079,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         completed.sort(key=lambda t: t["completed_at"] or t["updated_at"] or "", reverse=True)
         for a in actions:
             a["detected_label"] = _rel_ago(a["first_seen"])
-            a.update(_due_info(a["due_date"], today))
+            # Overdue/labels prefer the ISO date normalized at extraction time
+            # ("March 3" → 2026-03-03); the raw spoken string stays displayed.
+            a.update(_due_info(a.get("due_date_norm") or a["due_date"], today))
+        # Commitments surface with direction: what you owe vs what you're owed.
+        actions_owed_by = [a for a in actions if a["owed_direction"] == "owed_by_me"]
+        actions_owed_to = [a for a in actions if a["owed_direction"] == "owed_to_me"]
+        actions_other = [a for a in actions if a["owed_direction"] == "other"]
 
         d = _parse_day(today)
         n_open_total = sum(1 for t in tasks if t["status"] not in ("done", "dropped"))
+        planned_minutes = sum(
+            t["estimate_minutes"] or _DEFAULT_TASK_MINUTES for t in plan_tasks
+        )
         return templates.TemplateResponse(
             request,
             "tasks.html",
             {
                 "plan": plan,
                 "plan_tasks": plan_tasks,
-                "plan_done": sum(1 for t in plan_tasks if t["status"] == "done"),
-                "planned_minutes": sum(
-                    t["estimate_minutes"] or _DEFAULT_TASK_MINUTES for t in plan_tasks
-                ),
+                "planned_minutes": planned_minutes,
+                "over_capacity": bool(plan) and planned_minutes > plan["capacity_minutes"],
+                "n_no_estimate": sum(1 for t in plan_tasks if not t["estimate_minutes"]),
                 "open_tasks": open_tasks,
+                "backlog_tree": backlog_tree,
                 "completed": completed,
                 "actions": actions,
+                "actions_owed_by": actions_owed_by,
+                "actions_owed_to": actions_owed_to,
+                "actions_other": actions_other,
                 "n_open_total": n_open_total,
                 "default_capacity": settings.tasks.daily_capacity_minutes,
+                "meeting_minutes": meeting_min,
+                "suggested_capacity": suggested_cap,
+                # Goal selector options on the add/edit forms (active first).
+                "goal_options": [
+                    {"id": g["id"], "title": g["title"]}
+                    for g in goals if g["status"] in ("active", "paused")
+                ],
                 "today_label": f"{d.strftime('%A')} {d.day} {d.strftime('%B')}" if d else today,
                 # Config-gated: when on, task rows also offer "Research (web)".
                 "web_research_enabled": settings.tasks.web_research_enabled,
@@ -1772,7 +2138,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         detail: str = Body(None, max_length=4000),
                         estimate_minutes: int = Body(None, ge=1, le=1440),
                         value: int = Body(3, ge=1, le=5),
-                        effort: int = Body(3, ge=1, le=5), due_date: str = Body(None)):
+                        effort: int = Body(3, ge=1, le=5), due_date: str = Body(None),
+                        energy: str = Body(None, max_length=40)):
         title = title.strip()
         if not title:
             raise HTTPException(422, "title can't be empty")
@@ -1783,7 +2150,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tid = service.create_task(conn, title=title, goal_id=goal_id,
                                       detail=(detail or "").strip() or None,
                                       estimate_minutes=estimate_minutes, value=value,
-                                      effort=effort, due_date=due_date)
+                                      effort=effort, due_date=due_date,
+                                      energy=(energy or "").strip() or None)
         return {"id": tid}
 
     @app.patch("/api/tasks/{task_id}")
@@ -1795,9 +2163,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         due_date: str = Body(None),
         value: int = Body(None, ge=1, le=5),
         effort: int = Body(None, ge=1, le=5),
+        goal_id: int = Body(None, ge=0, le=_SQLITE_MAX_INT),
+        energy: str = Body(None, max_length=40),
     ):
-        """Edit a task in place (fix a typo, set a due date/estimate). Omitted
-        fields are unchanged; empty-string due_date and estimate 0 clear them."""
+        """Edit a task in place (fix a typo, set a due date/estimate, link a
+        goal, tag energy). Omitted fields are unchanged; empty-string due_date
+        / energy, estimate 0 and goal_id 0 clear them."""
         fields: dict = {}
         if title is not None:
             title = title.strip()
@@ -1814,10 +2185,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             fields["value"] = value
         if effort is not None:
             fields["effort"] = effort
+        if goal_id is not None:
+            fields["goal_id"] = goal_id or None  # 0 clears
+        if energy is not None:
+            fields["energy"] = energy.strip() or None  # '' clears
         if not fields:
             raise HTTPException(422, "nothing to update — send at least one field")
         with db() as conn:
             _task_or_404(conn, task_id)
+            if fields.get("goal_id") and service.get_goal(conn, fields["goal_id"]) is None:
+                raise HTTPException(404, "goal not found — it may have been deleted")
             service.update_task(conn, task_id, **fields)
             task = service.annotate_task_priorities(
                 conn, [service.get_task(conn, task_id)], settings
@@ -1888,11 +2265,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"task_id": task_id, "notes": notes}
 
     @app.post("/api/actions/{edge_id}/promote")
-    def api_promote_action(edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT)):
+    def api_promote_action(
+        edge_id: int = PathParam(ge=1, le=_SQLITE_MAX_INT),
+        chase: bool = Body(False, embed=True),
+    ):
         """Turn a detected conversation action item into a backlog task
-        (idempotent — promoting twice returns the same task)."""
+        (idempotent — promoting twice returns the same task). With ``chase``
+        (for items owed TO you) the task becomes a follow-up with the
+        counterparty instead of copying their work into your backlog."""
         with db() as conn:
-            tid = service.promote_action_item(conn, edge_id)
+            tid = service.promote_action_item(conn, edge_id, chase=chase)
             if tid is None:
                 raise HTTPException(
                     404, "action item not found — it may have been superseded or forgotten"
@@ -1932,9 +2314,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         capacity_minutes: int = Body(None, embed=True, ge=15, le=1440),
         task_id: int = Body(None, embed=True, ge=1, le=_SQLITE_MAX_INT),
     ):
-        if action not in ("propose", "accept", "remove_task"):
-            raise HTTPException(422, "action must be 'propose', 'accept' or 'remove_task'")
+        if action not in ("propose", "accept", "remove_task", "add_task"):
+            raise HTTPException(
+                422, "action must be 'propose', 'accept', 'remove_task' or 'add_task'"
+            )
         with db() as conn:
+            if action == "add_task":
+                # "Do today": pin one task into the current plan (creating a
+                # proposed plan if the day has none yet).
+                if task_id is None:
+                    raise HTTPException(422, "task_id is required to add a task")
+                task = service.get_task(conn, task_id)
+                if task is None:
+                    raise HTTPException(404, "task not found — it may have been removed")
+                if task["status"] in ("done", "dropped"):
+                    raise HTTPException(409, "that task is already finished")
+                return _plan_envelope(service.add_to_day(conn, task_id, settings=settings))
             if action == "accept":
                 plan = service.get_day(conn)
                 if plan is None:

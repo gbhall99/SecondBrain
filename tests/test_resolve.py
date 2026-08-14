@@ -144,3 +144,108 @@ def test_merge_nodes_repoints_and_resolves(conn):
     assert conn.execute("SELECT COUNT(*) AS n FROM kg_edges WHERE src_node_id=?", (dst,)).fetchone()["n"] == 1
     aliases = [r["alias"] for r in conn.execute("SELECT alias FROM kg_aliases WHERE node_id=?", (dst,)).fetchall()]
     assert "Bobby" in aliases
+
+
+def test_generic_and_short_aliases_are_not_attached(conn, settings):
+    got = resolve.resolve_entity(
+        conn,
+        _ent("Atlas", type="project",
+             aliases=["the team", "AT", "me", "Project Atlas", "everyone"]),
+        extraction_id=None, when="2026-06-16T09:00:00.000Z", settings=settings,
+    )
+    aliases = {
+        r["alias"]
+        for r in conn.execute("SELECT alias FROM kg_aliases WHERE node_id=?", (got,)).fetchall()
+    }
+    assert "Project Atlas" in aliases          # specific alias kept
+    assert "Atlas" in aliases                  # the entity's own name always kept
+    assert not {"the team", "AT", "me", "everyone"} & aliases
+
+
+def test_alias_ok_gate():
+    assert resolve.alias_ok("Project Atlas") is True
+    assert resolve.alias_ok("ab") is False        # too short
+    assert resolve.alias_ok("the team") is False  # stoplisted
+    assert resolve.alias_ok("Everyone") is False
+    assert resolve.alias_ok("Bob") is True
+
+
+def test_candidates_cache_loads_once_per_type(conn, settings, monkeypatch):
+    from secondbrain.search import semantic
+
+    class FakeEmb:
+        def encode(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(semantic, "get_embedder", lambda *_a, **_k: FakeEmb())
+    graph.create_node(conn, type="topic", name="Caching", embedding=[1.0, 0.0],
+                      confidence=0.9, extraction_id=None)
+    calls = {"n": 0}
+    real = graph.candidates
+
+    def counting(conn_, node_type):
+        calls["n"] += 1
+        return real(conn_, node_type)
+
+    monkeypatch.setattr(resolve.graph, "candidates", counting)
+    cache: dict = {}
+    when = "2026-06-16T09:00:00.000Z"
+    for name in ("Memoization", "Result reuse", "Cache warming"):
+        resolve.resolve_entity(conn, _ent(name, type="topic"), extraction_id=None,
+                               when=when, settings=settings, cache=cache)
+    assert calls["n"] == 1  # loaded once, reused for the rest of the run
+
+
+def test_candidates_cache_invalidated_when_node_created(conn, settings, monkeypatch):
+    from secondbrain.search import semantic
+
+    # Embeddings are orthogonal per name → nothing matches, every entity
+    # creates a node, and each creation must invalidate the type's cache.
+    vecs = {"A": [1.0, 0.0, 0.0], "B": [0.0, 1.0, 0.0], "C": [0.0, 0.0, 1.0]}
+
+    class FakeEmb:
+        def __init__(self):
+            self.next = None
+
+        def encode(self, texts):
+            return [vecs[t[0]] for t in texts]
+
+    monkeypatch.setattr(semantic, "get_embedder", lambda *_a, **_k: FakeEmb())
+    cache: dict = {}
+    when = "2026-06-16T09:00:00.000Z"
+    a = resolve.resolve_entity(conn, _ent("Alpha", type="topic"), extraction_id=None,
+                               when=when, settings=settings, cache=cache)
+    # After creating Alpha the cache for 'topic' was dropped, so an identical
+    # later mention (same embedding) can find it again through candidates.
+    b = resolve.resolve_entity(conn, _ent("Aleph", type="topic"), extraction_id=None,
+                               when=when, settings=settings, cache=cache)
+    assert a == b  # same leading letter → same vector → matched via candidates
+
+
+def test_resolve_node_id_cycle_returns_entry_node(conn):
+    a = graph.create_node(conn, type="person", name="A", embedding=None,
+                          confidence=0.9, extraction_id=None)
+    b = graph.create_node(conn, type="person", name="B", embedding=None,
+                          confidence=0.9, extraction_id=None)
+    # Manufacture a corrupt merged_into cycle (merge_nodes itself refuses this).
+    conn.execute("UPDATE kg_nodes SET merged_into=? WHERE id=?", (b, a))
+    conn.execute("UPDATE kg_nodes SET merged_into=? WHERE id=?", (a, b))
+    assert graph.resolve_node_id(conn, a) == a  # the entry node, deterministic
+    assert graph.resolve_node_id(conn, b) == b
+
+
+def test_rename_and_remove_alias_helpers(conn):
+    nid = graph.create_node(conn, type="project", name="atlas", embedding=None,
+                            confidence=0.9, extraction_id=None)
+    graph.rename_node(conn, nid, "Atlas (platform)")
+    row = conn.execute("SELECT name, display_label FROM kg_nodes WHERE id=?", (nid,)).fetchone()
+    assert row["display_label"] == "Atlas (platform)" and row["name"] == "atlas"
+    graph.add_alias(conn, nid, "The Platform")
+    alias_id = conn.execute(
+        "SELECT id FROM kg_aliases WHERE node_id=? AND alias='The Platform'", (nid,)
+    ).fetchone()["id"]
+    assert graph.remove_alias(conn, nid, alias_id) is True
+    assert graph.remove_alias(conn, nid, alias_id) is False  # already gone
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM kg_aliases WHERE node_id=? AND alias='The Platform'", (nid,)
+    ).fetchone()["n"] == 0

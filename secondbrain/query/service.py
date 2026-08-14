@@ -59,7 +59,8 @@ def _speaker_labels(conn: sqlite3.Connection, segment_ids: list[int]) -> dict[in
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, mode: str = "auto",
            settings: Settings | None = None, since: str | None = None,
-           until: str | None = None, speaker: int | None = None) -> list[dict]:
+           until: str | None = None, speaker: int | None = None,
+           not_speaker: int | None = None) -> list[dict]:
     settings = settings or get_settings()
     # Date filters are *local* calendar days (YYYY-MM-DD) — the same bucketing
     # the /day view and the result "day" field use — converted to UTC bounds
@@ -71,16 +72,52 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, mode: str = "a
     # Merge-safe: a stale id (bookmarked URL from before a merge) still
     # finds the canonical voice's lines.
     sid = registry.resolve_speaker_id(conn, speaker) if speaker is not None else None
+    ex_sid = (
+        registry.resolve_speaker_id(conn, not_speaker) if not_speaker is not None else None
+    )
     hits = combined.search(conn, query, limit, settings=settings, mode=mode,
-                           since_utc=since_utc, until_utc=until_utc, speaker_id=sid)
+                           since_utc=since_utc, until_utc=until_utc, speaker_id=sid,
+                           exclude_speaker_id=ex_sid)
     results = [asdict(h) for h in hits]
     labels = _speaker_labels(conn, [h["segment_id"] for h in results])
-    for h in results:
+    for rank, h in enumerate(results, start=1):
         h.update(labels.get(h["segment_id"], {}))
         # Local calendar day (same bucketing as the /day view), so clients can
         # group hits by day and link straight into that day's transcript.
         h["day"] = _local_day_of(h.get("start_at"))
+        # Position in the fused ranking (1-based). `score` keeps its raw,
+        # mode-dependent scale (bm25 / distance / RRF); rank is comparable
+        # across modes so clients don't have to know which scale they got.
+        h["rank"] = rank
     return results
+
+
+def search_total(conn: sqlite3.Connection, query: str, since: str | None = None,
+                 until: str | None = None, speaker: int | None = None,
+                 not_speaker: int | None = None,
+                 settings: Settings | None = None, cap: int = 1000) -> int:
+    """Corpus-wide full-text match count for the query (capped at ``cap``), so
+    the UI can say "Showing 50 of ~340". Uses the same strict-then-relaxed
+    query logic as retrieval; semantic-only matches aren't counted (they have
+    no bounded match set)."""
+    from secondbrain.search import fulltext
+
+    settings = settings or get_settings()
+    flt = {
+        "since_utc": _local_day_utc_bounds(since)[0] if since else None,
+        "until_utc": _local_day_utc_bounds(until)[1] if until else None,
+        "speaker_id": (
+            registry.resolve_speaker_id(conn, speaker) if speaker is not None else None
+        ),
+    }
+    excluded = set(registry.opted_out_speaker_ids(conn, settings))
+    if not_speaker is not None:
+        excluded.add(registry.resolve_speaker_id(conn, not_speaker))
+    flt["exclude_speaker_ids"] = frozenset(excluded)
+    strict = fulltext.count(conn, query, cap=cap, **flt)
+    if strict >= combined._MIN_STRICT_HITS:
+        return strict
+    return max(strict, fulltext.count(conn, query, cap=cap, relaxed=True, **flt))
 
 
 def local_today() -> str:
@@ -1826,11 +1863,14 @@ def set_owner(conn: sqlite3.Connection, speaker_id: int) -> None:
 
 
 def reassign_segment(
-    conn, segment_id: int, speaker_id: int, settings: Settings | None = None
+    conn, segment_id: int, speaker_id: int, settings: Settings | None = None,
+    *, propagate: bool = True,
 ) -> bool:
     from secondbrain.speaker import correct
 
-    return correct.reassign_segment(conn, segment_id, speaker_id, settings or get_settings())
+    return correct.reassign_segment(
+        conn, segment_id, speaker_id, settings or get_settings(), propagate=propagate
+    )
 
 
 def unassign_segment(conn, segment_id: int, settings: Settings | None = None) -> bool:
@@ -1916,10 +1956,31 @@ def task_set_status(conn, task_id: int, status: str) -> None:
     store.set_status(conn, task_id, status)
 
 
-def promote_action_item(conn, edge_id: int, goal_id: int | None = None) -> int | None:
+def promote_action_item(
+    conn, edge_id: int, goal_id: int | None = None, *, chase: bool = False
+) -> int | None:
+    """Promote an action-item edge into a task. With ``chase`` (for items owed
+    TO you) the task becomes a follow-up — 'Follow up with <who>: <text>' —
+    instead of copying their work into your backlog. Idempotent per edge."""
     from secondbrain.tasks import store
 
-    return store.promote_action_item(conn, edge_id, goal_id)
+    if not chase:
+        return store.promote_action_item(conn, edge_id, goal_id)
+    row = conn.execute(
+        """
+        SELECT e.object_text, COALESCE(s.display_label, s.name) AS src_name
+        FROM kg_edges e JOIN kg_nodes s ON s.id = e.src_node_id
+        WHERE e.id=? AND e.kind='action_item'
+        """,
+        (edge_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    who = row["src_name"] or "them"
+    text = row["object_text"] or "(unspecified)"
+    return store.promote_action_item(
+        conn, edge_id, goal_id, title=f"Follow up with {who}: {text}"
+    )
 
 
 def dismiss_action_item(conn, edge_id: int) -> bool:
@@ -1979,6 +2040,27 @@ def remove_from_day(conn, task_id: int, date=None) -> dict | None:
     from secondbrain.tasks import planner
 
     return planner.remove_from_day(conn, task_id, date or local_today())
+
+
+def add_to_day(conn, task_id: int, date=None, settings: Settings | None = None) -> dict | None:
+    """Pin one task into today's plan ("Do today")."""
+    from secondbrain.tasks import planner
+
+    return planner.add_to_day(conn, task_id, date or local_today(),
+                              settings or get_settings())
+
+
+def meeting_minutes_today(conn) -> int:
+    """Minutes of recorded conversation on the local day so far."""
+    from secondbrain.tasks import planner
+
+    return planner.meeting_minutes(conn, local_today())
+
+
+def suggested_capacity(settings: Settings, meeting_min: int) -> int:
+    from secondbrain.tasks import planner
+
+    return planner.suggested_capacity(settings, meeting_min)
 
 
 def task_research(
@@ -2043,15 +2125,43 @@ def annotate_task_priorities(
     """Attach the Eisenhower ``quadrant`` and planner ``priority_score`` to each
     task dict (in place, display-only fields). These are the exact signals
     ``propose_day`` ranks by, so a backlog sorted on ``priority_score`` matches
-    what would be planned next."""
+    what would be planned next. ``priority_why`` (additive) spells out the
+    factors behind the score for the UI's why-this-rank tooltip."""
     from secondbrain.tasks import prioritize
 
     settings = settings or get_settings()
     today = datetime.strptime(local_today(), "%Y-%m-%d").date()
     for t in tasks:
-        t["quadrant"] = prioritize.quadrant(conn, t, settings, today)
-        t["priority_score"] = prioritize.score(conn, t, settings, today)
+        parts = prioritize.score_breakdown(conn, t, settings, today)
+        t["quadrant"] = parts["quadrant"]
+        t["priority_score"] = parts["score"]
+        why = (
+            f"value {parts['base']:.2f} × goal {parts['goal']:.2f} × "
+            f"{parts['quadrant']} {parts['quadrant_weight']:.2f} × "
+            f"urgency {parts['urgency']:.2f}"
+        )
+        if parts["quick_win"] > 1.0:
+            why += f" × quick win {parts['quick_win']:.2f}"
+        t["priority_why"] = f"{why} = {parts['score']:.2f}"
     return tasks
+
+
+def _owner_node_id(conn: sqlite3.Connection) -> int | None:
+    """The knowledge-graph person node bound to the owner's voice, if any."""
+    row = conn.execute(
+        """
+        SELECT n.id FROM kg_nodes n JOIN speakers sp ON sp.id = n.speaker_id
+        WHERE sp.is_owner = 1 AND n.type = 'person' AND n.merged_into IS NULL
+        ORDER BY n.id LIMIT 1
+        """
+    ).fetchone()
+    if row is not None:
+        return int(row["id"])
+    row = conn.execute(
+        "SELECT id FROM kg_nodes WHERE type='person' AND normalized_name='me' "
+        "AND merged_into IS NULL ORDER BY id LIMIT 1"
+    ).fetchone()
+    return int(row["id"]) if row else None
 
 
 def list_action_items(conn) -> list[dict]:
@@ -2060,10 +2170,20 @@ def list_action_items(conn) -> list[dict]:
     These are commitments the knowledge extractor heard in conversations
     ("I'll send the report Friday"); each can be turned into a real task with
     one tap. Edges already promoted (a task points at them via
-    ``source_edge_id``) or invalidated/superseded are excluded."""
+    ``source_edge_id``) or invalidated/superseded are excluded.
+
+    Additive fields: ``owed_direction`` (owed_by_me / owed_to_me / other,
+    computed against the owner node) with the ``counterparty`` name+node id,
+    ``due_date_norm`` (ISO date parsed at extraction time — overdue logic
+    should prefer it over the raw spoken string), and ``needs_review`` (the
+    extractor couldn't resolve who owes this — attribution is a guess)."""
+    from secondbrain.knowledge.extract import NEEDS_REVIEW_PREDICATE
+
+    owner_node = _owner_node_id(conn)
     rows = conn.execute(
         """
-        SELECT e.id, e.object_text, e.due_date, e.created_at,
+        SELECT e.id, e.object_text, e.due_date, e.due_date_norm, e.created_at,
+               e.predicate, e.src_node_id, e.dst_node_id,
                COALESCE(e.first_seen, e.created_at) AS first_seen,
                s.name AS src_name, d.name AS dst_name
         FROM kg_edges e
@@ -2071,10 +2191,276 @@ def list_action_items(conn) -> list[dict]:
         LEFT JOIN kg_nodes d ON d.id = e.dst_node_id
         WHERE e.kind = 'action_item' AND e.valid = 1
           AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.source_edge_id = e.id)
-        ORDER BY (e.due_date IS NULL), e.due_date, e.id DESC
+        ORDER BY (COALESCE(e.due_date_norm, e.due_date) IS NULL),
+                 COALESCE(e.due_date_norm, e.due_date), e.id DESC
         """
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["needs_review"] = r["predicate"] == NEEDS_REVIEW_PREDICATE
+        if owner_node is not None and r["src_node_id"] == owner_node:
+            item["owed_direction"] = "owed_by_me"
+            cp_id, cp_name = r["dst_node_id"], r["dst_name"]
+        elif owner_node is not None and r["dst_node_id"] == owner_node:
+            item["owed_direction"] = "owed_to_me"
+            cp_id, cp_name = r["src_node_id"], r["src_name"]
+        else:
+            item["owed_direction"] = "other"
+            cp_id, cp_name = r["src_node_id"], r["src_name"]
+        item["counterparty"] = (
+            {"node_id": cp_id, "name": cp_name} if cp_id is not None else None
+        )
+        out.append(item)
+    return out
+
+
+# --- decision tracking (Phase 11) ---------------------------------------------
+
+
+def _decision_filters(
+    q: str | None, since: str | None, until: str | None, node_id: int | None
+) -> tuple[list[str], list[object], str]:
+    """(WHERE clauses, params, FROM suffix) shared by list/count_decisions."""
+    from secondbrain.search import fulltext
+
+    where = ["e.valid = 1", "e.kind = 'decision'"]
+    params: list[object] = []
+    join = ""
+    if q and q.strip():
+        join = " JOIN kg_edges_fts ON kg_edges_fts.rowid = e.id"
+        where.append("kg_edges_fts MATCH ?")
+        params.append(fulltext._fts_query(q))
+    if since:
+        where.append("COALESCE(e.first_seen, e.created_at) >= ?")
+        params.append(_local_day_utc_bounds(since)[0])
+    if until:
+        where.append("COALESCE(e.first_seen, e.created_at) < ?")
+        params.append(_local_day_utc_bounds(until)[1])
+    if node_id is not None:
+        where.append("(e.src_node_id = ? OR e.dst_node_id = ?)")
+        params.extend([node_id, node_id])
+    return where, params, join
+
+
+def list_decisions(
+    conn: sqlite3.Connection,
+    q: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    node_id: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    settings: Settings | None = None,
+) -> list[dict]:
+    """Decision edges, newest first, with subject node, provenance and the
+    supersede chain.
+
+    Filters: ``q`` full-text over the decision text (kg_edges_fts), ``since``/
+    ``until`` local calendar days on the decision's conversation date, and
+    ``node_id`` (merge-resolved) for "decisions about X". Superseded decisions
+    stay listed (``is_superseded``) so history is visible, never silently
+    rewritten.
+    """
+    settings = settings or get_settings()
+    if node_id is not None:
+        node_id = _resolve_node_id(conn, node_id)
+    where, params, join = _decision_filters(q, since, until, node_id)
+    rows = conn.execute(
+        f"""
+        SELECT e.id, e.src_node_id, e.object_text, e.confidence, e.conversation_id,
+               e.source_segment_ids, e.superseded_by, e.created_at,
+               COALESCE(e.first_seen, e.created_at) AS first_seen, e.last_seen,
+               n.type AS node_type, n.speaker_id AS node_speaker_id,
+               COALESCE(n.display_label, n.name) AS node_label
+        FROM kg_edges e{join}
+        JOIN kg_nodes n ON n.id = e.src_node_id
+        WHERE {" AND ".join(where)}
+        ORDER BY COALESCE(e.first_seen, e.created_at) DESC, e.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
+    ).fetchall()
+    out: list[dict] = []
+    ids = [r["id"] for r in rows]
+    # Which of the listed decisions replaced an earlier one (batched).
+    superseded_map: dict[int, list[dict]] = {}
+    if ids:
+        ph = ",".join("?" * len(ids))
+        for r in conn.execute(
+            f"SELECT id, superseded_by, object_text FROM kg_edges "
+            f"WHERE superseded_by IN ({ph})",
+            ids,
+        ).fetchall():
+            superseded_map.setdefault(r["superseded_by"], []).append(
+                {"edge_id": r["id"], "object_text": r["object_text"]}
+            )
+    for r in rows:
+        item = _edge_provenance(conn, r)
+        item["edge_id"] = item.pop("id")
+        item["node"] = {
+            "id": item.pop("src_node_id"),
+            "label": item.pop("node_label"),
+            "type": item.pop("node_type"),
+            "speaker_id": item.pop("node_speaker_id"),
+        }
+        item["is_superseded"] = item["superseded_by"] is not None
+        item["superseded_by_day"] = None
+        item["superseded_by_text"] = None
+        if item["superseded_by"] is not None:
+            sup = conn.execute(
+                "SELECT object_text, COALESCE(first_seen, created_at) AS seen "
+                "FROM kg_edges WHERE id=?",
+                (item["superseded_by"],),
+            ).fetchone()
+            if sup:
+                item["superseded_by_day"] = _local_day_of(sup["seen"]) or (
+                    sup["seen"] or ""
+                )[:10] or None
+                item["superseded_by_text"] = sup["object_text"]
+        item["supersedes"] = superseded_map.get(item["edge_id"], [])
+        item["day"] = _local_day_of(item["first_seen"]) or (item["first_seen"] or "")[:10] or None
+        item["quotes"] = _segment_quotes(
+            conn, set(item["source_segment_ids"]), settings, limit=2
+        )
+        out.append(item)
+    return out
+
+
+def count_decisions(
+    conn: sqlite3.Connection,
+    q: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    node_id: int | None = None,
+) -> int:
+    """Total decisions matching the same filters as :func:`list_decisions`."""
+    if node_id is not None:
+        node_id = _resolve_node_id(conn, node_id)
+    where, params, join = _decision_filters(q, since, until, node_id)
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM kg_edges e{join} WHERE {' AND '.join(where)}",
+        params,
+    ).fetchone()
+    return int(row["n"])
+
+
+def search_edges(
+    conn: sqlite3.Connection,
+    q: str,
+    kinds: tuple[str, ...] = ("decision", "action_item"),
+    limit: int = 50,
+    settings: Settings | None = None,
+) -> list[dict]:
+    """Full-text search over extracted knowledge (decision/commitment text),
+    with provenance — the /api/search ``scope=decisions`` backend."""
+    from secondbrain.search import fulltext
+
+    settings = settings or get_settings()
+    kph = ",".join("?" * len(kinds))
+    rows = conn.execute(
+        f"""
+        SELECT e.id, e.kind, e.predicate, e.object_text, e.due_date, e.confidence,
+               e.conversation_id, e.source_segment_ids, e.superseded_by,
+               COALESCE(e.first_seen, e.created_at) AS first_seen, e.last_seen,
+               COALESCE(n.display_label, n.name) AS node_label,
+               n.id AS node_id, n.type AS node_type
+        FROM kg_edges e
+        JOIN kg_edges_fts ON kg_edges_fts.rowid = e.id
+        JOIN kg_nodes n ON n.id = e.src_node_id
+        WHERE e.valid = 1 AND e.kind IN ({kph}) AND kg_edges_fts MATCH ?
+        ORDER BY COALESCE(e.first_seen, e.created_at) DESC, e.id DESC
+        LIMIT ?
+        """,
+        (*kinds, fulltext._fts_query(q), limit),
+    ).fetchall()
+    out = []
+    for r in rows:
+        item = _edge_provenance(conn, r)
+        item["edge_id"] = item.pop("id")
+        item["is_superseded"] = item.pop("superseded_by") is not None
+        item["day"] = _local_day_of(item["first_seen"]) or (item["first_seen"] or "")[:10] or None
+        out.append(item)
+    return out
+
+
+# Edge kinds a user may correct ("that's wrong") from the graph UI. Soft
+# delete only — valid=0, revalidate flips it back.
+_CORRECTABLE_EDGE_KINDS = ("action_item", "fact", "decision", "mention", "idea")
+
+
+def invalidate_edge(conn: sqlite3.Connection, edge_id: int) -> bool:
+    """Soft-delete one extracted edge (fact/decision/mention/action item/idea).
+
+    Generalizes the action-item dismiss: the edge is marked invalid, never
+    deleted, so it disappears from every read surface but stays auditable and
+    can be restored via :func:`revalidate_edge`. Returns False when no such
+    correctable edge exists. Idempotent.
+    """
+    ph = ",".join("?" * len(_CORRECTABLE_EDGE_KINDS))
+    row = conn.execute(
+        f"SELECT id FROM kg_edges WHERE id=? AND kind IN ({ph})",
+        (edge_id, *_CORRECTABLE_EDGE_KINDS),
+    ).fetchone()
+    if row is None:
+        return False
+    conn.execute("UPDATE kg_edges SET valid=0 WHERE id=?", (edge_id,))
+    return True
+
+
+def revalidate_edge(conn: sqlite3.Connection, edge_id: int) -> bool:
+    """Undo :func:`invalidate_edge` (valid back to 1). Returns False when the
+    edge doesn't exist. Idempotent."""
+    row = conn.execute("SELECT id FROM kg_edges WHERE id=?", (edge_id,)).fetchone()
+    if row is None:
+        return False
+    conn.execute("UPDATE kg_edges SET valid=1 WHERE id=?", (edge_id,))
+    return True
+
+
+def reextract_conversation(conn: sqlite3.Connection, conversation_id: int) -> dict | None:
+    """Clear a conversation's extraction artifacts and re-enqueue extraction.
+
+    What is removed: this conversation's *valid* kg_edges and its
+    knowledge_extractions rows. What is kept: user-corrected edges
+    (``valid=0`` — an edge the user marked wrong must stay suppressed, not
+    resurrected by a re-run), nodes (shared across conversations; re-extraction
+    re-links to them), and tasks promoted from removed edges
+    (``tasks.source_edge_id`` is ON DELETE SET NULL, so the task survives
+    detached). Returns ``{"cleared_edges", "job_id"}`` or None when the
+    conversation doesn't exist.
+    """
+    from secondbrain.knowledge import extract
+    from secondbrain.storage.db import transaction
+
+    conv = conn.execute(
+        "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+    ).fetchone()
+    if conv is None:
+        return None
+    with transaction(conn):
+        # Un-supersede survivors first: an edge elsewhere pointing at one of
+        # the edges being deleted would violate the FK (and a vanished
+        # superseder means the old decision is current again).
+        conn.execute(
+            "UPDATE kg_edges SET superseded_by=NULL WHERE superseded_by IN "
+            "(SELECT id FROM kg_edges WHERE conversation_id=? AND valid=1)",
+            (conversation_id,),
+        )
+        cleared = conn.execute(
+            "DELETE FROM kg_edges WHERE conversation_id=? AND valid=1",
+            (conversation_id,),
+        ).rowcount
+        conn.execute(
+            "DELETE FROM knowledge_extractions WHERE conversation_id=?",
+            (conversation_id,),
+        )
+        conn.execute(
+            "UPDATE conversations SET knowledge_status='pending' WHERE id=?",
+            (conversation_id,),
+        )
+    job_id = extract.enqueue_extraction(conn, conversation_id)
+    return {"cleared_edges": int(cleared), "job_id": job_id}
 
 
 # --- knowledge graph + Q&A (Phase 3) -----------------------------------------
@@ -2085,12 +2471,19 @@ def ask(
     question: str,
     settings: Settings | None = None,
     history: list[dict] | None = None,
+    speaker_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict:
     """Grounded Q&A. ``history`` is optional prior turns [{question, answer}]
-    so follow-up questions can resolve pronouns; older callers omit it."""
+    so follow-up questions can resolve pronouns; older callers omit it.
+    ``speaker_id``/``since``/``until`` optionally scope retrieval (same
+    contract as /api/search: merge-resolved voice, local calendar days)."""
     from secondbrain.knowledge import chat
 
-    return chat.answer(conn, question, settings=settings or get_settings(), history=history)
+    sid = registry.resolve_speaker_id(conn, speaker_id) if speaker_id is not None else None
+    return chat.answer(conn, question, settings=settings or get_settings(), history=history,
+                       speaker_id=sid, since=since, until=until)
 
 
 def _graph_search_where(query: str, node_type: str | None = None) -> tuple[str, list[str]]:
@@ -2143,11 +2536,17 @@ def _matched_alias(conn: sqlite3.Connection, row: sqlite3.Row, terms: list[str])
     return None
 
 
-def graph_search(
+def graph_search_with_total(
     conn: sqlite3.Connection, query: str, limit: int = 20, offset: int = 0,
     node_type: str | None = None,
-) -> list[dict]:
-    """Nodes matching ``query`` by name or alias, most-connected first.
+) -> tuple[list[dict], int]:
+    """Nodes matching ``query`` by name or alias, most-connected first, plus
+    the total match count — computed in the same pass (a window function), so
+    the WHERE clause is evaluated once, not once for rows and again for COUNT.
+
+    Edge counts come from one aggregate over kg_edges joined in, instead of a
+    correlated per-row COUNT subquery (which re-scanned the edge table for
+    every node at browse time).
 
     ``query`` may be empty: that returns the most connected nodes overall,
     which the graph page uses as its default browse list; ``node_type``
@@ -2163,24 +2562,40 @@ def graph_search(
     rows = conn.execute(
         f"""
         SELECT id, type, name, normalized_name, display_label,
-               (SELECT COUNT(*) FROM kg_edges e
-                WHERE e.valid=1 AND (e.src_node_id=kg_nodes.id OR e.dst_node_id=kg_nodes.id))
-               AS edge_count
+               COALESCE(ec.cnt, 0) AS edge_count,
+               COUNT(*) OVER () AS _total
         FROM kg_nodes
+        LEFT JOIN (
+            SELECT node, COUNT(*) AS cnt FROM (
+                SELECT src_node_id AS node FROM kg_edges WHERE valid=1
+                UNION ALL
+                SELECT dst_node_id FROM kg_edges WHERE valid=1 AND dst_node_id IS NOT NULL
+            ) GROUP BY node
+        ) ec ON ec.node = kg_nodes.id
         WHERE {where}
         ORDER BY edge_count DESC, normalized_name ASC LIMIT ? OFFSET ?
         """,
         (*params, limit, offset),
     ).fetchall()
+    total = int(rows[0]["_total"]) if rows else graph_search_total(conn, query, node_type)
     terms = normalize_name(query).split()
     out = []
     for r in rows:
         d = dict(r)
         del d["normalized_name"]  # internal (drives matched_alias), not API payload
+        del d["_total"]
         d["label"] = r["display_label"] or r["name"]
         d["matched_alias"] = _matched_alias(conn, r, terms) if terms else None
         out.append(d)
-    return out
+    return out, total
+
+
+def graph_search(
+    conn: sqlite3.Connection, query: str, limit: int = 20, offset: int = 0,
+    node_type: str | None = None,
+) -> list[dict]:
+    """Nodes matching ``query`` (see :func:`graph_search_with_total`)."""
+    return graph_search_with_total(conn, query, limit, offset, node_type)[0]
 
 
 def graph_search_total(conn: sqlite3.Connection, query: str = "",
@@ -2250,17 +2665,44 @@ def generate_digest(conn, settings: Settings | None = None, kind: str = "daily",
 
     settings = settings or get_settings()
     d = date or _today()
+    if kind == "weekly":
+        d = engine.week_monday(d)  # one weekly row per week, keyed to its Monday
     existing = store.get_digest(conn, d, kind)
     if existing and not force:
         return existing
     return engine.run_digest(conn, settings=settings, kind=kind, date=d)
 
 
+def enqueue_digest(conn, kind: str = "daily") -> int | None:
+    """Queue digest generation on the daemon's worker (same job type it uses).
+
+    Returns the job id, or None when an equivalent job is already queued —
+    either way the /api/digest/status poller reports it as in flight.
+    """
+    from secondbrain.pipeline import queue as q
+    from secondbrain.proactive import engine
+
+    return q.enqueue(conn, engine.JOB_PROACTIVE, {"kind": kind}, dedupe_key="kind")
+
+
+def _queued_digest_job(conn, kind: str):
+    return conn.execute(
+        "SELECT started_at, scheduled_at FROM jobs "
+        "WHERE type='generate_digest' AND state IN ('pending','running') "
+        "AND json_extract(payload, '$.kind') = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (kind,),
+    ).fetchone()
+
+
 def get_digest(conn, date: str | None = None, kind: str = "daily") -> dict | None:
     from secondbrain.knowledge.chat import _CITE
-    from secondbrain.proactive import store
+    from secondbrain.proactive import engine, store
 
-    d = store.get_digest(conn, date or _today(), kind)
+    day = date or _today()
+    if kind == "weekly" and date is None:
+        day = engine.week_monday(day)  # weekly rows are keyed to their Monday
+    d = store.get_digest(conn, day, kind)
     if d is not None:
         # Additive: resolve [seg_id] markers in the summary so the UI can link
         # each citation to its moment in the day view (same shape as /api/ask).
@@ -2308,29 +2750,50 @@ def list_suggestions(conn, date: str | None = None, status: str = "open") -> lis
     return store.list_suggestions(conn, date, status)
 
 
-def suggestion_action(conn, suggestion_id: int, action: str) -> bool:
+def suggestion_action(
+    conn, suggestion_id: int, action: str, *, days: int | None = None,
+    settings: Settings | None = None,
+) -> bool:
     """Apply an action to a suggestion; False when the id doesn't exist."""
     from secondbrain.proactive import store
 
-    return store.suggestion_action(conn, suggestion_id, action)
+    settings = settings or get_settings()
+    if action in ("snooze", "snooze_kind") and days is None:
+        days = settings.proactive.snooze_default_days
+    return store.suggestion_action(conn, suggestion_id, action, days=days)
+
+
+def cap_suggestions(suggestions: list[dict], settings: Settings | None = None):
+    """(visible, overflow) display split for a ranked open-suggestion list."""
+    from secondbrain.proactive import ranking
+
+    return ranking.apply_caps(suggestions, settings or get_settings())
 
 
 def digest_generation_status(conn, kind: str = "daily") -> dict:
-    """In-flight generation marker plus today's digest stamp for ``kind``.
+    """In-flight generation marker plus the current digest stamp for ``kind``.
 
     Powers the brief page's resumable progress line: ``generating`` says a run
-    is under way (``started_at`` = its UTC start), and ``created_at`` is the
-    current stamp of today's digest row — once it moves past ``started_at``,
-    the run has landed.
+    is under way or queued (``started_at`` = its UTC start / enqueue time), and
+    ``created_at`` is the current stamp of the digest row — once it moves past
+    ``started_at``, the run has landed. Weekly digests are keyed to the week's
+    Monday.
     """
-    from secondbrain.proactive import store
+    from secondbrain.proactive import engine, store
 
     today = _today()
+    digest_day = engine.week_monday(today) if kind == "weekly" else today
     started = store.generating_since(conn, kind)
-    d = store.get_digest(conn, today, kind)
+    if started is None:
+        # A queued (or daemon-claimed) generation job counts as in flight —
+        # the web Regenerate enqueues instead of blocking a request thread.
+        job = _queued_digest_job(conn, kind)
+        if job is not None:
+            started = job["started_at"] or job["scheduled_at"]
+    d = store.get_digest(conn, digest_day, kind)
     return {
         "kind": kind,
-        "date": today,
+        "date": digest_day,
         "generating": started is not None,
         "started_at": started,
         "created_at": (d or {}).get("created_at"),
@@ -2338,10 +2801,12 @@ def digest_generation_status(conn, kind: str = "daily") -> dict:
 
 
 def digest_generating(conn) -> dict[str, str | None]:
-    """Per-kind started-at marker of any in-flight digest generation."""
-    from secondbrain.proactive import store
-
-    return {k: store.generating_since(conn, k) for k in ("daily", "weekly")}
+    """Per-kind started-at marker of any in-flight (or queued) generation."""
+    out: dict[str, str | None] = {}
+    for k in ("daily", "weekly"):
+        st = digest_generation_status(conn, k)
+        out[k] = st["started_at"] if st["generating"] else None
+    return out
 
 
 def _today() -> str:
@@ -2456,11 +2921,22 @@ def _quotes_for_segments(conn, seg_ids: set[int], settings: Settings) -> dict[in
 
 
 def graph_node(conn: sqlite3.Connection, node_id: int,
-               settings: Settings | None = None) -> dict | None:
-    """A node plus its valid edges, each with provenance: which conversation
-    said it (local day/time for linking) and its citable source quotes —
-    ``quotes`` lists every citable transcript line in citation order, while
-    ``quote`` keeps the first one for older clients.
+               settings: Settings | None = None, *,
+               per_kind: int = 30, kind: str | None = None,
+               kind_offset: int = 0) -> dict | None:
+    """A node plus its edges, each with provenance: which conversation said it
+    (local day/time for linking) and its citable source quotes — ``quotes``
+    lists every citable transcript line in citation order, while ``quote``
+    keeps the first one for older clients.
+
+    Edges are grouped per kind, each kind sorted most-recent first
+    (``last_seen`` DESC) and capped at ``per_kind`` rows; ``kind_totals``
+    reports the full per-kind counts so the UI can offer "show more", and
+    ``kind``+``kind_offset`` page one kind's tail. Superseded edges (an old
+    decision replaced by a newer one, an old fact version) are included with
+    ``is_superseded``/``superseded_by``/``superseded_on`` rather than hidden —
+    the history stays visible. User-invalidated edges (valid=0 without a
+    superseder) stay excluded.
 
     Merged ids resolve to the canonical node. The raw ``embedding`` BLOB is
     deliberately not returned (binary is meaningless in JSON and would break
@@ -2485,28 +2961,46 @@ def graph_node(conn: sqlite3.Connection, node_id: int,
         """
         SELECT e.id, e.predicate, e.kind, e.object_text, e.due_date, e.confidence,
                e.conversation_id, e.source_segment_ids, e.first_seen, e.last_seen,
+               e.valid, e.superseded_by,
                e.src_node_id AS src_id, s.name AS src_name,
                COALESCE(s.display_label, s.name) AS src_label,
                d.name AS dst_name, d.id AS dst_id,
                COALESCE(d.display_label, d.name) AS dst_label,
-               c.started_at AS conversation_started_at
+               c.started_at AS conversation_started_at,
+               sup.first_seen AS superseded_on_ts
         FROM kg_edges e
         JOIN kg_nodes s ON s.id = e.src_node_id
         LEFT JOIN kg_nodes d ON d.id = e.dst_node_id
         LEFT JOIN conversations c ON c.id = e.conversation_id
-        WHERE e.valid=1 AND (e.src_node_id=? OR e.dst_node_id=?)
-        ORDER BY e.confidence DESC
+        LEFT JOIN kg_edges sup ON sup.id = e.superseded_by
+        WHERE (e.valid=1 OR e.superseded_by IS NOT NULL)
+          AND (e.src_node_id=? OR e.dst_node_id=?)
+        ORDER BY COALESCE(e.last_seen, e.first_seen, e.created_at) DESC, e.id DESC
         """,
         (nid, nid),
     ).fetchall()
 
-    out_edges = [dict(e) for e in edges]
+    # Group per kind (already recency-ordered), page each kind.
+    by_kind: dict[str, list[dict]] = {}
+    for e in edges:
+        by_kind.setdefault(e["kind"], []).append(dict(e))
+    kind_totals = {k: len(v) for k, v in by_kind.items()}
+    active_count = sum(1 for e in edges if not e["superseded_by"])
+    out_edges: list[dict] = []
+    for k, group in by_kind.items():
+        if kind is not None and k != kind:
+            continue
+        start = kind_offset if kind == k else 0
+        out_edges.extend(group[start:start + per_kind])
+
     all_seg_ids: set[int] = set()
     for e in out_edges:
-        e["segment_ids"] = json.loads(e["source_segment_ids"] or "[]")
+        e["segment_ids"] = json.loads(e.pop("source_segment_ids") or "[]")
         all_seg_ids.update(e["segment_ids"])
         e["conversation_day"] = _local_day_of(e["conversation_started_at"])
         e["conversation_time"] = _local_hhmm(e["conversation_started_at"])
+        e["is_superseded"] = e["superseded_by"] is not None
+        e["superseded_on"] = _local_day_of(e.pop("superseded_on_ts"))
     quotes = _quotes_for_segments(conn, all_seg_ids, settings)
     for e in out_edges:
         e["quotes"] = [quotes[s] for s in e["segment_ids"] if s in quotes]
@@ -2514,11 +3008,20 @@ def graph_node(conn: sqlite3.Connection, node_id: int,
 
     d = dict(node)
     d["label"] = node["display_label"] or node["name"]
-    aliases = [
-        r["alias"]
+    alias_rows = [
+        r
         for r in conn.execute(
-            "SELECT alias FROM kg_aliases WHERE node_id=? ORDER BY alias", (nid,)
+            "SELECT id, alias FROM kg_aliases WHERE node_id=? ORDER BY alias", (nid,)
         ).fetchall()
         if normalize_name(r["alias"]) != node["normalized_name"]
     ]
-    return {"node": d, "edges": out_edges, "aliases": aliases, "edge_count": len(out_edges)}
+    return {
+        "node": d,
+        "edges": out_edges,
+        # Back-compat: plain strings. alias_items adds ids for remove-alias.
+        "aliases": [r["alias"] for r in alias_rows],
+        "alias_items": [{"id": r["id"], "alias": r["alias"]} for r in alias_rows],
+        "edge_count": active_count,
+        "kind_totals": kind_totals,
+        "per_kind": per_kind,
+    }

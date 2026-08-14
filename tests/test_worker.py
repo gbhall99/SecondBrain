@@ -69,6 +69,23 @@ def test_diarization_enabled_defers_retention_and_groups_conversation(conn, sett
     assert row["conversation_id"] is not None          # grouped into a conversation
 
 
+def test_diarization_disabled_still_groups_conversation(conn, settings, tmp_path):
+    # Segmentation is not a diarization-only concern: extraction consumes
+    # conversations, so chunks are grouped even with diarization off.
+    settings.diarization.enabled = False
+    af_id = _add_audio(conn, tmp_path)
+    worker.enqueue_transcription(conn, af_id)
+    worker.drain(
+        conn,
+        transcriber=MockTranscriber([TranscribedSegment(0.0, 1.0, "hello", 0.9)]),
+        vad=MockVad(),
+        settings=settings,
+    )
+    row = models.get_audio_file(conn, af_id)
+    assert row["conversation_id"] is not None          # grouped into a conversation
+    assert row["retention_delete_after"] is not None   # retention NOT deferred
+
+
 def test_extraction_disabled_enqueues_no_job(conn, settings, tmp_path):
     # diarization on, extraction off → diarize runs, but no extract job is queued
     from secondbrain.pipeline.diarize import MockDiarizer
@@ -246,3 +263,16 @@ def test_speech_seconds_persisted_and_min_gate(conn, settings, tmp_path):
     row = models.get_audio_file(conn, af2)
     assert row["speech_seconds"] == 0.5
     assert row["has_speech"] == 1
+
+
+def test_failed_job_log_includes_id_type_and_duration(conn, settings, caplog):
+    import logging
+
+    from secondbrain.pipeline import queue as q
+
+    q.enqueue(conn, "no_such_job_type", {}, max_attempts=1)
+    with caplog.at_level(logging.ERROR, logger="secondbrain.worker"):
+        assert worker.run_once(conn, settings=settings) is True
+    msgs = [r.getMessage() for r in caplog.records if "failed after" in r.getMessage()]
+    assert msgs, caplog.text
+    assert "no_such_job_type" in msgs[0]

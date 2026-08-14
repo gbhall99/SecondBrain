@@ -42,6 +42,13 @@
            font-size: .78rem; color: var(--muted); white-space: nowrap; }
     .lowmark { color: var(--warn); font-weight: 400; }
     .more-row { margin: 1rem 0; }
+    .notme-box { display: inline-flex; align-items: center; gap: .35rem;
+                 font-size: .92rem; color: var(--fg); padding: .35rem 0; }
+    .notme-box input { width: auto; }
+    .day-inline { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+    .sem-note { margin: .8rem 0 0; }
+    .dec-old { color: var(--warn); border: 1px solid var(--line); border-radius: 999px;
+               padding: .05rem .5rem; font-size: .78rem; white-space: nowrap; }
 {% endblock %}
 {% block content %}
   <h1>SecondBrain</h1>
@@ -138,6 +145,13 @@
             <option value="auto" selected>Words + meaning</option>
             <option value="fulltext">Exact words</option>
             <option value="semantic">By meaning</option>
+            <option value="decisions">Decisions &amp; commitments</option>
+          </select>
+        </label>
+        <label for="sort">Sort
+          <select id="sort">
+            <option value="relevance" selected>Relevance</option>
+            <option value="date">Date</option>
           </select>
         </label>
         {% if speakers %}
@@ -149,6 +163,14 @@
             {% endfor %}
           </select>
         </label>
+        {% set owner = speakers | selectattr('is_owner') | first %}
+        {% if owner %}
+        <label for="notme" class="notme-label" title="Hide your own lines — only what others said">
+          <span>&nbsp;</span>
+          <span class="notme-box"><input type="checkbox" id="notme"
+                data-owner="{{ owner.id }}" /> Exclude me</span>
+        </label>
+        {% endif %}
         {% endif %}
         <label for="since">From
           <input type="date" id="since" />
@@ -299,12 +321,16 @@
 
     function readForm() {
       var spk = $('speaker');   // absent until at least one voice has lines
+      var notme = $('notme');   // absent until an owner voice exists
       return {
         q: $('q').value.trim(),
-        mode: $('mode').value,
+        mode: $('mode').value,   // 'decisions' = the Decisions & commitments scope
+        sort: $('sort') ? $('sort').value : 'relevance',
         since: $('since').value,
         until: $('until').value,
-        speaker: spk ? spk.value : ''
+        speaker: spk ? spk.value : '',
+        notme: !!(notme && notme.checked),
+        owner: notme ? notme.getAttribute('data-owner') : ''
       };
     }
 
@@ -314,7 +340,8 @@
     }
 
     function filtersActive(p) {
-      return p.mode !== 'auto' || !!p.since || !!p.until || !!p.speaker;
+      return p.mode !== 'auto' || p.sort !== 'relevance' || !!p.since || !!p.until ||
+             !!p.speaker || p.notme;
     }
 
     function syncFiltersSummary() {
@@ -326,7 +353,9 @@
       var u = new URLSearchParams();
       if (p.q) u.set('q', p.q);
       if (p.mode !== 'auto') u.set('mode', p.mode);
+      if (p.sort && p.sort !== 'relevance') u.set('sort', p.sort);
       if (p.speaker) u.set('speaker', p.speaker);
+      if (p.notme) u.set('notme', '1');
       if (p.since) u.set('since', p.since);
       if (p.until) u.set('until', p.until);
       var qs = u.toString();
@@ -357,7 +386,7 @@
       return SB.esc(snippet).split(MARK_S).join('<mark>').split(MARK_E).join('</mark>');
     }
 
-    function hitHTML(h) {
+    function hitHTML(h, inlineDay) {
       var spk = h.speaker
         ? '<strong>' + SB.esc(h.speaker) +
           (h.speaker_low_confidence
@@ -372,21 +401,71 @@
         ? ' <span class="rel" title="Matched by meaning, not by these exact words">≈ related</span>'
         : '';
       var t = fmtTime(h.start_at);
+      // Relevance view carries each hit's day inline (no day buckets there).
+      var when = inlineDay
+        ? (SB.esc(fmtDay(day)) + (t ? ' · ' + t : ''))
+        : (t || 'view in day');
       return '<li class="hit"><p class="hit-text">' + spk + body + '</p>' +
              '<p class="meta hit-line"><a href="/day?date=' + encodeURIComponent(day) +
              '#seg-' + h.segment_id + '" title="Open this moment in the day view"' +
              ' aria-label="Open in day view' + (full ? ' — ' + SB.esc(full) : '') + '">' +
-             (t || 'view in day') + '</a>' + rel + '</p></li>';
+             when + '</a>' + rel + '</p></li>';
+    }
+
+    // The Decisions & commitments scope renders extracted knowledge, not
+    // transcript lines: each item links to its source moment and /decisions.
+    function decisionHTML(d) {
+      var kind = d.kind === 'action_item' ? 'commitment' : 'decision';
+      var who = d.node_label
+        ? '<strong>' + SB.esc(d.node_label) + ':</strong> '
+        : '';
+      var old = d.is_superseded
+        ? ' <span class="dec-old" title="A newer decision replaced this one">superseded</span>'
+        : '';
+      var link = (d.source_day && d.source_seg)
+        ? '<a href="/day?date=' + encodeURIComponent(d.source_day) + '#seg-' + d.source_seg +
+          '" title="Open the source moment in the day view">' + SB.esc(fmtDay(d.source_day)) + '</a>'
+        : (d.day ? SB.esc(fmtDay(d.day)) : '');
+      var due = d.due_date ? ' <span class="rel">due ' + SB.esc(d.due_date) + '</span>' : '';
+      return '<li class="hit"><p class="hit-text">' + who + SB.esc(d.object_text || '') +
+             due + old + '</p><p class="meta hit-line">' +
+             '<span class="rel">' + kind + '</span> ' + link +
+             ' · <a href="/decisions?q=' + encodeURIComponent(p_last_q) + '">all decisions</a>' +
+             '</p></li>';
+    }
+    var p_last_q = '';
+
+    function renderDecisions(data, p) {
+      p_last_q = p.q;
+      var hits = data.results;
+      var html = '<ol class="hits">' + hits.map(decisionHTML).join('') + '</ol>';
+      $('results').innerHTML = html;
+      $('res-status').textContent = hits.length + ' decision/commitment match' +
+        (hits.length === 1 ? '' : 'es') + ' for “' + p.q + '”';
+    }
+
+    function totalPhrase(data) {
+      // "Showing 50 of ~340" once the corpus holds more matches than the page.
+      if (typeof data.total !== 'number' || data.total <= data.results.length) return '';
+      return 'Showing ' + data.results.length + ' of ' +
+             (data.total_capped ? '1000+' : '~' + data.total);
+    }
+
+    function semFooter(data) {
+      var si = data.semantic_index;
+      if (!si) return '';
+      var bits = [];
+      if (si.model_mismatch && si.note) bits.push('⚠ ' + SB.esc(si.note));
+      if (si.available && si.total_segments > 0 && si.indexed_segments < si.total_segments) {
+        bits.push(si.indexed_segments + ' of ' + si.total_segments +
+                  ' segments semantically indexed (indexing catches up in the background)');
+      }
+      if (!bits.length) return '';
+      return '<p class="meta sem-note">' + bits.join(' · ') + '</p>';
     }
 
     function renderResults(data, p) {
       var hits = data.results;
-      var groups = {};   // day -> [hit]
-      hits.forEach(function (h) {
-        var day = h.day || (h.start_at || '').slice(0, 10) || 'unknown';
-        (groups[day] = groups[day] || []).push(h);
-      });
-      var days = Object.keys(groups).sort().reverse();
       var html = '';
       var allSemantic = data.mode === 'auto' && hits.length &&
         hits.every(function (h) { return h.extra && h.extra.semantic_only; });
@@ -394,35 +473,63 @@
         html += '<div class="empty"><strong>No exact word matches</strong> ' +
                 'Showing lines related in meaning instead — the ≈ chip marks them.</div>';
       }
-      days.forEach(function (day) {
-        var list = groups[day].slice().sort(function (a, b) {
-          return (a.start_at || '') < (b.start_at || '') ? -1 : 1;
+      if (p.sort === 'date') {
+        // Date view: day-grouped, chronological inside each day.
+        var groups = {};   // day -> [hit]
+        hits.forEach(function (h) {
+          var day = h.day || (h.start_at || '').slice(0, 10) || 'unknown';
+          (groups[day] = groups[day] || []).push(h);
         });
-        html += '<section class="day-group"><h3 class="day-head">' +
-                '<a href="/day?date=' + encodeURIComponent(day) + '">' + SB.esc(fmtDay(day)) +
-                '</a> <span class="meta">· ' + list.length + ' line' +
-                (list.length === 1 ? '' : 's') + '</span></h3><ol class="hits">' +
-                list.map(hitHTML).join('') + '</ol></section>';
-      });
+        var days = Object.keys(groups).sort().reverse();
+        days.forEach(function (day) {
+          var list = groups[day].slice().sort(function (a, b) {
+            return (a.start_at || '') < (b.start_at || '') ? -1 : 1;
+          });
+          html += '<section class="day-group"><h3 class="day-head">' +
+                  '<a href="/day?date=' + encodeURIComponent(day) + '">' + SB.esc(fmtDay(day)) +
+                  '</a> <span class="meta">· ' + list.length + ' line' +
+                  (list.length === 1 ? '' : 's') + '</span></h3><ol class="hits">' +
+                  list.map(function (h) { return hitHTML(h, false); }).join('') +
+                  '</ol></section>';
+        });
+      } else {
+        // Relevance view (default): the ranking as-is, best match first, with
+        // each hit's day inline instead of re-bucketing by day.
+        html += '<ol class="hits">' +
+                hits.map(function (h) { return hitHTML(h, true); }).join('') + '</ol>';
+      }
       if (hits.length >= data.limit && data.limit < 200) {
         html += '<p class="more-row"><button type="button" class="linklike" id="more-btn" ' +
                 'onclick="showMore(this)">Show more results</button></p>';
       } else if (hits.length >= 200) {
         html += '<p class="more-row meta">Showing the first 200 hits — narrow by date or words to see the rest.</p>';
       }
+      html += semFooter(data);
       $('results').innerHTML = html;
       // Only the count phrase gets the "First" prefix — never transform the
       // user's query text (searching JP must not be announced as “jp”).
-      var head = hits.length + ' result' + (hits.length === 1 ? '' : 's');
-      if (hits.length >= data.limit) head = 'First ' + head;
+      var head = totalPhrase(data);
+      if (!head) {
+        head = hits.length + ' result' + (hits.length === 1 ? '' : 's');
+        if (hits.length >= data.limit) head = 'First ' + head;
+      }
       var summary = head + ' for “' + p.q + '”';
       if (p.speaker && speakerName()) summary += ' from ' + speakerName();
+      if (p.notme) summary += ' · excluding you';
       if (data.mode === 'auto' && !data.semantic_available) summary += ' · keyword-only (semantic engine unavailable)';
       $('res-status').textContent = summary;
     }
 
     function renderEmpty(data, p) {
       var hint;
+      if (p.mode === 'decisions') {
+        hint = 'No extracted decision or commitment mentions those words — try the ' +
+               'transcript scopes above, or browse <a href="/decisions">all decisions</a>.';
+        $('results').innerHTML = '<div class="empty"><strong>No decisions match “' +
+          SB.esc(p.q) + '”</strong> ' + hint + '</div>';
+        $('res-status').textContent = 'No decisions match “' + p.q + '”.';
+        return;
+      }
       if (CORPUS_SEGMENTS === 0) {
         hint = 'Nothing has been recorded yet — once a conversation is transcribed, it becomes searchable here.';
       } else if (data.mode === 'semantic' && !data.semantic_available) {
@@ -467,11 +574,16 @@
       }
       if (!more) state.limit = 20;
       syncURL(p);
+      var decisions = p.mode === 'decisions';
       var u = new URLSearchParams({ q: p.q, limit: state.limit });
-      if (p.mode !== 'auto') u.set('mode', p.mode);
-      if (p.speaker) u.set('speaker', p.speaker);
-      if (p.since) u.set('since', p.since);
-      if (p.until) u.set('until', p.until);
+      if (decisions) u.set('scope', 'decisions');
+      else if (p.mode !== 'auto') u.set('mode', p.mode);
+      if (!decisions) {
+        if (p.speaker) u.set('speaker', p.speaker);
+        if (p.notme && p.owner) u.set('not_speaker', p.owner);
+        if (p.since) u.set('since', p.since);
+        if (p.until) u.set('until', p.until);
+      }
       var box = $('results');
       box.setAttribute('aria-busy', 'true');
       $('res-status').textContent = 'Searching…';
@@ -480,7 +592,9 @@
       try {
         var data = await SB.api('/api/search?' + u.toString(), { quiet: true, button: btn });
         if (seq !== state.seq) return;
-        if (data.results.length) renderResults(data, p); else renderEmpty(data, p);
+        if (!data.results.length) renderEmpty(data, p);
+        else if (decisions) renderDecisions(data, p);
+        else renderResults(data, p);
         if (more) {
           // Keep keyboard users anchored: refocus the (re-rendered) button, or
           // on the last page — when it disappears — the "N results" summary.
@@ -520,7 +634,9 @@
 
     function resetFilters() {
       $('mode').value = 'auto';
+      if ($('sort')) $('sort').value = 'relevance';
       if ($('speaker')) $('speaker').value = '';
+      if ($('notme')) $('notme').checked = false;
       $('since').value = '';
       $('until').value = '';
       syncFiltersSummary();
@@ -535,7 +651,7 @@
       if ($('q').value.trim()) runSearch();
     }
 
-    ['mode', 'speaker', 'since', 'until'].forEach(function (id) {
+    ['mode', 'sort', 'speaker', 'notme', 'since', 'until'].forEach(function (id) {
       var el = $(id);   // the speaker select is absent until a voice has lines
       if (el) el.addEventListener('change', function () {
         syncFiltersSummary();
@@ -558,7 +674,11 @@
     (function initFromURL() {
       var u = new URLSearchParams(location.search);
       var mode = u.get('mode');
-      if (mode === 'fulltext' || mode === 'semantic') $('mode').value = mode;
+      if (mode === 'fulltext' || mode === 'semantic' || mode === 'decisions') {
+        $('mode').value = mode;
+      }
+      if (u.get('sort') === 'date' && $('sort')) $('sort').value = 'date';
+      if (u.get('notme') === '1' && $('notme')) $('notme').checked = true;
       var spkSel = $('speaker'), spk = u.get('speaker') || '';
       if (spkSel && /^\d+$/.test(spk)) {
         if (!spkSel.querySelector('option[value="' + spk + '"]')) {

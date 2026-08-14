@@ -13,7 +13,9 @@ builder + ``MockDiarizer``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,7 +73,12 @@ def concat_offsets_from_db(
 def default_audio_builder(
     conn: sqlite3.Connection, chunks: list[sqlite3.Row], settings: Settings
 ) -> tuple[Path, list[ChunkOffset]]:
-    """Concatenate chunk FLACs into one temp WAV; return (path, offsets)."""
+    """Concatenate chunk FLACs into one temp WAV; return (path, offsets).
+
+    The scratch name is unique per conversation+process so concurrent
+    diarizations can't clobber each other; the caller unlinks it when done
+    (retention sweeps ``conv_concat*.wav`` >24h as a crash backstop).
+    """
     import numpy as np  # lazy
     import soundfile as sf  # lazy: `audio` extra
 
@@ -88,7 +95,8 @@ def default_audio_builder(
         parts.append(audio)
         cur += dur
     settings.ensure_dirs()
-    out = settings.audio_processed_dir / "conv_concat.wav"
+    conv_id = chunks[0]["conversation_id"] if chunks else 0
+    out = settings.audio_processed_dir / f"conv_concat_{conv_id}_{os.getpid()}.wav"
     if parts:
         sf.write(str(out), np.concatenate(parts), settings.capture.sample_rate)
     return out, offsets
@@ -122,21 +130,37 @@ def attribute_conversation(
 
     conn.execute("UPDATE conversations SET status='diarizing' WHERE id=?", (conversation_id,))
     concat_path, offsets = audio_builder(conn, chunks, settings)
-    # If any chunk audio is missing, the concat timeline no longer matches the
-    # segments — skip rather than silently mislabel (offsets[-1] fallback).
-    if len(offsets) < len(chunks):
-        log.warning(
-            "conversation %s: %d/%d chunks available; skipping diarization to avoid mislabeling",
-            conversation_id, len(offsets), len(chunks),
-        )
-        _finalize(conn, conversation_id, chunks, settings)
-        return 0
+    try:
+        # If any chunk audio is missing, the concat timeline no longer matches the
+        # segments — skip rather than silently mislabel (offsets[-1] fallback).
+        # 'skipped_incomplete' (not 'diarized') keeps the skip visible; extraction
+        # still consumes these conversations (it only needs the transcript).
+        if len(offsets) < len(chunks):
+            log.warning(
+                "conversation %s: %d/%d chunks available; skipping diarization "
+                "to avoid mislabeling (status 'skipped_incomplete')",
+                conversation_id, len(offsets), len(chunks),
+            )
+            with transaction(conn):
+                _finalize(conn, conversation_id, chunks, settings,
+                          status="skipped_incomplete")
+            return 0
 
-    diar: DiarizationResult = diarizer.diarize(concat_path)
-    # All post-diarization DB writes are one atomic unit; the slow diarize() ran
-    # above (outside the transaction) so no write lock is held during compute.
-    with transaction(conn):
-        return _attribute_and_finalize(conn, conversation_id, chunks, offsets, diar, settings)
+        diar: DiarizationResult = diarizer.diarize(concat_path)
+        # All post-diarization DB writes are one atomic unit; the slow diarize()
+        # ran above (outside the transaction) so no write lock is held during
+        # compute.
+        with transaction(conn):
+            return _attribute_and_finalize(
+                conn, conversation_id, chunks, offsets, diar, settings
+            )
+    finally:
+        # Always remove the concat scratch WAV (raw audio must not linger).
+        # Only our own scratch names — an injected test builder may hand back
+        # a file it owns.
+        if concat_path is not None and Path(concat_path).name.startswith("conv_concat"):
+            with contextlib.suppress(OSError):
+                Path(concat_path).unlink(missing_ok=True)
 
 
 def _attribute_and_finalize(
@@ -151,10 +175,26 @@ def _attribute_and_finalize(
     # 1. Resolve each local cluster to a global speaker.
     cluster_speaker: dict[str, int] = {}
     cluster_sim: dict[str, float] = {}
-    cluster_margin: dict[str, float] = {}
+    cluster_low_margin: dict[str, bool] = {}
     cluster_obs: dict[str, int] = {}
     for cluster in diar.clusters:
+        # Don't mint speakers for coughs/blips: a cluster with less total
+        # speech than min_cluster_speech_s carries no usable voiceprint.
+        if cluster.total_speech_s < d.min_cluster_speech_s:
+            log.info(
+                "conversation %s: dropping local cluster %s (%.2fs speech < %.2fs minimum)",
+                conversation_id, cluster.local_label, cluster.total_speech_s,
+                d.min_cluster_speech_s,
+            )
+            continue
         m = registry.match_embedding(conn, cluster.embedding, settings)
+        # A near-tie between two candidates (margin below min_match_margin) is
+        # labeled but flagged low-confidence, not confidently auto-labeled.
+        low_margin = (
+            m.speaker_id is not None
+            and d.min_match_margin > 0.0
+            and m.margin < d.min_match_margin
+        )
         if m.speaker_id is None:
             sid = registry.create_unknown_speaker(conn)
             sim = 0.0
@@ -163,7 +203,7 @@ def _attribute_and_finalize(
             sim = m.similarity
         cluster_speaker[cluster.local_label] = sid
         cluster_sim[cluster.local_label] = sim
-        cluster_margin[cluster.local_label] = m.margin
+        cluster_low_margin[cluster.local_label] = low_margin
 
         # record one observation per cluster (mapped back to a chunk) + centroid.
         rep = cluster.turns[0] if cluster.turns else SpeakerTurn(0.0, 0.0, cluster.local_label)
@@ -181,7 +221,9 @@ def _attribute_and_finalize(
             duration_s=cluster.total_speech_s,
             quality=sim,
         )
-        if m.speaker_id is None or sim >= d.centroid_update_threshold:
+        # A low-margin (ambiguous) match must not steer either candidate's
+        # profile; only confident matches (or brand-new voices) teach it.
+        if m.speaker_id is None or (sim >= d.centroid_update_threshold and not low_margin):
             registry.update_centroid(conn, sid, cluster.embedding)
 
     # 2. Align turns onto each chunk's transcript segments (concat timeline).
@@ -202,6 +244,9 @@ def _attribute_and_finalize(
             conf = round(frac * cluster_sim[label], 4)
             # flag overlapped speech (multiple speakers cover this segment)
             if settings.diarization.overlap_flag and _overlap_count(diar.turns, s0, s1) > 1:
+                conf = min(conf, max(0.0, settings.diarization.low_confidence_threshold - 0.01))
+            # flag ambiguous (low-margin) matches for review the same way
+            if cluster_low_margin.get(label):
                 conf = min(conf, max(0.0, settings.diarization.low_confidence_threshold - 0.01))
             registry.assign_segment_speaker(
                 conn, seg["id"], sid, conf,
@@ -227,16 +272,17 @@ def _attribute_and_finalize(
 
 
 def _finalize(
-    conn: sqlite3.Connection, conversation_id: int, chunks: list[sqlite3.Row], settings: Settings
+    conn: sqlite3.Connection, conversation_id: int, chunks: list[sqlite3.Row],
+    settings: Settings, *, status: str = "diarized",
 ) -> None:
-    """Mark diarized and NOW set the raw-audio retention deadline on the chunks."""
+    """Mark finished and NOW set the raw-audio retention deadline on the chunks."""
     delete_after = retention.compute_delete_after(settings)
     for ch in chunks:
         conn.execute(
             "UPDATE audio_files SET retention_delete_after=? WHERE id=? AND status='transcribed'",
             (delete_after, ch["id"]),
         )
-    conn.execute("UPDATE conversations SET status='diarized' WHERE id=?", (conversation_id,))
+    conn.execute("UPDATE conversations SET status=? WHERE id=?", (status, conversation_id))
 
     # Hand off to knowledge extraction (Phase 3), if enabled.
     if settings.extraction.enabled:

@@ -201,3 +201,178 @@ def test_seed_nodes_matches_edges_and_names(conn, settings):
     assert set(chat._seed_nodes(conn, [seg], "when is the pricing review?")) == {node, other}
     # no inputs -> no seeds (and no full scans)
     assert chat._seed_nodes(conn, [], "") == []
+
+
+def _conv_seg(conn, texts, conv_id=7, start="2026-06-16T09:00:0{i}.000Z", speaker_id=None):
+    """A conversation of consecutive segments; returns their ids in order."""
+    conn.execute(
+        "INSERT OR IGNORE INTO conversations (id, started_at, status) "
+        "VALUES (?, '2026-06-16T09:00:00.000Z', 'diarized')",
+        (conv_id,),
+    )
+    af = models.insert_audio_file(
+        conn, AudioFile(path=f"/tmp/conv{conv_id}.flac",
+                        started_at="2026-06-16T09:00:00.000Z", sample_rate=16000)
+    )
+    conn.execute("UPDATE audio_files SET conversation_id=? WHERE id=?", (conv_id, af))
+    tid = models.insert_transcript(conn, af, "mock", "mock", "en")
+    ids = []
+    for i, text in enumerate(texts):
+        models.insert_segments(
+            conn,
+            [Segment(tid, af, float(i), i + 1.0, text,
+                     start_at=f"2026-06-16T09:00:{i:02d}.000Z", speaker_id=speaker_id)],
+        )
+        ids.append(conn.execute("SELECT MAX(id) AS m FROM transcript_segments").fetchone()["m"])
+    return ids
+
+
+def test_hits_expand_with_neighboring_turns(conn, settings):
+    ids = _conv_seg(conn, [
+        "how was the offsite",
+        "pretty good overall",
+        "we agreed to raise pricing next quarter",
+        "makes sense to me",
+        "let's tell the team on friday",
+        "sounds good",
+    ])
+    prep = chat.prepare(conn, "what about pricing?", settings=settings)
+    # The matched line AND ±2 neighbors of the same conversation are citable.
+    for sid in ids[0:5]:
+        assert sid in prep.info, sid
+    # ...in chronological order within the excerpt block.
+    body = prep.prompt
+    assert body.index("pretty good overall") < body.index("raise pricing")
+    assert body.index("raise pricing") < body.index("tell the team on friday")
+
+
+def test_excerpt_count_is_configurable(conn, settings, monkeypatch):
+    _seg(conn, "we agreed to raise pricing next quarter")
+    calls = {}
+    from secondbrain.search import combined as comb
+
+    real = comb.search
+
+    def spy(conn_, q, limit=20, **kw):
+        calls["limit"] = limit
+        return real(conn_, q, limit, **kw)
+
+    monkeypatch.setattr(chat.combined, "search", spy)
+    settings.extraction.chat_max_excerpts = 7
+    chat.prepare(conn, "pricing?", settings=settings)
+    assert calls["limit"] == 7
+
+
+def test_followup_merges_previous_question_into_retrieval(conn, settings, monkeypatch):
+    _seg(conn, "we agreed to raise pricing next quarter")
+    seen = {}
+
+    def spy(conn_, q, limit=20, **kw):
+        seen["q"] = q
+        return []
+
+    monkeypatch.setattr(chat.combined, "search", spy)
+    chat.prepare(conn, "and when?", settings=settings,
+                 history=[{"question": "what about pricing?", "answer": "Raise it."}])
+    assert "and when?" in seen["q"] and "what about pricing?" in seen["q"]
+    # No history → the question is used verbatim.
+    chat.prepare(conn, "and when?", settings=settings)
+    assert seen["q"] == "and when?"
+
+
+def test_seed_nodes_requires_word_boundary_and_min_length(conn, settings):
+    hr = graph.create_node(conn, type="topic", name="hr", embedding=None,
+                           confidence=0.9, extraction_id=None)
+    price = graph.create_node(conn, type="topic", name="pricing", embedding=None,
+                              confidence=0.9, extraction_id=None)
+    # "hr" (2 chars) must not attach to a question containing "three"; "pricing"
+    # matches only on a word boundary, not inside "repricing".
+    assert chat._seed_nodes(conn, [], "what are the three hr topics") == []
+    assert hr not in chat._seed_nodes(conn, [], "hr said so")  # too short, ever
+    assert chat._seed_nodes(conn, [], "what about repricing strategy") == []
+    assert chat._seed_nodes(conn, [], "what about pricing strategy") == [price]
+
+
+def test_grounding_states_context_empty_vs_uncited(conn, settings):
+    # Nothing in the corpus matches → context_empty, not uncited.
+    result = chat.answer(conn, "zzz nothing zzz", llm=MockLLM(responses=["No idea."]),
+                         settings=settings)
+    assert result["context_empty"] is True and result["uncited"] is False
+    assert result["grounded"] is False
+    # Context retrieved but the model cites none of it → uncited.
+    _seg(conn, "we agreed to raise pricing next quarter")
+    result = chat.answer(conn, "what about pricing?",
+                         llm=MockLLM(responses=["You raised pricing."]), settings=settings)
+    assert result["context_empty"] is False and result["uncited"] is True
+    assert result["grounded"] is False
+    # Cited answers are grounded, with both flags off.
+    seg = conn.execute("SELECT MAX(id) AS m FROM transcript_segments").fetchone()["m"]
+    result = chat.answer(conn, "what about pricing?",
+                         llm=MockLLM(responses=[f"Raised [{seg}]."]), settings=settings)
+    assert result["grounded"] is True
+    assert result["context_empty"] is False and result["uncited"] is False
+
+
+def test_dangling_citation_markers_are_stripped(conn, settings):
+    seg = _seg(conn, "we agreed to raise pricing next quarter")
+    result = chat.answer(
+        conn, "what about pricing?",
+        llm=MockLLM(responses=[f"Raise pricing [{seg}] and hire [99999] people."]),
+        settings=settings,
+    )
+    assert "[99999]" not in result["answer"]
+    assert f"[{seg}]" in result["answer"]
+    assert result["dangling_citations"] == 1
+    assert [c["segment_id"] for c in result["citations"]] == [seg]
+
+
+def test_citations_carry_speaker_low_confidence(conn, settings):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    seg = _seg(conn, "we agreed to raise pricing next quarter")
+    conn.execute(
+        "UPDATE transcript_segments SET speaker_id=5, speaker_confidence=0.2 WHERE id=?",
+        (seg,),
+    )
+    result = chat.answer(conn, "what about pricing?",
+                         llm=MockLLM(responses=[f"Raised [{seg}]."]), settings=settings)
+    c = result["citations"][0]
+    assert c["speaker"] == "Dana" and c["speaker_low_confidence"] is True
+
+
+def test_fact_block_dates_decisions_and_orders_newest_first(conn, settings):
+    node = graph.create_node(conn, type="project", name="Atlas", embedding=None,
+                             confidence=0.9, extraction_id=None)
+    old = graph.upsert_edge(conn, src_node_id=node, dst_node_id=None, predicate="decision",
+                            kind="decision", object_text="ship the beta in June", confidence=0.9,
+                            when="2026-06-01T09:00:00.000Z")
+    graph.upsert_edge(conn, src_node_id=node, dst_node_id=None, predicate="decision",
+                      kind="decision", object_text="hire a designer", confidence=0.5,
+                      when="2026-07-12T09:00:00.000Z")
+    facts = chat._subgraph_facts(conn, [node], settings)
+    # Newest decision first despite lower confidence.
+    assert [f["object_text"] for f in facts] == ["hire a designer", "ship the beta in June"]
+    line = chat._fact_line(facts[0])
+    assert line.startswith("- [2026-07-12]")
+    # A decision that superseded an earlier one says so — and the superseded
+    # one leaves the fact block entirely.
+    new = graph.upsert_edge(conn, src_node_id=node, dst_node_id=None, predicate="decision",
+                            kind="decision", object_text="ship the beta in July", confidence=0.9,
+                            when="2026-08-01T09:00:00.000Z")
+    facts = chat._subgraph_facts(conn, [node], settings)
+    texts = [f["object_text"] for f in facts]
+    assert "ship the beta in June" not in texts and "ship the beta in July" in texts
+    marked = next(f for f in facts if f["object_text"] == "ship the beta in July")
+    assert "(supersedes an earlier decision)" in chat._fact_line(marked)
+    assert old != new
+
+
+def test_scoped_ask_filters_by_speaker_and_dates(conn, settings):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (5, 'Dana', 'known', 0)")
+    dana_ids = _conv_seg(conn, ["dana talks pricing today"], conv_id=8, speaker_id=5)
+    other_ids = _conv_seg(conn, ["someone else talks pricing"], conv_id=9)
+    prep = chat.prepare(conn, "pricing?", settings=settings, speaker_id=5)
+    assert dana_ids[0] in prep.info
+    assert other_ids[0] not in prep.info
+    # A date window that excludes everything retrieves nothing.
+    prep = chat.prepare(conn, "pricing?", settings=settings, until="2020-01-01")
+    assert prep.has_context is False

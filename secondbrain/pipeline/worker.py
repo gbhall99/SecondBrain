@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import timedelta
 
 from secondbrain.config import Settings, get_settings
@@ -149,12 +150,12 @@ def process_audio_file(
             (deferred, audio_file_id),
         )
 
-    # 4b. Group the chunk into a conversation (diarized as a whole later).
-    if settings.diarization.enabled:
-        try:
-            conversation.assign_chunk(conn, audio_file_id, settings)
-        except Exception:  # noqa: BLE001 - never block transcription on this
-            log.warning("failed to assign chunk %s to a conversation", audio_file_id, exc_info=True)
+    # 4b. Group the chunk into a conversation (diarized as a whole later when
+    #     diarization is enabled; extraction consumes conversations either way).
+    try:
+        conversation.assign_chunk(conn, audio_file_id, settings)
+    except Exception:  # noqa: BLE001 - never block transcription on this
+        log.warning("failed to assign chunk %s to a conversation", audio_file_id, exc_info=True)
 
     # 5. Best-effort semantic indexing (no-op if unavailable).
     if segs:
@@ -187,6 +188,7 @@ def run_once(
     job = q.claim_next(conn)
     if job is None:
         return False
+    started = time.monotonic()
     try:
         if job.type == JOB_TRANSCRIBE:
             process_audio_file(
@@ -228,8 +230,9 @@ def run_once(
         q.complete(conn, job.id)
     except Exception as exc:  # noqa: BLE001 - record and let queue retry
         # Full traceback to the log — the DB failure record only keeps repr(exc).
-        log.exception("job %s (%s, attempt %d/%d) failed",
-                      job.id, job.type, job.attempts, job.max_attempts)
+        log.exception("job %s (%s, attempt %d/%d) failed after %.1fs",
+                      job.id, job.type, job.attempts, job.max_attempts,
+                      time.monotonic() - started)
         if job.type == JOB_TRANSCRIBE:
             models.set_audio_status(conn, int(job.payload.get("audio_file_id", 0)), "failed")
         elif job.type == conversation.JOB_DIARIZE:

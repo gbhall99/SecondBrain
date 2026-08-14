@@ -26,6 +26,10 @@
     .summary-card p { margin: .35rem 0; }
     .summary-card ul { margin: .25rem 0 .6rem; padding-left: 1.25rem; }
     .summary-card li { margin: .18rem 0; }
+    .stats-row { display: flex; flex-wrap: wrap; gap: .35rem .5rem; margin: .5rem 0 .2rem; }
+    .stats-row .stat { font-size: .82rem; background: var(--soft); border: 1px solid var(--line);
+                       border-radius: 999px; padding: .2rem .7rem; white-space: nowrap; }
+    .stats-row .stat strong { font-variant-numeric: tabular-nums; }
     .cite-n { font-size: .78rem; background: var(--soft); border: 1px solid var(--line);
               border-radius: 6px; padding: 0 .32rem; text-decoration: none;
               white-space: nowrap; }
@@ -45,19 +49,31 @@
     .acts button[aria-pressed="true"] { background: var(--fg); color: var(--bg);
                                         border-color: var(--fg); }
     .acts button[aria-pressed="true"]:disabled { opacity: 1; }
+    .acts .snooze-group { display: inline-flex; align-items: center; gap: .15rem;
+                          border: 1px solid var(--line); border-radius: 10px;
+                          padding: .1rem .3rem; }
+    .acts .snooze-group .lbl { font-size: .78rem; color: var(--muted); padding: 0 .2rem; }
+    .acts .snooze-group button { border: 0; padding: .25rem .45rem; min-height: 1.9rem;
+                                 font-size: .8rem; background: transparent; }
     .act-err { color: var(--danger); font-size: .85rem; }
     .sug-ghost { color: var(--muted); }
     .undo-row { display: flex; gap: .5rem; align-items: center; min-height: 2.25rem;
                 flex-wrap: wrap; }
+    #more-row { margin: .6rem 0 .2rem; }
     #handled-row { margin: 1.1rem 0 .4rem; }
 {% endblock %}
 {% block content %}
   {% set kind_labels = {'commitment_owed': 'You promised', 'commitment_overdue': 'Overdue',
+                        'commitment_undated': 'Needs a date', 'tasks_due': 'Due tasks',
+                        'plan_carryover': 'Slipped plan', 'goal_at_risk': 'Goal at risk',
                         'connection': 'Connection', 'goal_alignment': 'Goal signal',
                         'stale_goal': 'Stale goal', 'relationship_reconnect': 'Reconnect',
                         'coaching': 'Coaching'} %}
   <div class="title-row">
     <h1 id="brief-title">{{ 'Weekly review' if kind == 'weekly' else 'Morning brief' }}</h1>
+    <button type="button" id="copy-md"
+            title="Copy this brief — summary, items and stats — as Markdown">
+      Copy as Markdown</button>
     <button type="button" id="regen-btn"
             title="Writes a fresh brief with the local model — takes a minute or two">
       Regenerate</button>
@@ -87,6 +103,19 @@
          this (and everything dynamic) from the embedded state JSON. #}
       {% if digest %}
         <div class="summary-card raw">{{ digest.summary_md }}</div>
+        {% if kind == 'weekly' and digest.payload and digest.payload.stats %}
+          {% set st = digest.payload.stats %}
+          <div class="stats-row">
+            <span class="stat"><strong>{{ st.tasks_completed }}</strong> tasks done</span>
+            <span class="stat">commitments <strong>{{ st.commitments_cleared }}</strong> cleared /
+              <strong>{{ st.commitments_added }}</strong> added</span>
+            <span class="stat"><strong>{{ st.goals_progressed }}</strong> goals progressed</span>
+            <span class="stat"><strong>{{ st.meeting_hours }}</strong>h in meetings</span>
+            {% if st.plan_adherence_pct is not none %}
+              <span class="stat"><strong>{{ st.plan_adherence_pct }}%</strong> plan adherence</span>
+            {% endif %}
+          </div>
+        {% endif %}
       {% elif kind == 'weekly' %}
         <div class="empty"><strong>No weekly review yet</strong>
           One is written automatically every Monday morning — or generate this week's now
@@ -100,7 +129,7 @@
     <p id="digest-meta" class="meta" {% if not digest %}hidden{% endif %}></p>
   </section>
 
-  <h2 id="items-h">Items{% if suggestions %} ({{ suggestions|length }}){% endif %}</h2>
+  <h2 id="items-h">Items{% if suggestions %} ({{ suggestions|length + more_count }}){% endif %}</h2>
   <div id="items">
     {% if suggestions %}
       <ul class="sug-list">
@@ -112,12 +141,16 @@
           </li>
         {% endfor %}
       </ul>
+      {% if more_count %}<p class="meta">{{ more_count }} more below the fold.</p>{% endif %}
     {% else %}
       <div class="empty"><strong>Nothing needs your attention</strong>
         Items appear here when SecondBrain spots commitments you owe (or are owed),
         goal signals, or people worth reconnecting with.</div>
     {% endif %}
   </div>
+  <p id="more-row" hidden>
+    <button type="button" class="linklike" id="more-toggle"></button>
+  </p>
   <p id="handled-row">
     <button type="button" class="linklike" id="handled-toggle" aria-expanded="false"
             aria-controls="handled">Show handled items</button>
@@ -133,23 +166,33 @@
       catch (e) { /* fall back to the server-rendered static view */ }
       if (!state || !window.SB) return;
       state.segMeta = state.segMeta || {};
-      state.suggestions = state.suggestions || [];
       state.dates = state.dates || {daily: [], weekly: []};
       state.generating = state.generating || {};
+      // One working list: capped items first, overflow flagged `_more` so
+      // "Show N more" can reveal them without another fetch.
+      function mergeLists(visible, more) {
+        (more || []).forEach(s => { s._more = true; });
+        return (visible || []).concat(more || []);
+      }
+      state.suggestions = mergeLists(state.suggestions, state.more);
+      delete state.more;
 
       const KIND_LABELS = {commitment_owed: 'You promised', commitment_overdue: 'Overdue',
+                           commitment_undated: 'Needs a date', tasks_due: 'Due tasks',
+                           plan_carryover: 'Slipped plan', goal_at_risk: 'Goal at risk',
                            connection: 'Connection', goal_alignment: 'Goal signal',
                            stale_goal: 'Stale goal', relationship_reconnect: 'Reconnect',
                            coaching: 'Coaching'};
       const els = {};
-      ['brief-title', 'regen-btn', 'kind-daily', 'kind-weekly', 'prev-btn', 'next-btn',
-       'date-label', 'gen-status', 'summary', 'digest-meta', 'items-h', 'items',
-       'handled-toggle', 'handled'].forEach(id => {
+      ['brief-title', 'copy-md', 'regen-btn', 'kind-daily', 'kind-weekly', 'prev-btn',
+       'next-btn', 'date-label', 'gen-status', 'summary', 'digest-meta', 'items-h',
+       'items', 'more-row', 'more-toggle', 'handled-toggle', 'handled'].forEach(id => {
         els[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = document.getElementById(id);
       });
       let generating = false;
       let switching = false;
       let handledOpen = false;
+      let moreOpen = false;
 
       // ---- formatting helpers ------------------------------------------------
       function kindLabel(k) {
@@ -163,6 +206,18 @@
         const opts = {weekday: 'short', day: 'numeric', month: 'short'};
         if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
         return d.toLocaleDateString(undefined, opts);
+      }
+      function weekMonday(day) {
+        const d = new Date(day + 'T12:00:00');
+        if (isNaN(d)) return day;
+        d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+        const p = n => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      }
+      // Weekly briefs are keyed to their week's Monday; "today's" target date
+      // therefore depends on the kind.
+      function homeDate(kind) {
+        return kind === 'weekly' ? weekMonday(state.today) : state.today;
       }
       function fmtWhen(iso) {
         if (!iso) return '';
@@ -186,6 +241,12 @@
           const v = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
           return Array.isArray(v) ? v : [];
         } catch (e) { return []; }
+      }
+      function parsePayload(s) {
+        try {
+          const v = typeof s.payload === 'string' ? JSON.parse(s.payload || '{}') : s.payload;
+          return v && typeof v === 'object' ? v : {};
+        } catch (e) { return {}; }
       }
       function citeChip(id) {
         const c = state.segMeta[String(id)];
@@ -223,7 +284,7 @@
 
       // ---- header: title, toggle, date navigation ----------------------------
       function navDates() {
-        let ds = (state.dates[state.kind] || []).concat([state.today, state.date]);
+        let ds = (state.dates[state.kind] || []).concat([homeDate(state.kind), state.date]);
         ds = ds.filter((d, i) => ds.indexOf(d) === i).sort().reverse();  // newest first
         return ds;
       }
@@ -235,8 +296,8 @@
         els.kindDaily.setAttribute('aria-pressed', String(!weekly));
         els.kindWeekly.setAttribute('aria-pressed', String(weekly));
         const ds = navDates(), i = ds.indexOf(state.date);
-        const isToday = state.date === state.today;
-        els.dateLabel.textContent = isToday ? 'Today' : fmtDay(state.date);
+        const isHome = state.date === homeDate(state.kind);
+        els.dateLabel.textContent = isHome ? (weekly ? 'This week' : 'Today') : fmtDay(state.date);
         els.dateLabel.title = fmtDay(state.date);
         const prev = ds[i + 1] || null, next = i > 0 ? ds[i - 1] : null;
         els.prevBtn.disabled = !prev || switching;
@@ -247,17 +308,38 @@
         els.nextBtn.setAttribute('aria-label', next ? 'Newer brief — ' + fmtDay(next) : 'No newer briefs');
         els.prevBtn.title = prev ? fmtDay(prev) : 'No older briefs';
         els.nextBtn.title = next ? fmtDay(next) : 'No newer briefs';
-        els.regenBtn.textContent = isToday ? 'Regenerate'
+        els.regenBtn.textContent = isHome ? 'Regenerate'
           : (weekly ? "Generate this week's" : "Generate today's");
         els.regenBtn.title = 'Writes a fresh ' + (weekly ? 'weekly review' : 'daily brief') +
           ' with the local model — takes a minute or two';
       }
 
       // ---- summary ------------------------------------------------------------
+      function statsRowHtml(st) {
+        if (!st) return '';
+        const chips = [
+          '<span class="stat"><strong>' + SB.esc(String(st.tasks_completed)) + '</strong> tasks done</span>',
+          '<span class="stat">commitments <strong>' + SB.esc(String(st.commitments_cleared)) +
+            '</strong> cleared / <strong>' + SB.esc(String(st.commitments_added)) + '</strong> added</span>',
+          '<span class="stat"><strong>' + SB.esc(String(st.goals_progressed)) + '</strong> goals progressed</span>',
+          '<span class="stat"><strong>' + SB.esc(String(st.meeting_hours)) + '</strong>h in meetings</span>',
+        ];
+        if (st.plan_adherence_pct !== null && st.plan_adherence_pct !== undefined) {
+          chips.push('<span class="stat"><strong>' + SB.esc(String(st.plan_adherence_pct)) +
+                     '%</strong> plan adherence</span>');
+        }
+        return '<div class="stats-row" role="group" aria-label="This week in numbers">' +
+               chips.join('') + '</div>';
+      }
+      function digestStats() {
+        const d = state.digest;
+        return d && d.payload && d.payload.stats ? d.payload.stats : null;
+      }
       function renderSummary() {
         const d = state.digest;
         if (d && d.summary_md) {
-          els.summary.innerHTML = '<div class="summary-card">' + mdBrief(d.summary_md) + '</div>';
+          els.summary.innerHTML = '<div class="summary-card">' + mdBrief(d.summary_md) + '</div>' +
+            (state.kind === 'weekly' ? statsRowHtml(digestStats()) : '');
           els.digestMeta.textContent = 'Generated ' + fmtWhen(d.created_at) +
             (d.model ? ' · ' + d.model : '');
           els.digestMeta.hidden = false;
@@ -280,6 +362,59 @@
         els.summary.innerHTML = '<div class="empty"><strong>' + strong + '</strong> ' + hint + '</div>';
       }
 
+      // ---- copy as markdown ---------------------------------------------------
+      function briefMarkdown() {
+        const name = state.kind === 'weekly' ? 'Weekly review' : 'Morning brief';
+        const lines = ['# ' + name + ' — ' + state.date, ''];
+        const d = state.digest;
+        if (d && d.summary_md) {
+          lines.push(d.summary_md.trim(), '');
+        }
+        const st = digestStats();
+        if (st) {
+          lines.push('## This week in numbers');
+          lines.push('- Tasks completed: ' + st.tasks_completed);
+          lines.push('- Commitments cleared vs added: ' + st.commitments_cleared +
+                     ' vs ' + st.commitments_added);
+          lines.push('- Goals with progress: ' + st.goals_progressed);
+          lines.push('- Meeting hours: ' + st.meeting_hours);
+          if (st.plan_adherence_pct !== null && st.plan_adherence_pct !== undefined) {
+            lines.push('- Plan adherence: ' + st.plan_adherence_pct + '%');
+          }
+          lines.push('');
+        }
+        if (state.suggestions.length) {
+          lines.push('## Items');
+          state.suggestions.forEach(s => {
+            lines.push('- **' + kindLabel(s.kind) + '** ' + s.title +
+                       (s.detail ? ' — ' + s.detail : ''));
+          });
+          lines.push('');
+        }
+        return lines.join('\n');
+      }
+      async function copyMarkdown() {
+        const md = briefMarkdown();
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(md);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = md;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+          }
+          SB.toast('Copied as Markdown.', 'success');
+        } catch (e) {
+          SB.toast('Couldn’t copy — your browser blocked clipboard access.', 'error');
+        }
+      }
+      els.copyMd.addEventListener('click', copyMarkdown);
+
       // ---- items ---------------------------------------------------------------
       function priorityDots(imp) {
         const lvl = imp >= 0.7 ? 3 : imp >= 0.4 ? 2 : 1;
@@ -298,6 +433,26 @@
                    : ' title="' + (s.voted ? switchTitle : idleTitle) + '"') +
           '>' + glyph + '</button>';
       }
+      function trackBtn(s) {
+        // Commitment items promote straight into the task backlog.
+        if (String(s.kind || '').indexOf('commitment') !== 0) return '';
+        const p = parsePayload(s);
+        if (!p.key || !p.key.edge) return '';
+        return '<button type="button" data-act="track" ' +
+          'title="Track it — it becomes a task in your backlog">Track as task</button>';
+      }
+      function snoozeGroup(s) {
+        const kl = SB.esc(kindLabel(s.kind));
+        return '<span class="snooze-group" role="group" aria-label="Snooze this item">' +
+          '<span class="lbl" aria-hidden="true">Snooze</span>' +
+          [1, 3, 7].map(d => '<button type="button" data-act="snooze" data-days="' + d +
+            '" title="Hide just this item for ' + d + ' day' + (d === 1 ? '' : 's') +
+            '">' + d + 'd</button>').join('') +
+          '</span>' +
+          '<button type="button" class="linklike" data-act="snooze_kind" ' +
+          'aria-label="Snooze every ‘' + kl + '’ item for 7 days" ' +
+          'title="Hide ALL ‘' + kl + '’ items for 7 days">snooze all ' + kl + '</button>';
+      }
       function itemHtml(s) {
         const kl = kindLabel(s.kind);
         const cites = parseCites(s.citations).map(citeChip).filter(Boolean).join(' ');
@@ -306,11 +461,10 @@
           ((s.detail || cites) ? '<div class="meta sug-detail">' + SB.esc(s.detail || '') +
             (cites ? ' ' + cites : '') + '</div>' : '') +
           '<div class="acts">' +
+          trackBtn(s) +
           '<button type="button" data-act="done">Done</button>' +
           '<button type="button" data-act="dismiss">Dismiss</button>' +
-          '<button type="button" data-act="snooze" aria-label="Snooze — hide all ‘' +
-            SB.esc(kl) + '’ items for 7 days" title="Hide all ‘' + SB.esc(kl) +
-            '’ items for 7 days">Snooze 7d</button>' +
+          snoozeGroup(s) +
           voteBtn('up', '👍', s, 'Helpful — more like this',
                   'Changed your mind? More like this instead') +
           voteBtn('down', '👎', s, 'Not helpful — fewer like this',
@@ -326,7 +480,7 @@
       async function refreshOpen(focusId) {
         try {
           const sg = await SB.api('/api/suggestions?date=' + state.date, {quiet: true});
-          state.suggestions = (sg && sg.suggestions) || [];
+          state.suggestions = mergeLists((sg && sg.suggestions) || [], (sg && sg.more) || []);
           ((sg && sg.citations) || []).forEach(c => {
             state.segMeta[String(c.segment_id)] = c;
           });
@@ -339,9 +493,20 @@
         els.itemsH.textContent = state.suggestions.length
           ? 'Items (' + state.suggestions.length + ')' : 'Items';
       }
+      function renderMoreRow(hiddenCount) {
+        const anyMore = state.suggestions.some(s => s._more);
+        els.moreRow.hidden = !anyMore;
+        if (!anyMore) return;
+        els.moreToggle.textContent = moreOpen
+          ? 'Show fewer'
+          : 'Show ' + hiddenCount + ' more item' + (hiddenCount === 1 ? '' : 's');
+        els.moreToggle.setAttribute('aria-expanded', String(moreOpen));
+      }
       function renderItems() {
         updateCount();
         els.items.textContent = '';
+        const visible = state.suggestions.filter(s => moreOpen || !s._more);
+        const hiddenCount = state.suggestions.length - visible.length;
         if (!state.suggestions.length) {
           const div = document.createElement('div');
           div.className = 'empty';
@@ -352,11 +517,12 @@
             : '<strong>No open items from this day</strong> Anything already handled is ' +
               'under “Show handled items” below.';
           els.items.appendChild(div);
+          renderMoreRow(0);
           return;
         }
         const ul = document.createElement('ul');
         ul.className = 'sug-list';
-        state.suggestions.forEach(s => {
+        visible.forEach(s => {
           const li = document.createElement('li');
           li.className = 'sug';
           li.id = 'sug-' + s.id;
@@ -364,13 +530,20 @@
           ul.appendChild(li);
         });
         els.items.appendChild(ul);
+        renderMoreRow(hiddenCount);
       }
+      els.moreToggle.addEventListener('click', () => {
+        moreOpen = !moreOpen;
+        renderItems();
+      });
 
       // ---- item actions --------------------------------------------------------
-      function showUndo(li, s, action, restored) {
+      function showUndo(li, s, action, restored, days) {
         const n = restored ? restored.length : 1;
         const msg = action === 'done' ? 'Done ✓'
           : action === 'dismiss' ? 'Dismissed'
+          : action === 'snooze' ? 'Snoozed for ' + (days || 7) + ' day' +
+            ((days || 7) === 1 ? '' : 's')
           : 'Snoozed — ' + (n > 1 ? n + ' ‘' + kindLabel(s.kind) + '’ items'
                                   : '‘' + kindLabel(s.kind) + '’ items') +
             ' hidden for 7 days';
@@ -405,8 +578,8 @@
           } catch (e) { release(); return; }  // SB.api toasted; row stays for retry
           settled = true;
           clearTimeout(timer);
-          if (action === 'snooze') {
-            // The snooze undo restores every same-kind item server-side —
+          if (action === 'snooze_kind') {
+            // The kind-snooze undo restores every same-kind item server-side —
             // re-fetch so the list matches; fall back to a local restore.
             if (!(await refreshOpen(s.id))) {
               (restored || [s]).forEach(x => {
@@ -428,13 +601,34 @@
           if (handledOpen) loadHandled();
         });
       }
-      async function act(s, action, btn) {
+      async function act(s, action, btn, days) {
         const li = document.getElementById('sug-' + s.id);
         const err = li && li.querySelector('.act-err');
         if (err) err.hidden = true;
+        if (action === 'track') {
+          // Promote the underlying commitment into a task, then mark handled.
+          const p = parsePayload(s);
+          const edge = p.key && p.key.edge;
+          if (!edge) return;
+          try {
+            const d = await SB.api('/api/actions/' + edge + '/promote',
+                                   {method: 'POST', button: btn, quiet: true});
+            SB.toast(d && d.title ? 'Tracked as a task: “' + d.title + '”.'
+                                  : 'Tracked as a task.', 'success');
+          } catch (e) {
+            if (err) {
+              err.textContent = e.message || 'Couldn’t create the task — try again.';
+              err.hidden = false;
+            }
+            return;
+          }
+          action = 'done';  // the suggestion is handled — it lives in Tasks now
+        }
+        const body = {action};
+        if (action === 'snooze' && days) body.days = days;
         try {
           await SB.api('/api/suggestions/' + s.id + '/action',
-                       {method: 'POST', body: {action}, button: btn, quiet: true});
+                       {method: 'POST', body, button: btn, quiet: true});
         } catch (e) {
           if (err) {
             err.textContent = e.status ? 'Couldn’t save — try again.'
@@ -468,9 +662,9 @@
           return;
         }
         let removed = [s];
-        if (action === 'snooze') {
-          // Snooze hides the whole kind (as the button promises): drop the
-          // same-kind siblings here too, matching the server.
+        if (action === 'snooze_kind') {
+          // Kind-wide snooze hides the whole kind (as the button promises):
+          // drop the same-kind siblings here too, matching the server.
           removed = state.suggestions.filter(x => x.kind === s.kind);
           state.suggestions = state.suggestions.filter(x => x.kind !== s.kind);
           removed.forEach(x => {
@@ -482,7 +676,7 @@
           state.suggestions = state.suggestions.filter(x => x.id !== s.id);
         }
         updateCount();
-        showUndo(li, s, action, removed);
+        showUndo(li, s, action, removed, days);
         if (handledOpen) loadHandled();
       }
       els.items.addEventListener('click', ev => {
@@ -491,7 +685,7 @@
         const li = btn.closest('li.sug');
         const id = parseInt((li && li.id || '').replace('sug-', ''), 10);
         const s = state.suggestions.find(x => x.id === id);
-        if (s) act(s, btn.dataset.act, btn);
+        if (s) act(s, btn.dataset.act, btn, parseInt(btn.dataset.days || '', 10) || null);
       });
 
       // ---- handled (done / dismissed / snoozed) --------------------------------
@@ -535,8 +729,8 @@
                 err.hidden = false;
                 return;
               }
-              // Reopening a snoozed item also restores its same-kind siblings
-              // server-side — re-fetch both lists so they stay truthful.
+              // Reopening a kind-snoozed item also restores its same-kind
+              // siblings server-side — re-fetch both lists so they stay truthful.
               if (!(await refreshOpen())) {
                 s.status = 'open';
                 state.suggestions.push(s);
@@ -579,7 +773,8 @@
           state.kind = kind;
           state.date = date;
           state.digest = dg && dg.id ? dg : null;
-          state.suggestions = (sg && sg.suggestions) || [];
+          state.suggestions = mergeLists((sg && sg.suggestions) || [], (sg && sg.more) || []);
+          moreOpen = false;
           ((dg && dg.citations) || []).concat((sg && sg.citations) || []).forEach(c => {
             state.segMeta[String(c.segment_id)] = c;
           });
@@ -601,7 +796,7 @@
       els.kindWeekly.addEventListener('click', () => {
         if (state.kind === 'weekly') return;
         const ds = state.dates.weekly || [];
-        load('weekly', ds[0] || state.today, els.kindWeekly);
+        load('weekly', ds[0] || homeDate('weekly'), els.kindWeekly);
       });
       els.prevBtn.addEventListener('click', () => {
         if (els.prevBtn.dataset.date) load(state.kind, els.prevBtn.dataset.date, els.prevBtn);
@@ -629,11 +824,11 @@
         tick();
         genTimer = setInterval(tick, 1000);
       }
-      function genDone(kind, jumpToToday) {
+      function genDone(kind, jumpHome) {
         clearInterval(genTimer);
         clearTimeout(genPoll);
-        if (jumpToToday) {
-          history.replaceState(null, '', '/brief?kind=' + kind + '&date=' + state.today);
+        if (jumpHome) {
+          history.replaceState(null, '', '/brief?kind=' + kind + '&date=' + homeDate(kind));
         }
         SB.reload(kind === 'weekly' ? 'Weekly review ready.' : 'Brief ready.', 'success');
       }
@@ -651,18 +846,26 @@
         generating = true;
         const kind = state.kind;  // capture: the user may switch views mid-run
         showGenProgress(kind, Date.now());
+        let d = null;
         try {
-          await SB.api('/api/digest/generate',
-                       {method: 'POST', quiet: true, button: els.regenBtn,
-                        body: {kind: kind, force: true}});
-          genDone(kind, true);  // you asked for today's brief — show it
+          d = await SB.api('/api/digest/generate',
+                           {method: 'POST', quiet: true, button: els.regenBtn,
+                            body: {kind: kind, force: true}});
         } catch (e) {
           if (e.status === 409) { watchGeneration(kind, null); return; }  // join that run
           const why = e.status ? (e.message || 'HTTP ' + e.status)
                                : 'couldn’t reach the server';
           genFailed('Generation failed — ' + why +
             '. Check that the local model is running, then retry.');
+          return;
         }
+        if (d && d.queued) {
+          // A real model runs on the daemon's worker — follow it via the
+          // status poller instead of holding a request open for minutes.
+          watchGeneration(kind, null);
+          return;
+        }
+        genDone(kind, true);  // synchronous path (mock/dev): result is in
       }
 
       // Follow a run this page didn't start (a reload mid-run, another tab,
@@ -699,9 +902,9 @@
             // starts (same machine clock): stamp ≥ start means this run landed.
             const created = st.created_at ? Date.parse(st.created_at) : NaN;
             if (!isNaN(created) && created >= startedMs) {
-              // jump to today only if that's already the view — don't yank the
+              // jump home only if that's already the view — don't yank the
               // user out of a history page for a run they may not have started
-              genDone(kind, state.kind === kind && state.date === state.today);
+              genDone(kind, state.kind === kind && state.date === homeDate(kind));
               return;
             }
             genFailed('Generation stopped without finishing — check that the local ' +

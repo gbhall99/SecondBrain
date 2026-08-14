@@ -64,11 +64,25 @@ def test_natural_language_question_falls_back_to_or_query(conn, settings):
 
 
 def test_relaxed_query_strips_stopwords_and_dedupes():
+    # "say" is meaning-bearing (kept since the stopword-list slimming); "the"/
+    # "about"/"what" are filler and stripped; duplicates collapse.
     q = fulltext._relaxed_fts_query("What did I say about the vendor, the vendor demo?")
-    assert q == '"vendor" OR "demo"'
+    assert q == '"say" OR "vendor" OR "demo"'
     # All-stopword questions keep the raw tokens rather than matching nothing.
-    assert fulltext._relaxed_fts_query("what did i do") == '"what" OR "did" OR "i" OR "do"'
+    assert fulltext._relaxed_fts_query("what did i") == '"what" OR "did" OR "i"'
     assert fulltext._relaxed_fts_query("!!!") == '""'
+
+
+def test_relaxed_query_keeps_meaning_bearing_words():
+    # Negations and commitment verbs change what a line MEANS — they must
+    # survive the relaxed rewrite ("Dana said no to the deal").
+    q = fulltext._relaxed_fts_query("Dana said no to the deal, not the same offer")
+    for word in ("said", "no", "not", "same"):
+        assert f'"{word}"' in q
+    assert '"the"' not in q  # true filler still stripped
+    q = fulltext._relaxed_fts_query("what will I tell them we should own")
+    for word in ("will", "tell", "should", "own"):
+        assert f'"{word}"' in q
 
 
 def test_relaxed_search_is_injection_safe(conn):
@@ -266,3 +280,103 @@ def test_optout_does_not_shrink_results_below_available(conn, settings):
     hits = combined.search(conn, "pricing", limit=1, settings=settings)
     # The opted-out hit is filtered but the non-opted one still fills the page.
     assert len(hits) == 1 and "public" in hits[0].text
+
+
+def test_quoted_phrase_matches_adjacent_words_only(conn):
+    _seed(conn)
+    # "pricing model" is adjacent in the corpus; "model pricing" is not.
+    assert len(fulltext.search(conn, '"pricing model"')) == 1
+    assert fulltext.search(conn, '"model pricing"') == []
+    # phrase + extra term still ANDs
+    assert len(fulltext.search(conn, '"pricing model" quarter')) == 1
+    assert fulltext.search(conn, '"pricing model" zebra') == []
+
+
+def test_minus_token_excludes_terms(conn):
+    _seed(conn)
+    # Both segments exist; excluding "vendor" drops the demo line.
+    hits = fulltext.search(conn, "the -vendor", relaxed=False)
+    assert fulltext._fts_query("demo -vendor") == '"demo" NOT "vendor"'
+    hits = fulltext.search(conn, "scheduled -vendor")
+    assert hits == []
+    hits = fulltext.search(conn, "next -vendor")
+    assert len(hits) == 1 and "pricing" in hits[0].text
+    # excluding a quoted phrase works too
+    assert fulltext._fts_query('demo -"vendor demo"') == '"demo" NOT "vendor demo"'
+    assert fulltext.search(conn, 'demo -"vendor demo"') == []
+    # exclusions alone can't match anything (no bare NOT in FTS5)
+    assert fulltext._fts_query("-vendor") == '""'
+    assert fulltext.search(conn, "-vendor") == []
+
+
+def test_phrase_and_minus_queries_stay_injection_safe(conn):
+    _seed(conn)
+    for q in ('"pricing"; DROP TABLE--', '-"NEAR(', 'a -b" OR "c', '""', '-', '“smart quotes”'):
+        assert fulltext.search(conn, q) is not None  # no OperationalError
+
+
+def test_snippet_window_is_module_constant(conn):
+    assert fulltext.SNIPPET_TOKENS == 20
+    _seed(conn)
+    hits = fulltext.search(conn, "pricing")
+    # short segments come back whole (no ellipsis) under the wider window
+    assert "…" not in hits[0].snippet
+
+
+def test_fulltext_count_caps_and_filters(conn):
+    _seed(conn)
+    assert fulltext.count(conn, "pricing") == 1
+    assert fulltext.count(conn, "zebra") == 0
+    assert fulltext.count(conn, "pricing", cap=0) == 0  # capped
+    assert fulltext.count(conn, "pricing", until_utc="2026-01-01T00:00:00") == 0
+
+
+def test_search_total_service(conn, settings):
+    _seed(conn)
+    from secondbrain.query import service
+
+    assert service.search_total(conn, "pricing", settings=settings) == 1
+    # relaxed fallback also counts (full questions with stopwords)
+    assert service.search_total(
+        conn, "What was the plan for the pricing model?", settings=settings
+    ) >= 1
+
+
+def test_combined_exclude_speaker_id(conn, settings):
+    conn.execute("INSERT INTO speakers (id, name, kind, is_owner) VALUES (3, 'Me', 'owner', 1)")
+    af = models.insert_audio_file(
+        conn, AudioFile(path="/e.flac", started_at="2026-06-16T09:00:00.000Z", sample_rate=16000)
+    )
+    t = models.insert_transcript(conn, af, "mock", "mock", "en")
+    models.insert_segments(conn, [
+        Segment(t, af, 0.0, 1.0, "pricing mine", start_at="2026-06-16T09:00:00.000Z",
+                speaker_id=3),
+        Segment(t, af, 1.0, 2.0, "pricing theirs", start_at="2026-06-16T09:00:01.000Z"),
+    ])
+    hits = combined.search(conn, "pricing", settings=settings, exclude_speaker_id=3)
+    assert [h.text for h in hits] == ["pricing theirs"]
+
+
+def test_semantic_hits_carry_plain_snippet():
+    from secondbrain.search import semantic
+
+    long = "word " * 100
+    snip = semantic._truncate(long)
+    assert len(snip) <= semantic._SNIPPET_CHARS + 2 and snip.endswith("…")
+    assert semantic._truncate("short text") == "short text"
+
+
+def test_semantic_index_status_reports_coverage_and_model(conn, settings):
+    from secondbrain.search import semantic
+    from secondbrain.storage import state
+
+    _seed(conn)
+    st = semantic.index_status(conn, settings)
+    assert st["available"] is False  # semantic disabled in test settings
+    assert st["total_segments"] == 2 and st["indexed_segments"] == 0
+    assert st["model_mismatch"] is False and st["note"] is None
+    # A stored model differing from the configured one is flagged, with copy.
+    state.set_state(conn, semantic.INDEX_MODEL_KEY, "old-model")
+    st = semantic.index_status(conn, settings)
+    assert st["model_mismatch"] is True
+    assert "old-model" in st["note"] and "re-index" in st["note"]

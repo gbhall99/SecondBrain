@@ -50,6 +50,25 @@ def test_diarization_maintenance_reenqueues_after_day_rolls_over(conn, tmp_path)
     assert len(_pending_types(conn)) > n_after_first
 
 
+def test_extraction_catchup_selects_only_pending_finished_conversations(conn, tmp_path):
+    d = Daemon(settings=_settings(tmp_path, extraction={"enabled": True}))
+    rows = [
+        ("diarized", "pending"),            # → enqueued
+        ("skipped_incomplete", "pending"),  # diarization skipped; still extractable
+        ("diarized", "extracted"),          # already done
+        ("diarized", "skipped"),            # sub-threshold: must NOT be re-picked
+        ("open", "pending"),                # not finished yet
+    ]
+    for status, kstatus in rows:
+        conn.execute(
+            "INSERT INTO conversations (started_at, status, knowledge_status) "
+            "VALUES ('2026-06-16T09:00:00.000Z', ?, ?)",
+            (status, kstatus),
+        )
+    d._extraction_catchup(conn)
+    assert _pending_types(conn).count("extract_knowledge") == 2
+
+
 def test_proactive_maintenance_disabled_by_default_enqueues_when_due(conn, tmp_path):
     # proactive enabled; digest_hour=0 so it's always "due" by hour
     d = Daemon(settings=_settings(tmp_path, proactive={"enabled": True, "digest_hour": 0}))
@@ -149,3 +168,59 @@ def test_watchdog_restarts_dead_thread_with_backoff(tmp_path):
     d._check_threads()
     assert len(runs) == 3
     assert isinstance(d._threads["flaky"], threading.Thread)
+
+
+# --- single-instance lease (batch 3) ------------------------------------------
+
+
+def test_lease_acquire_release_roundtrip(conn):
+    from secondbrain import daemon
+
+    assert daemon.acquire_lease(conn) is True  # no lease yet
+    # our own live lease is re-acquirable (restart within the same pid)
+    assert daemon.acquire_lease(conn) is True
+    daemon.release_lease(conn)
+    assert not state.get_state(conn, daemon.LEASE_KEY)
+
+
+def test_lease_refuses_second_daemon_while_holder_alive(conn, monkeypatch):
+    import json
+    import os
+
+    from secondbrain import daemon
+
+    assert daemon.acquire_lease(conn) is True
+    # Simulate a second process: same live pid on record, different current pid.
+    monkeypatch.setattr(os, "getpid", lambda: os.getppid())
+    assert daemon.acquire_lease(conn) is False
+    holder = json.loads(state.get_state(conn, daemon.LEASE_KEY))
+    assert holder["pid"] != os.getpid()  # lease untouched
+
+
+def test_lease_overrides_stale_holder(conn):
+    import json
+    import os
+
+    from secondbrain import daemon
+
+    # A crashed daemon left a lease behind with a dead pid.
+    state.set_state(
+        conn, daemon.LEASE_KEY,
+        json.dumps({"pid": 2**22 - 1, "started_at": "2026-01-01T00:00:00.000Z"}),
+    )
+    assert daemon.acquire_lease(conn) is True
+    holder = json.loads(state.get_state(conn, daemon.LEASE_KEY))
+    assert holder["pid"] == os.getpid()
+
+
+def test_release_lease_only_for_own_pid(conn):
+    import json
+
+    from secondbrain import daemon
+
+    state.set_state(
+        conn, daemon.LEASE_KEY,
+        json.dumps({"pid": 1, "started_at": "2026-01-01T00:00:00.000Z"}),
+    )
+    daemon.release_lease(conn)  # not ours → untouched
+    assert json.loads(state.get_state(conn, daemon.LEASE_KEY))["pid"] == 1

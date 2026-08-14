@@ -4,9 +4,11 @@ import pytest
 
 from secondbrain.pipeline.diarize import (
     MockDiarizer,
+    _apply_segmentation_threshold,
     _load_pipeline,
     _shim_hf_hub_use_auth_token,
     _shim_torchaudio_metadata,
+    _speaker_count_kwargs,
     _trusted_torch_load,
     _unpack_diarize,
     deterministic_embedding,
@@ -145,6 +147,70 @@ def test_trusted_torch_load_defaults_weights_only_false_and_restores(monkeypatch
         assert seen.get("weights_only") is False
 
     assert fake_torch.load is original  # restored on exit
+
+
+class _FakePipeline:
+    """Stands in for a pyannote pipeline: apply() signature + hyper-params."""
+
+    def __init__(self, params=None):
+        self._params = params if params is not None else {}
+        self.instantiated_with = None
+
+    def apply(self, file, num_speakers=None, min_speakers=None, max_speakers=None,
+              return_embeddings=False):
+        return ("diar", "emb")
+
+    def parameters(self, instantiated=False):
+        return self._params
+
+    def instantiate(self, params):
+        self.instantiated_with = params
+
+
+def _dcfg(settings, **over):
+    for k, v in over.items():
+        setattr(settings.diarization, k, v)
+    return settings.diarization
+
+
+def test_speaker_count_kwargs_forwards_supported_hints(settings):
+    p = _FakePipeline()
+    assert _speaker_count_kwargs(p, _dcfg(settings, min_speakers=0, max_speakers=0)) == {}
+    assert _speaker_count_kwargs(p, _dcfg(settings, min_speakers=2, max_speakers=4)) == {
+        "min_speakers": 2, "max_speakers": 4,
+    }
+    # equal non-zero min/max collapse to the stronger num_speakers hint
+    assert _speaker_count_kwargs(p, _dcfg(settings, min_speakers=3, max_speakers=3)) == {
+        "num_speakers": 3,
+    }
+
+
+def test_speaker_count_kwargs_skips_unsupported_params(settings):
+    class NoHints:
+        def apply(self, file, return_embeddings=False):  # older/other API
+            return ("diar", "emb")
+
+    d = _dcfg(settings, min_speakers=2, max_speakers=4)
+    assert _speaker_count_kwargs(NoHints(), d) == {}
+
+
+def test_apply_segmentation_threshold_when_exposed(settings):
+    p = _FakePipeline(params={"segmentation": {"threshold": 0.5, "min_duration_off": 0.0}})
+    assert _apply_segmentation_threshold(p, 0.7) is True
+    assert p.instantiated_with["segmentation"]["threshold"] == 0.7
+    assert p.instantiated_with["segmentation"]["min_duration_off"] == 0.0  # preserved
+
+
+def test_apply_segmentation_threshold_noop_when_absent(settings):
+    # pyannote 3.1's powerset segmentation exposes no threshold — must not crash
+    p = _FakePipeline(params={"segmentation": {"min_duration_off": 0.0}})
+    assert _apply_segmentation_threshold(p, 0.7) is False
+    assert p.instantiated_with is None
+
+    class NoParams:
+        pass
+
+    assert _apply_segmentation_threshold(NoParams(), 0.7) is False
 
 
 def test_deterministic_embedding_is_stable_and_normalized():

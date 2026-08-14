@@ -26,6 +26,7 @@ _CRED_KEY = "auth_credentials"
 _SECRET_KEY = "auth_session_secret"
 _GEN_KEY = "auth_session_generation"
 _PBKDF2_ROUNDS = 200_000
+MIN_PASSWORD_LENGTH = 8
 COOKIE_NAME = "sb_session"
 # /favicon.ico is exempt like /static: browsers fetch it unauthenticated and it
 # only serves the emoji icon (nothing personal).
@@ -53,9 +54,18 @@ def verify_password(stored: str, password: str) -> bool:
 # --- credential + secret storage (app_state) ---------------------------------
 
 
-def set_password(conn: sqlite3.Connection, username: str, password: str) -> None:
+def set_password(conn: sqlite3.Connection, username: str, password: str) -> int:
+    """Store the credentials (hashed) and revoke every outstanding session.
+
+    A password change must sign out everyone holding an old cookie — including
+    whoever prompted the change. Returns the new session generation. Raises
+    ``ValueError`` for a too-short password.
+    """
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"password must be at least {MIN_PASSWORD_LENGTH} characters")
     creds = json.dumps({"username": username, "hash": hash_password(password)})
     state.set_state(conn, _CRED_KEY, creds)
+    return bump_session_generation(conn)
 
 
 def get_credentials(conn: sqlite3.Connection) -> dict | None:

@@ -20,6 +20,17 @@ log = logging.getLogger(__name__)
 
 _EMBED_DIM = 384  # bge-small / all-MiniLM family
 
+# app_state key recording which embedding model built the vector index. If the
+# configured model later changes, old vectors are in a different space and
+# similarity scores are meaningless — surface that instead of failing quietly.
+INDEX_MODEL_KEY = "semantic_index_model"
+
+# Semantic hits carry a plain truncated-text snippet about this long so search
+# results render with context (FTS snippets don't exist for vector matches).
+_SNIPPET_CHARS = 180
+
+_model_mismatch_logged = False
+
 
 def _serialize(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
@@ -99,6 +110,69 @@ def ensure_index(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def _record_index_model(conn: sqlite3.Connection, model_name: str) -> None:
+    """Remember which embedding model the vectors were built with (app_state)."""
+    from secondbrain.storage import state
+
+    if state.get_state(conn, INDEX_MODEL_KEY) != model_name:
+        state.set_state(conn, INDEX_MODEL_KEY, model_name)
+
+
+def _check_index_model(conn: sqlite3.Connection, settings: Settings) -> bool:
+    """True when the stored index model matches the configured one (or nothing
+    is stored yet). Logs a warning once per process on mismatch."""
+    from secondbrain.storage import state
+
+    global _model_mismatch_logged
+    stored = state.get_state(conn, INDEX_MODEL_KEY)
+    configured = settings.search.embedding_model
+    if stored and stored != configured:
+        if not _model_mismatch_logged:
+            log.warning(
+                "semantic index was built with embedding model %r but %r is "
+                "configured — similarity scores are unreliable; re-index "
+                "(delete segment_vectors or run the backfill after clearing)",
+                stored, configured,
+            )
+            _model_mismatch_logged = True
+        return False
+    return True
+
+
+def index_status(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
+    """Health metadata for the semantic index: availability, embedding
+    coverage (indexed/total segments), and the stored-vs-configured model."""
+    from secondbrain.storage import state
+
+    settings = settings or get_settings()
+    available = is_available(conn, settings)
+    total = conn.execute("SELECT COUNT(*) AS n FROM transcript_segments").fetchone()["n"]
+    indexed = 0
+    if try_load_sqlite_vec(conn):
+        try:
+            indexed = conn.execute(
+                "SELECT COUNT(*) AS n FROM segment_vectors"
+            ).fetchone()["n"]
+        except sqlite3.OperationalError:
+            indexed = 0  # vec table not created yet
+    stored = state.get_state(conn, INDEX_MODEL_KEY)
+    configured = settings.search.embedding_model
+    mismatch = bool(stored and stored != configured)
+    return {
+        "available": available,
+        "indexed_segments": int(indexed),
+        "total_segments": int(total),
+        "index_model": stored,
+        "configured_model": configured,
+        "model_mismatch": mismatch,
+        "note": (
+            f"semantic index built with {stored}, configured {configured} — re-index"
+            if mismatch
+            else None
+        ),
+    }
+
+
 def index_segments(
     conn: sqlite3.Connection,
     segment_ids: list[int],
@@ -115,6 +189,7 @@ def index_segments(
         "INSERT OR REPLACE INTO segment_vectors(segment_id, embedding) VALUES (?, ?)",
         [(sid, _serialize(v)) for sid, v in zip(segment_ids, vectors, strict=False)],
     )
+    _record_index_model(conn, settings.search.embedding_model)
     return len(segment_ids)
 
 
@@ -206,6 +281,7 @@ def search(
     embedder = _get_embedder(settings)
     if embedder is None or not ensure_index(conn):
         return []
+    _check_index_model(conn, settings)  # warn (once) on stale-model vectors
     qvec = _serialize(embedder.encode([query])[0])
     # KNN always returns k rows no matter how far away they are; without a
     # ceiling an unmatched query "finds" arbitrary segments and the caller can
@@ -256,7 +332,21 @@ def search(
             end_offset_s=r["end_offset_s"],
             start_at=r["start_at"],
             score=float(r["distance"]),  # embedding distance: lower is better
-            extra={"distance": round(float(r["distance"]), 4)},
+            # Plain truncated snippet (no highlight sentinels — there is no
+            # keyword to mark); "plain" tells the UI not to expect any.
+            snippet=_truncate(r["text"]),
+            extra={"distance": round(float(r["distance"]), 4), "snippet_plain": True},
         )
         for r in kept[:limit]
     ]
+
+
+def _truncate(text: str, limit: int = _SNIPPET_CHARS) -> str:
+    """Whole-word truncation to ~limit chars with an ellipsis."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut + " …"
