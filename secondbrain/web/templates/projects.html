@@ -27,6 +27,10 @@
     th[aria-sort="ascending"] .sortbtn::after { content: " ↑"; width: auto; }
     th[aria-sort="descending"] .sortbtn::after { content: " ↓"; width: auto; }
     .foot { margin-top: .55rem; }
+    @media (max-width: 480px) {
+      .controls input[type="search"] { max-width: none; flex-basis: 100%; }
+      #proj-count { margin-left: 0; }
+    }
 {% endblock %}
 {% block content %}
   <h1>Projects</h1>
@@ -81,7 +85,12 @@
       <td class="num{{ ' zero' if not p.conversations }}" data-v="{{ p.conversations }}">{{ p.conversations }}</td>
       <td class="num{{ ' zero' if not p.edges }}" data-v="{{ p.edges }}">{{ p.edges }}</td>
       <td class="num{{ ' zero' if not p.linked_goals }}" data-v="{{ p.linked_goals }}">{{ p.linked_goals }}</td>
-      <td class="num{{ ' zero' if not p.open_action_items }}" data-v="{{ p.open_action_items }}">{{ p.open_action_items }}</td>
+      <td class="num{{ ' zero' if not p.open_action_items }}" data-v="{{ p.open_action_items }}">
+        {%- if p.open_action_items -%}
+          <a href="/project/{{ p.node_id }}#action-items"
+             title="Open {{ p.label }}’s action items">{{ p.open_action_items }}</a>
+        {%- else %}{{ p.open_action_items }}{% endif -%}
+      </td>
       <td class="num" data-v="{{ p.last_seen or '' }}">
         {%- if p.last_seen -%}
           <time datetime="{{ p.last_seen }}" title="{{ p.last_seen | localdt or p.last_seen }}">
@@ -133,48 +142,32 @@
         if (wrap) wrap.hidden = shown === 0;
       }
 
-      if (filter) filter.addEventListener('input', apply);
+      function syncFilterURL() {
+        try {
+          var u = new URL(location.href);
+          var q = (filter && filter.value || '').trim();
+          if (q) u.searchParams.set('f', q); else u.searchParams.delete('f');
+          history.replaceState(null, '', u);
+        } catch (e) { /* keep the current URL */ }
+      }
+      if (filter) filter.addEventListener('input', function () { apply(); syncFilterURL(); });
       if (reset) {
         reset.addEventListener('click', function () {
           if (filter) filter.value = '';
           apply();
+          syncFilterURL();
           if (filter) filter.focus();
         });
       }
+      // Restore a bookmarked filter (?f=…).
+      try {
+        var f0 = new URLSearchParams(location.search).get('f');
+        if (f0 && filter) { filter.value = f0; apply(); }
+      } catch (e) { /* defaults */ }
 
-      // --- column sorting (server order = activity rank) ---------------------
-      var current = { key: null, dir: 0 };
-
-      function cellValue(tr, idx, type) {
-        var td = tr.cells[idx];
-        var v = td ? td.getAttribute('data-v') : null;
-        if (v === null) v = td ? td.textContent : '';
-        if (type === 'num') { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
-        return v.trim().toLowerCase();
-      }
-
-      table.tHead.addEventListener('click', function (e) {
-        var btn = e.target.closest && e.target.closest('.sortbtn');
-        if (!btn) return;
-        var th = btn.closest('th');
-        var idx = th.cellIndex;
-        var type = btn.getAttribute('data-type');
-        var key = btn.getAttribute('data-key');
-        // Names sort A→Z first; counts and dates sort biggest/newest first.
-        var dir = (current.key === key) ? -current.dir : (type === 'text' ? 1 : -1);
-        current = { key: key, dir: dir };
-        rows.sort(function (a, b) {
-          var av = cellValue(a, idx, type), bv = cellValue(b, idx, type);
-          if (av < bv) return -dir;
-          if (av > bv) return dir;
-          return 0;
-        });
-        rows.forEach(function (tr) { tbody.appendChild(tr); });
-        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (h) {
-          h.removeAttribute('aria-sort');
-        });
-        th.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
-      });
+      // Column sorting (shared helper; sort survives reloads via ?sort=).
+      // Server order = activity rank.
+      SB.sortableTable(table, { urlKey: 'sort' });
     })();
   </script>
   {% endif %}

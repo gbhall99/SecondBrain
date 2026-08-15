@@ -4,6 +4,32 @@
     .daynav { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin: .7rem 0 .9rem; }
     .daynav input[type="date"] { padding: .3rem .5rem; font-size: .92rem; }
     @media (hover: none) { .kbd-hint { display: none; } }
+    /* Conversation TOC: a sticky chip row of meeting start times (+ initials)
+       jumping to anchors; the current section is highlighted on scroll. */
+    .toc { position: sticky; top: 2.6rem; z-index: 90; background: var(--bg);
+           display: flex; flex-wrap: wrap; gap: .3rem; padding: .3rem 0 .4rem;
+           border-bottom: 1px solid var(--line); margin: .2rem 0 .5rem; }
+    .toc a.pill { font-size: .78rem; padding: .22rem .6rem; }
+    .toc a.pill[aria-current="true"] { background: var(--fg); color: var(--bg); }
+    .toc .toc-inits { color: var(--muted); font-size: .72rem; }
+    .toc a.pill[aria-current="true"] .toc-inits { color: inherit; }
+    /* In-day filter row (text + person), combinable with needs-review. */
+    .dayfilter { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center;
+                 margin: .4rem 0 .2rem; }
+    .dayfilter input[type=search] { flex: 1 1 10rem; min-width: 0; }
+    .dayfilter select { font-size: .92rem; padding: .35rem .5rem; max-width: 12rem; }
+    /* Per-conversation extraction strip (decisions + action items). */
+    .convex { background: var(--soft); border-radius: 8px; padding: .5rem .8rem;
+              margin: .3rem 0 .45rem; font-size: .88rem; }
+    .convex .kind { text-transform: uppercase; letter-spacing: .04em;
+                    color: var(--muted); font-size: .72rem; font-weight: 600; }
+    .convex ul { margin: .1rem 0 .3rem; padding-left: 1.1rem; }
+    .convex li { margin: .12rem 0; overflow-wrap: anywhere; }
+    .convex .trackbtn { font-size: .78rem; padding: .18rem .55rem; }
+    .convex .tracked { color: var(--ok); white-space: nowrap; font-size: .8rem; }
+    .convex details summary { cursor: pointer; color: var(--muted); font-size: .82rem;
+                              width: fit-content; border-radius: 4px; }
+    .convex-foot { margin: .1rem 0 0; }
     .summary { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem; margin: .9rem 0 .4rem; }
     .filter { cursor: pointer; user-select: none; }
     .filter input { padding: 0; margin: 0 .4rem 0 0; accent-color: currentColor; vertical-align: -1px; }
@@ -29,6 +55,13 @@
     .seg-head time { font-variant-numeric: tabular-nums; }
     .playbtn { font-size: .72rem; line-height: 1.1; padding: .22rem .5rem;
                border-radius: 999px; color: var(--muted); }
+    /* Phone tap targets: the play / confirm / fix controls must be comfortably
+       tappable (>=40px effective) on the mobile breakpoint. */
+    @media (max-width: 480px) {
+      .playbtn, .confirmbtn, .fixbtn, .disputebtn { min-height: 40px;
+        min-width: 40px; padding: .45rem .7rem; font-size: .9rem; }
+      .convex .trackbtn { min-height: 40px; padding: .45rem .7rem; }
+    }
     .playbtn:hover:not(:disabled) { color: var(--fg); }
     .playbtn[aria-pressed="true"] { color: var(--fg); border-color: var(--fg); }
     .spk { font-weight: 600; }
@@ -125,21 +158,88 @@
         then you can correct speakers here.</span></div>
     {% endif %}
 
+    {# Conversation TOC: start times + participant initials, jumping to the
+       conv anchors below; the current section highlights on scroll. #}
+    {% if blocks|length > 1 %}
+      <nav class="toc" aria-label="Conversations on this day" id="conv-toc">
+        {% for b in blocks %}
+          {% set inits = [] %}
+          {% for p in b.participants %}{% if inits.append(p[:1] | upper) %}{% endif %}{% endfor %}
+          <a class="pill" href="#conv-{{ loop.index }}" data-conv="{{ loop.index }}"
+             title="{{ b.segments|length }} line{{ 's' if b.segments|length != 1 }} · {{ b.participants | join(', ') }}">
+            <time data-ts="{{ b.started_at }}">{{ b.started_at | localhms }}</time>
+            {%- if inits %} <span class="toc-inits">{{ inits | join('') }}</span>{% endif %}</a>
+        {% endfor %}
+      </nav>
+    {% endif %}
+
+    {# In-day filter: free-text over the lines + a person filter (same voices
+       as the fix picker), combinable with "Needs review only" above. #}
+    <div class="dayfilter">
+      <label class="visually-hidden" for="seg-filter">Filter transcript lines</label>
+      <input type="search" id="seg-filter" placeholder="Filter lines…" autocomplete="off" />
+      <label class="visually-hidden" for="seg-person">Filter by person</label>
+      <select id="seg-person">
+        <option value="">Everyone</option>
+        {% for sp in speakers %}
+          <option value="{{ sp.id }}">{{ sp.name or sp.display_label or ('#' ~ sp.id) }}</option>
+        {% endfor %}
+        <option value="none">Unattributed</option>
+      </select>
+      <button type="button" class="linklike" id="seg-filter-clear" hidden>Clear</button>
+      <span class="meta" id="seg-filter-count" aria-live="polite"></span>
+    </div>
+
     {% macro conv_head(b) -%}
       <time data-ts="{{ b.started_at }}" datetime="{{ b.started_at }}">{{ b.started_at | localhms }}</time>
       {%- if b.ended_at and b.ended_at != b.started_at %} –
       <time data-ts="{{ b.ended_at }}" datetime="{{ b.ended_at }}">{{ b.ended_at | localhms }}</time>
       {%- endif %} · {{ b.segments|length }} line{{ 's' if b.segments|length != 1 }}
+      {%- if b.participants %} · {{ b.participants | join(', ') }}{% endif %}
+    {%- endmacro %}
+
+    {% set conv_extractions_map = conv_extractions or {} %}
+    {% macro convex_item(it, is_action) -%}
+      <li>{% if it.source_seg %}<a href="#seg-{{ it.source_seg }}"
+            title="Jump to the source line">{{ it.object_text or '(unspecified)' }}</a>
+          {%- else %}{{ it.object_text or '(unspecified)' }}{% endif %}
+        {%- if it.due_date %} <span class="meta">· due {{ it.due_date }}</span>{% endif %}
+        {%- if is_action %}
+          {% if it.task_id %} <span class="tracked" title="Already in your task backlog">✓ tracked</span>
+          {%- else %} <button type="button" class="trackbtn" data-edge="{{ it.edge_id }}"
+                  title="Track it — it becomes a task in your backlog">Track as task</button>{% endif %}
+        {%- endif %}</li>
+    {%- endmacro %}
+
+    {% macro conv_ex_strip(b) -%}
+      {% set ex = conv_extractions_map.get(b.conversation_id) %}
+      {% if ex and (ex.decisions or ex.action_items) %}
+        {% set n_items = ex.decisions|length + ex.action_items|length %}
+        <div class="convex">
+          {% if n_items > 3 %}<details><summary>{{ n_items }} extracted item{{ 's' if n_items != 1 }} — decisions &amp; action items</summary>{% endif %}
+          {% if ex.decisions %}
+            <span class="kind">Decisions</span>
+            <ul>{% for it in ex.decisions %}{{ convex_item(it, false) }}{% endfor %}</ul>
+          {% endif %}
+          {% if ex.action_items %}
+            <span class="kind">Action items</span>
+            <ul>{% for it in ex.action_items %}{{ convex_item(it, true) }}{% endfor %}</ul>
+          {% endif %}
+          <p class="meta convex-foot"><a href="/decisions">All decisions →</a></p>
+          {% if n_items > 3 %}</details>{% endif %}
+        </div>
+      {% endif %}
     {%- endmacro %}
 
     {% for b in blocks %}
-      <section class="conv">
+      <section class="conv" id="conv-{{ loop.index }}">
         {% if heavy %}
           <details class="convd">
             <summary><h2 class="convhead meta">{{ conv_head(b) }}</h2></summary>
         {% else %}
           <h2 class="convhead meta">{{ conv_head(b) }}</h2>
         {% endif %}
+        {{ conv_ex_strip(b) }}
         <ol class="lines">
           {% for s in b.segments %}
             {% set unattr = s.speaker_id is none %}
@@ -324,27 +424,70 @@
         if (go) location.href = go.href;
       });
 
-      // --- "needs review only" filter (persists across days via ?review=1) ----
+      // --- filters: needs-review (?review=1) + free text + person -------------
+      // All three combine; a row must pass every active filter to stay shown.
+      var segFilter = document.getElementById('seg-filter');
+      var segPerson = document.getElementById('seg-person');
+      var segClear = document.getElementById('seg-filter-clear');
+      var segCount = document.getElementById('seg-filter-count');
+
+      function rowMatches(r, q, person) {
+        if (q) {
+          // Match the spoken text + the speaker's name only — never the row's
+          // control labels ("Fix speaker…" would match everything).
+          var body = r.querySelector('.seg-text');
+          var spk = r.querySelector('.spk');
+          var txt = ((body ? body.textContent : '') + ' ' +
+                     (spk ? spk.textContent : '')).toLowerCase();
+          if (txt.indexOf(q) === -1) return false;
+        }
+        if (person) {
+          var cur = r.dataset.current || '';
+          if (person === 'none' ? cur !== '' : cur !== person) return false;
+        }
+        return true;
+      }
+
       function applyFilter() {
         var on = reviewOn();
+        var q = (segFilter && segFilter.value || '').trim().toLowerCase();
+        var person = segPerson ? segPerson.value : '';
+        var filtering = !!(q || person);
         var anyVisible = false;
+        var shown = 0, total = 0;
         document.querySelectorAll('.seg').forEach(function (r) {
-          var show = !on || r.classList.contains('needs-review');
+          total++;
+          var show = (!on || r.classList.contains('needs-review'))
+                     && rowMatches(r, q, person);
           r.hidden = !show;
-          if (show) anyVisible = true;
+          if (show) { anyVisible = true; shown++; }
         });
         document.querySelectorAll('section.conv').forEach(function (sec) {
-          sec.hidden = on && !sec.querySelector('.seg.needs-review');
+          sec.hidden = !sec.querySelector('.seg:not([hidden])');
         });
-        if (on) {
-          // On collapsed (heavy) days, open the conversations that need eyes.
+        if (on || filtering) {
+          // On collapsed (heavy) days, open the conversations that matter now.
           document.querySelectorAll('details.convd').forEach(function (d) {
-            if (d.querySelector('.seg.needs-review')) d.open = true;
+            if (d.querySelector('.seg:not([hidden])')) d.open = true;
           });
         }
+        if (segCount) {
+          segCount.textContent = (filtering || on) && shown !== total
+            ? shown + ' of ' + total + ' lines shown' : '';
+        }
+        if (segClear) segClear.hidden = !filtering;
         var done = document.getElementById('all-done');
-        if (done) done.hidden = !(on && !anyVisible);
+        if (done) done.hidden = !(on && !anyVisible && !filtering);
       }
+
+      if (segFilter) segFilter.addEventListener('input', applyFilter);
+      if (segPerson) segPerson.addEventListener('change', applyFilter);
+      if (segClear) segClear.addEventListener('click', function () {
+        if (segFilter) segFilter.value = '';
+        if (segPerson) segPerson.value = '';
+        applyFilter();
+        if (segFilter) segFilter.focus();
+      });
       function syncReviewLinks() {
         var on = reviewOn();
         try {
@@ -800,6 +943,50 @@
                    'success');
         }
       }
+
+      // --- conversation TOC: highlight the section being read (cheap) --------
+      var toc = document.getElementById('conv-toc');
+      if (toc && 'IntersectionObserver' in window) {
+        var tocLinks = {};
+        toc.querySelectorAll('a[data-conv]').forEach(function (a) {
+          tocLinks[a.getAttribute('data-conv')] = a;
+        });
+        var visibleConvs = new Set();
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            var idx = (en.target.id || '').replace('conv-', '');
+            if (en.isIntersecting) visibleConvs.add(idx); else visibleConvs.delete(idx);
+          });
+          var current = null;
+          visibleConvs.forEach(function (i) {
+            if (current === null || parseInt(i, 10) < parseInt(current, 10)) current = i;
+          });
+          Object.keys(tocLinks).forEach(function (i) {
+            if (i === current) tocLinks[i].setAttribute('aria-current', 'true');
+            else tocLinks[i].removeAttribute('aria-current');
+          });
+        }, { rootMargin: '-15% 0px -65% 0px' });
+        document.querySelectorAll('section.conv[id^="conv-"]').forEach(function (sec) {
+          io.observe(sec);
+        });
+      }
+
+      // --- per-conversation extraction strip: track an action item as a task --
+      document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest && e.target.closest('.convex .trackbtn');
+        if (!btn) return;
+        SB.api('/api/actions/' + btn.dataset.edge + '/promote', { method: 'POST', button: btn })
+          .then(function (d) {
+            var ok = document.createElement('span');
+            ok.className = 'tracked';
+            ok.textContent = '✓ tracked';
+            ok.title = 'Now in your task backlog';
+            btn.replaceWith(ok);
+            SB.toast(d && d.title ? 'Added to your backlog: “' + d.title + '”.'
+                                  : 'Added to your backlog.', 'success');
+          })
+          .catch(function () { /* SB.api already toasted */ });
+      });
 
       // --- today keeps growing: offer fresh lines without yanking the page ---
       // (Rendered only when viewing today.) Poll a cheap count-only endpoint and,

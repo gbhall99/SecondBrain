@@ -88,6 +88,13 @@
     #suggest-toggle[aria-expanded="true"] { color: var(--fg); }
     .suggest-list { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
     .suggest-list .try-q { font-size: .82rem; padding: .3rem .7rem; }
+    @media (max-width: 480px) {
+      .bubble-q { max-width: 100%; }
+      #ask-form { flex-wrap: wrap; }
+      #ask-form button { flex: 1 0 auto; min-height: 44px; }
+      .scope-row label { flex: 1 1 8rem; }
+      .try-q { min-height: 40px; }
+    }
 {% endblock %}
 {% block content %}
   <h1>Ask your second brain</h1>
@@ -109,6 +116,9 @@
       <div class="try-list">
         <button type="button" class="try-q">{{ try_first or 'What did I talk about today?' }}</button>
         <button type="button" class="try-q">What did I commit to doing?</button>
+        {% for name in recent_named %}
+          <button type="button" class="try-q">What did {{ name }} commit to?</button>
+        {% endfor %}
         <button type="button" class="try-q">Summarise my recent conversations</button>
       </div>
     {% else %}
@@ -158,6 +168,9 @@
     <div class="suggest-list" id="suggest-list" hidden>
       <button type="button" class="try-q">{{ try_first or 'What did I talk about today?' }}</button>
       <button type="button" class="try-q">What did I commit to doing?</button>
+      {% for name in recent_named %}
+        <button type="button" class="try-q">What did {{ name }} commit to?</button>
+      {% endfor %}
       <button type="button" class="try-q">Summarise my recent conversations</button>
     </div>
   </div>
@@ -171,7 +184,10 @@
       'use strict';
       const SERVER_TIMEOUT_S = {{ (llm_timeout_s or 120)|int }};
       const MODEL = {{ (llm_model or 'the local model')|tojson }};
-      const STORE_KEY = 'sb-ask-thread-v1';
+      // localStorage (was sessionStorage): a thread survives closing the tab.
+      const STORE_KEY = 'sb-ask-thread-v2';
+      const LEGACY_KEY = 'sb-ask-thread-v1';
+      const STORE_MAX_BYTES = 400 * 1024;   // cap: drop oldest turns beyond this
       // Keep in step with the server: it spells out the last PROSE_TURNS turns
       // in the prompt and harvests citation ids across HISTORY_TURNS (chat.py
       // _MAX_HISTORY_TURNS / api._clean_history).
@@ -234,8 +250,17 @@
       let turns = [];      // [{q, res, ms}] — successful turns only
       let inflight = null; // {controller, cancelled, timedOut, streaming}
 
-      try { turns = JSON.parse(sessionStorage.getItem(STORE_KEY) || '[]') || []; }
-      catch (e) { turns = []; }
+      try {
+        turns = JSON.parse(localStorage.getItem(STORE_KEY) || '[]') || [];
+        if ((!Array.isArray(turns) || !turns.length)) {
+          // One-time migration from the old per-tab storage.
+          const legacy = JSON.parse(sessionStorage.getItem(LEGACY_KEY) || '[]');
+          if (Array.isArray(legacy) && legacy.length) {
+            turns = legacy;
+            sessionStorage.removeItem(LEGACY_KEY);
+          }
+        }
+      } catch (e) { turns = []; }
       if (!Array.isArray(turns)) turns = [];
       // Shape-check restored turns: a malformed entry (format drift, tampering)
       // must not wedge rendering or the follow-up history sent to the server.
@@ -243,8 +268,18 @@
         t && typeof t.q === 'string' && t.res && typeof t.res.answer === 'string');
 
       function save() {
-        try { sessionStorage.setItem(STORE_KEY, JSON.stringify(turns.slice(-40))); }
-        catch (e) { /* private mode: history just won't survive reload */ }
+        try {
+          let keep = turns.slice(-40);
+          let raw = JSON.stringify(keep);
+          // Size cap: long grounded answers add up — drop oldest turns until
+          // the stored thread fits, so localStorage can't fill up silently.
+          while (keep.length > 1 && raw.length > STORE_MAX_BYTES) {
+            keep = keep.slice(1);
+            raw = JSON.stringify(keep);
+          }
+          localStorage.setItem(STORE_KEY, raw);
+        }
+        catch (e) { /* private mode / quota: history just won't survive reload */ }
       }
 
       function fmtWhen(iso) {
@@ -671,7 +706,43 @@
         announce('New conversation started.');
       });
 
+      // ---- keyboard: i refocuses the input, Cmd/Ctrl+Enter submits, Escape
+      //      aborts an in-flight answer (same as the Stop button) -------------
+      document.addEventListener('keydown', e => {
+        const t = e.target;
+        const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                             t.tagName === 'SELECT' || t.isContentEditable);
+        if (e.key === 'Escape' && inflight) {
+          e.preventDefault();
+          inflight.cancelled = true;
+          inflight.controller.abort();
+          return;
+        }
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          form.requestSubmit();
+          return;
+        }
+        if (e.key === 'i' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          input.focus();
+        }
+      });
+      SB.registerSearch(input);   // '/' (shared layer) also lands here
+
       renderAll();
+
+      // ---- ?q= deep link: prefill and ask once ------------------------------
+      (function initFromURL() {
+        let q = '';
+        try { q = (new URLSearchParams(location.search).get('q') || '').trim(); }
+        catch (e) { return; }
+        if (!q) return;
+        // Strip the param so a reload doesn't re-ask the same question.
+        try { history.replaceState(null, '', '/chat'); } catch (e) { /* keep URL */ }
+        input.value = q;
+        ask(q);
+      })();
     })();
   </script>
 {% endblock %}

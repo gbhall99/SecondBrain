@@ -230,7 +230,9 @@ def day_blocks(segments: list[dict], gap_minutes: int = 5) -> list[dict]:
 
     Segments sharing a conversation_id stay together; where conversation ids
     are missing (still transcribing / legacy rows) a silence longer than
-    ``gap_minutes`` starts a new block.
+    ``gap_minutes`` starts a new block. Each block carries ``participants``
+    (sorted display labels of everyone heard, mirroring the timeline view) —
+    additive; existing keys are unchanged.
     """
     blocks: list[dict] = []
     prev_ts: datetime | None = None
@@ -251,15 +253,89 @@ def day_blocks(segments: list[dict], gap_minutes: int = 5) -> list[dict]:
                 "conversation_id": conv,
                 "started_at": s.get("start_at"),
                 "ended_at": s.get("start_at"),
+                "participants": set(),
                 "segments": [],
             }
             blocks.append(block)
         if block["conversation_id"] is None:
             block["conversation_id"] = conv
         block["ended_at"] = s.get("start_at") or block["ended_at"]
+        if s.get("speaker_is_owner"):
+            block["participants"].add("Me")
+        else:
+            block["participants"].add(s.get("speaker") or "Unknown")
         block["segments"].append(s)
         prev_ts = ts or prev_ts
+    for b in blocks:
+        b["participants"] = sorted(b["participants"])
     return blocks
+
+
+def day_conv_extractions(conn: sqlite3.Connection, conv_ids: list[int]) -> dict[int, dict]:
+    """Decisions + action items extracted per conversation, for the day view's
+    per-conversation summary strip. conv_id → {"decisions": [...],
+    "action_items": [...]}; each item carries edge_id/object_text/due_date and,
+    for action items, the task it was promoted into (if any)."""
+    ids = sorted({int(c) for c in conv_ids if c is not None})
+    if not ids:
+        return {}
+    ph = ",".join("?" * len(ids))
+    out: dict[int, dict] = {}
+    for r in conn.execute(
+        f"""
+        SELECT e.id, e.conversation_id, e.kind, e.object_text, e.due_date, e.confidence,
+               e.source_segment_ids,
+               (SELECT MIN(t.id) FROM tasks t WHERE t.source_edge_id = e.id) AS task_id
+        FROM kg_edges e
+        WHERE e.valid = 1 AND e.kind IN ('decision', 'action_item')
+          AND e.conversation_id IN ({ph})
+        ORDER BY e.kind, COALESCE(e.confidence, 0) DESC, e.id
+        """,
+        ids,
+    ).fetchall():
+        item = {
+            "edge_id": r["id"],
+            "object_text": r["object_text"],
+            "due_date": r["due_date"],
+            "confidence": r["confidence"],
+            "task_id": r["task_id"],
+        }
+        try:
+            seg_ids = [int(x) for x in json.loads(r["source_segment_ids"] or "[]")]
+        except (TypeError, ValueError):
+            seg_ids = []
+        item["source_seg"] = seg_ids[0] if seg_ids else None
+        bucket = out.setdefault(
+            r["conversation_id"], {"decisions": [], "action_items": []}
+        )
+        bucket["decisions" if r["kind"] == "decision" else "action_items"].append(item)
+    return out
+
+
+def nav_badges(conn: sqlite3.Connection, settings: Settings | None = None) -> dict:
+    """Cheap counters for the shared nav: open brief items today, tasks due
+    today / overdue, and failed pipeline jobs. One small query set — the API
+    layer caches the result briefly so every page render isn't taxed."""
+    today = local_today()
+    digest = conn.execute(
+        "SELECT COUNT(*) AS n FROM suggestions WHERE digest_date=? AND status='open'",
+        (today,),
+    ).fetchone()["n"]
+    due = conn.execute(
+        "SELECT COALESCE(SUM(due_date = ?), 0) AS today, "
+        "COALESCE(SUM(due_date < ?), 0) AS overdue "
+        "FROM tasks WHERE status NOT IN ('done','dropped') AND due_date IS NOT NULL",
+        (today, today),
+    ).fetchone()
+    failed = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE state='failed'"
+    ).fetchone()["n"]
+    return {
+        "digest_count_today": int(digest),
+        "tasks_due_today": int(due["today"]),
+        "tasks_overdue": int(due["overdue"]),
+        "failed_jobs": int(failed),
+    }
 
 
 def segment_clip_info(conn: sqlite3.Connection, segment_id: int) -> dict | None:
@@ -395,6 +471,11 @@ def queue_overview(conn: sqlite3.Connection, failures: int = 10) -> dict:
 def reclaim_stale_jobs(conn: sqlite3.Connection, older_than_minutes: int = 30) -> int:
     """Re-queue jobs stuck in 'running' (e.g. a worker died mid-job)."""
     return q.reclaim_stale(conn, older_than_minutes)
+
+
+def requeue_failed_jobs(conn: sqlite3.Connection, job_type: str | None = None) -> int:
+    """Move dead-lettered jobs back to pending (optionally one type only)."""
+    return q.requeue_failed(conn, job_type)
 
 
 def corpus_stats(conn: sqlite3.Connection) -> dict:
@@ -771,18 +852,45 @@ def timeline(conn: sqlite3.Connection, day: str | None = None,
     # Batch-fetch the day's extracted knowledge for all conversations at once.
     conv_ids = [c for c in order if c is not None and not isinstance(c, tuple)]
     if conv_ids:
+        owner_node = _owner_node_id(conn)
         ph = ",".join("?" * len(conv_ids))
         for e in conn.execute(
-            f"SELECT conversation_id, kind, predicate, object_text, source_segment_ids "
+            f"SELECT id, conversation_id, kind, predicate, object_text, due_date, "
+            f"confidence, src_node_id, dst_node_id, source_segment_ids, "
+            f"(SELECT MIN(t.id) FROM tasks t WHERE t.source_edge_id = kg_edges.id) AS task_id "
             f"FROM kg_edges WHERE conversation_id IN ({ph}) AND valid=1 ORDER BY kind",
             conv_ids,
         ).fetchall():
+            # owed_direction mirrors list_action_items: whose commitment is it?
+            if owner_node is not None and e["src_node_id"] == owner_node:
+                direction = "owed_by_me"
+            elif owner_node is not None and e["dst_node_id"] == owner_node:
+                direction = "owed_to_me"
+            else:
+                direction = "other"
             blocks[e["conversation_id"]]["extractions"].setdefault(e["kind"], []).append({
+                "edge_id": e["id"],
                 "predicate": e["predicate"],
                 "object_text": e["object_text"],
+                "due_date": e["due_date"],
+                "confidence": e["confidence"],
+                "owed_direction": direction,
+                "task_id": e["task_id"],
                 "segment_ids": json.loads(e["source_segment_ids"] or "[]"),
             })
     for b in blocks.values():
+        # Topic line: the highest-confidence decision (else first action item)
+        # gives the conversation a scannable subject in list views. Additive.
+        ex = b["extractions"]
+        topic = None
+        decisions = [d for d in ex.get("decision", []) if d.get("object_text")]
+        if decisions:
+            topic = max(decisions, key=lambda d: d.get("confidence") or 0)["object_text"]
+        elif ex.get("action_item"):
+            topic = next(
+                (a["object_text"] for a in ex["action_item"] if a.get("object_text")), None
+            )
+        b["topic"] = topic
         b["participants"] = sorted(b["participants"])
         end_dt = b.pop("_end_dt")
         start_dt = _parse_utc_ts(b["started_at"])
@@ -1032,6 +1140,43 @@ def relationships(conn: sqlite3.Connection, settings: Settings | None = None) ->
     return out
 
 
+def counterparty_open_commitments(conn: sqlite3.Connection) -> dict[int, int]:
+    """speaker_id → count of open action-item edges involving that person.
+
+    One grouped query; powers the Relationships page's "Open commitments"
+    column. "Open" mirrors list_projects: an edge is closed once the task it
+    was promoted into is done/dropped (and no active task keeps it open).
+    """
+    from secondbrain.tasks.store import DONE_STATUSES
+
+    done_ph = ",".join("?" * len(DONE_STATUSES))
+    out: dict[int, int] = {}
+    for r in conn.execute(
+        f"""
+        SELECT n.speaker_id AS sid, COUNT(DISTINCT x.id) AS n
+        FROM (
+          SELECT src_node_id AS node, id FROM kg_edges
+          WHERE valid=1 AND kind='action_item'
+          UNION ALL
+          SELECT dst_node_id AS node, id FROM kg_edges
+          WHERE valid=1 AND kind='action_item' AND dst_node_id IS NOT NULL
+        ) x
+        JOIN kg_nodes n ON n.id = x.node AND n.type='person'
+             AND n.speaker_id IS NOT NULL AND n.merged_into IS NULL
+        WHERE NOT (
+          EXISTS (SELECT 1 FROM tasks t WHERE t.source_edge_id=x.id
+                  AND t.status IN ({done_ph}))
+          AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.source_edge_id=x.id
+                          AND t.status NOT IN ({done_ph}))
+        )
+        GROUP BY n.speaker_id
+        """,
+        (*DONE_STATUSES, *DONE_STATUSES),
+    ).fetchall():
+        out[int(r["sid"])] = int(r["n"])
+    return out
+
+
 def _edge_provenance(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     """A kg_edge row plus provenance for deep-linking (/day?date=…#seg-…).
 
@@ -1146,6 +1291,34 @@ def _person_conversations(conn: sqlite3.Connection, sid: int, limit: int = 10) -
             "ORDER BY ts.start_at, ts.id LIMIT 1",
             (r["conversation_id"], sid),
         ).fetchone()
+        # Meeting-prep extras (additive): everyone heard in the conversation,
+        # its whole span, and a topic line (top decision, else action item).
+        participants = sorted({
+            ("Me" if p["is_owner"] else (p["label"] or "Unknown"))
+            for p in conn.execute(
+                "SELECT DISTINCT COALESCE(sp.name, sp.display_label) AS label, "
+                "COALESCE(sp.is_owner, 0) AS is_owner "
+                "FROM transcript_segments ts "
+                "JOIN audio_files af ON af.id = ts.audio_file_id "
+                "LEFT JOIN speakers sp ON sp.id = ts.speaker_id "
+                "WHERE af.conversation_id = ?",
+                (r["conversation_id"],),
+            ).fetchall()
+        })
+        span = conn.execute(
+            "SELECT COALESCE(SUM(ts.end_offset_s - ts.start_offset_s), 0) AS talk "
+            "FROM transcript_segments ts "
+            "JOIN audio_files af ON af.id = ts.audio_file_id "
+            "WHERE af.conversation_id = ?",
+            (r["conversation_id"],),
+        ).fetchone()
+        topic_row = conn.execute(
+            "SELECT object_text FROM kg_edges "
+            "WHERE conversation_id = ? AND valid = 1 "
+            "AND kind IN ('decision', 'action_item') AND object_text IS NOT NULL "
+            "ORDER BY kind='decision' DESC, COALESCE(confidence, 0) DESC, id LIMIT 1",
+            (r["conversation_id"],),
+        ).fetchone()
         out.append({
             "conversation_id": r["conversation_id"],
             "segments": r["segments"],
@@ -1154,6 +1327,9 @@ def _person_conversations(conn: sqlite3.Connection, sid: int, limit: int = 10) -
             "talk_minutes": round((r["talk_seconds"] or 0) / 60.0, 1),
             "day": _local_day_of(r["first_at"]),
             "anchor_segment_id": first_seg["id"] if first_seg else None,
+            "participants": participants,
+            "duration_label": duration_label(span["talk"] or 0.0),
+            "topic": topic_row["object_text"] if topic_row else None,
         })
     return out
 
@@ -1682,6 +1858,81 @@ def project_dossier(
         # capped at `quotes`), so clients can show "the N most recent of M".
         "quotes_total": len(all_quotes),
     }
+
+
+def project_conversations(
+    conn: sqlite3.Connection, node_id: int, limit: int = 6
+) -> list[dict]:
+    """Recent conversations where a project came up, newest first.
+
+    Derived from edge provenance: every valid edge touching the node names its
+    conversation. Each entry carries the local ``day`` + an anchor segment for
+    /day deep links, participants heard, and a duration label. Capped.
+    """
+    nid = _resolve_node_id(conn, node_id)
+    if nid is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT e.conversation_id AS cid
+        FROM kg_edges e
+        WHERE e.valid=1 AND (e.src_node_id=? OR e.dst_node_id=?)
+          AND e.conversation_id IS NOT NULL
+        """,
+        (nid, nid),
+    ).fetchall()
+    cids = [r["cid"] for r in rows]
+    if not cids:
+        return []
+    ph = ",".join("?" * len(cids))
+    convs = conn.execute(
+        f"""
+        SELECT af.conversation_id AS cid,
+               MIN(ts.start_at) AS first_at,
+               COUNT(*) AS segments,
+               MIN(ts.id) AS anchor_segment_id,
+               COALESCE(SUM(ts.end_offset_s - ts.start_offset_s), 0) AS talk_seconds
+        FROM transcript_segments ts
+        JOIN audio_files af ON af.id = ts.audio_file_id
+        WHERE af.conversation_id IN ({ph})
+        GROUP BY af.conversation_id
+        ORDER BY MIN(ts.start_at) DESC
+        LIMIT ?
+        """,
+        (*cids, limit),
+    ).fetchall()
+    kept = [dict(r) for r in convs]
+    # Participants per kept conversation (batched, distinct display labels).
+    if kept:
+        kph = ",".join("?" * len(kept))
+        parts: dict[int, set] = {}
+        for r in conn.execute(
+            f"""
+            SELECT DISTINCT af.conversation_id AS cid,
+                   CASE WHEN sp.is_owner THEN 'Me'
+                        ELSE COALESCE(sp.name, sp.display_label) END AS label
+            FROM transcript_segments ts
+            JOIN audio_files af ON af.id = ts.audio_file_id
+            LEFT JOIN speakers sp ON sp.id = ts.speaker_id
+            WHERE af.conversation_id IN ({kph})
+            """,
+            [c["cid"] for c in kept],
+        ).fetchall():
+            parts.setdefault(r["cid"], set()).add(r["label"] or "Unknown")
+        for c in kept:
+            c["participants"] = sorted(parts.get(c["cid"], set()))
+    out = []
+    for c in kept:
+        out.append({
+            "conversation_id": c["cid"],
+            "day": _local_day_of(c["first_at"]),
+            "first_at": c["first_at"],
+            "segments": c["segments"],
+            "anchor_segment_id": c["anchor_segment_id"],
+            "duration_label": duration_label(c["talk_seconds"] or 0.0),
+            "participants": c.get("participants", []),
+        })
+    return out
 
 
 def name_speaker(conn: sqlite3.Connection, speaker_id: int, name: str,
@@ -2641,6 +2892,40 @@ def get_goal(conn, goal_id: int) -> dict | None:
     return store.get_goal(conn, goal_id)
 
 
+def goal_recent_conversations(conn, limit_per_goal: int = 3) -> dict[int, list[dict]]:
+    """goal_id → recent conversations where the goal's linked knowledge came up.
+
+    Follows goal_links: edge links name their conversation directly; node links
+    reach conversations through every valid edge touching the node. Newest
+    first, deduped, capped per goal. Each entry: {conversation_id, day}.
+    """
+    rows = conn.execute(
+        """
+        SELECT gl.goal_id, e.conversation_id AS cid,
+               MAX(c.started_at) AS started_at
+        FROM goal_links gl
+        JOIN kg_edges e
+          ON (gl.kind='edge' AND e.id = gl.ref_id)
+          OR (gl.kind='node' AND (e.src_node_id = gl.ref_id OR e.dst_node_id = gl.ref_id))
+        JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.valid = 1 AND e.conversation_id IS NOT NULL
+        GROUP BY gl.goal_id, e.conversation_id
+        ORDER BY MAX(c.started_at) DESC
+        """
+    ).fetchall()
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        lst = out.setdefault(int(r["goal_id"]), [])
+        if len(lst) >= limit_per_goal:
+            continue
+        lst.append({
+            "conversation_id": r["cid"],
+            "day": _local_day_of(r["started_at"]),
+            "started_at": r["started_at"],
+        })
+    return out
+
+
 def goal_status_counts(conn) -> dict:
     from secondbrain.goals import store
 
@@ -2748,6 +3033,71 @@ def list_suggestions(conn, date: str | None = None, status: str = "open") -> lis
     from secondbrain.proactive import store
 
     return store.list_suggestions(conn, date, status)
+
+
+def annotate_suggestion_people(conn, suggestions: list[dict]) -> list[dict]:
+    """Attach a ``person`` link ({speaker_id, label}) to suggestions that are
+    about someone: relationship items carry a speaker_id in their payload;
+    commitment items resolve their edge's counterparty node to a voice.
+    Additive, in place; items without a resolvable person are untouched."""
+    owner_node = _owner_node_id(conn)
+
+    def _payload(s: dict) -> dict:
+        p = s.get("payload")
+        if isinstance(p, str):
+            try:
+                p = json.loads(p or "{}")
+            except (TypeError, ValueError):
+                p = {}
+        return p if isinstance(p, dict) else {}
+
+    def _person(sid) -> dict | None:
+        row = conn.execute(
+            "SELECT id, name, display_label FROM speakers "
+            "WHERE id=? AND merged_into IS NULL AND opted_out=0",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"speaker_id": row["id"], "label": _speaker_label(row)}
+
+    for s in suggestions:
+        p = _payload(s)
+        sid = p.get("speaker_id")
+        if isinstance(sid, int):
+            person = _person(sid)
+            if person:
+                s["person"] = person
+            continue
+        edge = (p.get("key") or {}).get("edge") if isinstance(p.get("key"), dict) else None
+        if not isinstance(edge, int):
+            continue
+        e = conn.execute(
+            "SELECT src_node_id, dst_node_id FROM kg_edges WHERE id=?", (edge,)
+        ).fetchone()
+        if e is None:
+            continue
+        # Direction rides along so the brief can group "you owe" apart from
+        # "owed to you" (mirrors list_action_items).
+        if owner_node is not None and e["src_node_id"] == owner_node:
+            s["owed_direction"] = "owed_by_me"
+        elif owner_node is not None and e["dst_node_id"] == owner_node:
+            s["owed_direction"] = "owed_to_me"
+        # The counterparty is the endpoint that isn't the owner.
+        other = e["dst_node_id"] if e["src_node_id"] == owner_node else e["src_node_id"]
+        if other is None:
+            continue
+        n = conn.execute(
+            "SELECT speaker_id FROM kg_nodes WHERE id=? AND type='person' "
+            "AND speaker_id IS NOT NULL",
+            (other,),
+        ).fetchone()
+        if n is None:
+            continue
+        person = _person(n["speaker_id"])
+        if person:
+            s["person"] = person
+    return suggestions
 
 
 def suggestion_action(

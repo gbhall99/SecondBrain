@@ -383,6 +383,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     templates.context_processors.append(_session_context)
 
+    # Nav badge counters (brief items today, tasks due/overdue, failed jobs)
+    # for every template render. One cheap query set behind a short in-process
+    # TTL cache so page loads aren't taxed with extra queries each time
+    # (single-worker server, so a dict is safe).
+    _badges_cache: dict = {"value": None, "read_at": 0.0}
+    NAV_BADGES_TTL_S = 15.0
+
+    def _nav_badges_cached() -> dict:
+        now = time.monotonic()
+        if (
+            _badges_cache["value"] is None
+            or now - _badges_cache["read_at"] > NAV_BADGES_TTL_S
+        ):
+            with db_session(settings=settings) as conn:
+                _badges_cache["value"] = service.nav_badges(conn, settings)
+            _badges_cache["read_at"] = now
+        return _badges_cache["value"]
+
+    def _badges_context(request: Request) -> dict:
+        try:
+            return {"nav_badges": _nav_badges_cached()}
+        except Exception:  # noqa: BLE001 - badges must never break a page render
+            return {"nav_badges": {}}
+
+    templates.context_processors.append(_badges_context)
+
+    @app.get("/manifest.json", include_in_schema=False)
+    def manifest():
+        """PWA manifest so the app can be added to a phone's home screen.
+
+        Icons reuse the existing local favicon.svg (offline architecture: no
+        external assets)."""
+        return JSONResponse(
+            {
+                "name": "SecondBrain",
+                "short_name": "SecondBrain",
+                "start_url": "/",
+                "display": "standalone",
+                "background_color": "#161618",
+                "theme_color": "#161618",
+                "icons": [
+                    {
+                        "src": "/static/favicon.svg",
+                        "sizes": "any",
+                        "type": "image/svg+xml",
+                        "purpose": "any",
+                    }
+                ],
+            },
+            media_type="application/manifest+json",
+        )
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         # CSRF guard: applies even (especially) to auth-exempt loopback callers
@@ -423,10 +475,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _error_page(request: Request, status_code: int, detail: str | None):
         title, hint = _ERROR_PAGE_COPY.get(status_code, ("Something went wrong", None))
+        links = None
+        if status_code == 404:
+            # A dead link shouldn't be a dead end: offer today's transcript and
+            # the recent timeline (plus the search box error.html renders).
+            today = service.local_today()
+            links = [
+                {"href": f"/day?date={today}", "label": "Today’s transcript"},
+                {"href": "/timeline", "label": "Recent days (timeline)"},
+                {"href": "/brief", "label": "Brief"},
+            ]
         return templates.TemplateResponse(
             request,
             "error.html",
-            {"status_code": status_code, "title": title, "detail": detail, "hint": hint},
+            {
+                "status_code": status_code,
+                "title": title,
+                "detail": detail,
+                "hint": hint,
+                "links": links,
+            },
             status_code=status_code,
         )
 
@@ -600,6 +668,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
+        today = service.local_today()
         with db() as conn:
             st = service.status(conn, settings)
             stats = service.corpus_stats(conn)
@@ -609,8 +678,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s for s in service.list_speakers(conn)
                 if not s["opted_out"] and (s["segment_count"] or 0) > 0
             ]
+            # "Between meetings" block: the top open commitments you owe, the
+            # meetings recorded so far today, and today's brief lead — all
+            # server-rendered (no extra client fetch loops).
+            owed = [
+                a for a in service.list_action_items(conn)
+                if a["owed_direction"] == "owed_by_me"
+            ][:5]
+            for a in owed:
+                a.update(_due_info(a.get("due_date_norm") or a["due_date"], today))
+                # Provenance (day + anchor segment) + a person page for the
+                # counterparty, so each line links to its evidence.
+                prov = conn.execute(
+                    "SELECT source_segment_ids, conversation_id FROM kg_edges WHERE id=?",
+                    (a["id"],),
+                ).fetchone()
+                p = service._edge_provenance(conn, prov) if prov else {}
+                a["source_day"], a["source_seg"] = p.get("source_day"), p.get("source_seg")
+                a["counterparty_speaker_id"] = None
+                if a.get("counterparty") and a["counterparty"].get("node_id"):
+                    n = conn.execute(
+                        "SELECT speaker_id FROM kg_nodes WHERE id=?",
+                        (a["counterparty"]["node_id"],),
+                    ).fetchone()
+                    if n and n["speaker_id"]:
+                        a["counterparty_speaker_id"] = n["speaker_id"]
+            meetings = service.timeline(conn, today, settings)
+            digest = service.get_digest(conn, today, "daily")
+            badges = service.nav_badges(conn, settings)
+        brief_lead = None
+        if digest and digest.get("summary_md"):
+            # First non-heading paragraph of the brief, as a teaser.
+            for para in digest["summary_md"].split("\n\n"):
+                p = para.strip()
+                if p and not p.startswith("#"):
+                    brief_lead = p
+                    break
         return templates.TemplateResponse(
-            request, "index.html", {"status": st, "stats": stats, "speakers": speakers}
+            request,
+            "index.html",
+            {
+                "status": st,
+                "stats": stats,
+                "speakers": speakers,
+                "owed_top": owed,
+                "meetings_today": meetings,
+                "brief_lead": brief_lead,
+                "has_digest_today": bool(digest),
+                "today": today,
+                "tasks_overdue": badges["tasks_overdue"],
+                "tasks_due_today": badges["tasks_due_today"],
+            },
         )
 
     @app.get("/api/status")
@@ -1025,6 +1143,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Baseline for today's "N new lines" poll — same raw count the cheap
             # /api/day/{day}/count poll returns, so both compare like-for-like.
             raw_seg_count = service.day_segment_count(conn, day)
+            blocks = service.day_blocks(segments)
+            # Per-conversation extraction strip: decisions + action items with
+            # promote/track affordances, mirroring the timeline's block.
+            conv_extractions = service.day_conv_extractions(
+                conn, [b["conversation_id"] for b in blocks]
+            )
         low = settings.diarization.low_confidence_threshold
         # The owner's display name (usually "Me") lets the dispute affordance
         # phrase a wrongly-attributed owner line in the first person ("Not me…").
@@ -1040,7 +1164,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "prev_day": (d - timedelta(days=1)).strftime("%Y-%m-%d"),
                 "next_day": (d + timedelta(days=1)).strftime("%Y-%m-%d"),
                 "nav": nav,
-                "blocks": service.day_blocks(segments),
+                "blocks": blocks,
+                "conv_extractions": conv_extractions,
                 "segments": segments,
                 "speakers": speakers,
                 "owner_name": (owner["name"] or owner["display_label"] or "Me") if owner else "Me",
@@ -1143,6 +1268,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content_disposition_type="inline",
         )
 
+    @app.post("/api/jobs/retry-failed")
+    def api_retry_failed(type: str | None = Body(None, embed=True, max_length=80)):
+        """Re-queue dead-lettered pipeline jobs for a fresh run (full retry
+        budget restored). Optional ``type`` narrows it to one job type — the
+        health page's per-row Retry buttons use it; body-less calls retry all.
+        Wraps queue.requeue_failed."""
+        with db() as conn:
+            n = service.requeue_failed_jobs(conn, type or None)
+        return {"ok": True, "requeued": n}
+
     @app.post("/api/speakers/reattribute")
     def api_reattribute():
         with db() as conn:
@@ -1205,6 +1340,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def relationships_page(request: Request):
         with db() as conn:
             rel = service.relationships(conn, settings)
+            open_commits = service.counterparty_open_commitments(conn)
+        for r in rel:
+            r["open_commitments"] = open_commits.get(r["speaker_id"], 0)
         return templates.TemplateResponse(request, "relationships.html", {"relationships": rel})
 
     # --- project intelligence (Phase 9) --------------------------------------
@@ -1256,7 +1394,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # (The JSON route keeps returning the dossier directly — its
             # "node_id" field already reports the canonical id.)
             return RedirectResponse(f"/project/{d['node_id']}", status_code=307)
-        return templates.TemplateResponse(request, "project.html", {"d": d})
+        with db() as conn:
+            recent_convs = service.project_conversations(conn, d["node_id"])
+        return templates.TemplateResponse(
+            request, "project.html", {"d": d, "recent_conversations": recent_convs}
+        )
 
     # --- memory timeline (Phase 8C) ------------------------------------------
 
@@ -1288,10 +1430,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             day = parsed.strftime("%Y-%m-%d")  # normalized (zero-padded)
         d = _parse_day(day)
+        # Week view (?range=week): seven stacked mini strips ending on `day`,
+        # each linking to its day view; prev/next hop a whole week. The day
+        # view below is untouched.
+        if request.query_params.get("range") == "week":
+            week_days = []
+            with db() as conn:
+                for off in range(6, -1, -1):
+                    wd = d - timedelta(days=off)
+                    wday = wd.strftime("%Y-%m-%d")
+                    wblocks = service.timeline(conn, wday, settings)
+                    week_days.append({
+                        "day": wday,
+                        "label": f"{wd.strftime('%a')} {wd.day} {wd.strftime('%b')}",
+                        "is_today": wday == today,
+                        "blocks": wblocks,
+                        "strip": service.timeline_strip(wblocks, wday),
+                        "n_conversations": len(wblocks),
+                        "total_talk": service.duration_label(
+                            sum(b.get("duration_seconds") or 0.0 for b in wblocks)
+                        ) if wblocks else None,
+                    })
+            return templates.TemplateResponse(
+                request,
+                "timeline.html",
+                {
+                    "range_mode": "week",
+                    "day": day,
+                    "today": today,
+                    "is_today": day == today,
+                    "pretty_day": f"{d.strftime('%A')} {d.day} {d.strftime('%B %Y')}",
+                    "week_days": week_days,
+                    "week_start": week_days[0]["day"],
+                    "prev_week": (d - timedelta(days=7)).strftime("%Y-%m-%d"),
+                    "next_week": (d + timedelta(days=7)).strftime("%Y-%m-%d"),
+                    "invalid_date": invalid_date,
+                    "tz_label": datetime.now().astimezone().tzname() or "",
+                },
+            )
         with db() as conn:
             blocks = service.timeline(conn, day, settings)
             nav = service.day_nav(conn, day, settings)
             paused = state.is_paused(conn, default=settings.consent.paused)
+            # Baseline for the "N new lines" poll — same raw count the cheap
+            # /api/day/{day}/count endpoint returns, so both compare alike.
+            raw_seg_count = service.day_segment_count(conn, day)
         is_today = day == today
         now_pct = None
         if is_today:
@@ -1324,6 +1507,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "now_pct": now_pct,
                 "zoom_now_pct": zoom_now_pct,
                 "total_lines": sum(b.get("segment_count") or 0 for b in blocks),
+                "raw_seg_count": raw_seg_count,
                 "total_talk": service.duration_label(total_seconds),
                 "first_time": blocks[0].get("start_time") if blocks else "",
                 "last_time": last_block.get("end_time") if last_block else "",
@@ -1355,12 +1539,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s for s in service.list_speakers(conn)
                 if not s["opted_out"] and (s["segment_count"] or 0) > 0
             ]
+            # Context-aware canned prompts: the two most recently heard named
+            # people make "What did X commit to?" a one-tap question.
+            recent_named = [
+                s["name"]
+                for s in sorted(
+                    (s for s in speakers if not s["is_owner"] and s["name"]),
+                    key=lambda s: s["last_seen_at"] or "",
+                    reverse=True,
+                )
+            ][:2]
         return templates.TemplateResponse(
             request,
             "chat.html",
             {
                 "seg_count": seg_count["n"] if seg_count else 0,
                 "try_first": try_first,
+                "recent_named": recent_named,
                 "speakers": speakers,
                 "llm_model": settings.llm.model,
                 # The client aborts a little after the server would give up, so
@@ -1755,7 +1950,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 day = today
             digest = service.get_digest(conn, day, kind)
-            all_open = service.list_suggestions(conn, day)
+            all_open = service.annotate_suggestion_people(
+                conn, service.list_suggestions(conn, day)
+            )
             cite_meta = {c["segment_id"]: c for c in _suggestion_citation_meta(conn, all_open)}
             for c in (digest or {}).get("citations", []):
                 cite_meta[c["segment_id"]] = c
@@ -1850,7 +2047,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if date is not None and _parse_day(date) is None:
             raise HTTPException(422, "date must be a real YYYY-MM-DD date")
         with db() as conn:
-            suggestions = service.list_suggestions(conn, date, status)
+            suggestions = service.annotate_suggestion_people(
+                conn, service.list_suggestions(conn, date, status)
+            )
             citations = _suggestion_citation_meta(conn, suggestions)
         more: list = []
         if status == "open":
@@ -1907,12 +2106,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with db() as conn:
             goals = service.list_goals(conn, status_f)
             counts = service.goal_status_counts(conn)
+            discussed = service.goal_recent_conversations(conn)
+        soon = (
+            (datetime.strptime(today, "%Y-%m-%d") + timedelta(days=14)).strftime("%Y-%m-%d")
+        )
         for g in goals:  # display-only annotations
             g["overdue"] = bool(
                 g["target_date"] and g["status"] == "active" and g["target_date"] < today
             )
             g["target_label"] = "today" if g["target_date"] == today else _fmt_day(g["target_date"])
             g["progress_label"] = _rel_ago(g["last_progress_at"])
+            # Cards render as <details>: active goals due soon (or overdue)
+            # start open, everything else starts collapsed.
+            g["open_default"] = bool(
+                g["status"] == "active" and g["target_date"] and g["target_date"] <= soon
+            )
+            g["discussed"] = discussed.get(g["id"], [])
         return templates.TemplateResponse(
             request,
             "goals.html",
@@ -2077,11 +2286,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if t["status"] in ("done", "dropped") and t["id"] not in plan_ids
         ]
         completed.sort(key=lambda t: t["completed_at"] or t["updated_at"] or "", reverse=True)
-        for a in actions:
-            a["detected_label"] = _rel_ago(a["first_seen"])
-            # Overdue/labels prefer the ISO date normalized at extraction time
-            # ("March 3" → 2026-03-03); the raw spoken string stays displayed.
-            a.update(_due_info(a.get("due_date_norm") or a["due_date"], today))
+        with db() as conn:
+            for a in actions:
+                a["detected_label"] = _rel_ago(a["first_seen"])
+                # Overdue/labels prefer the ISO date normalized at extraction
+                # time ("March 3" → 2026-03-03); the raw string stays displayed.
+                a.update(_due_info(a.get("due_date_norm") or a["due_date"], today))
+                # Provenance (day + anchor segment) + counterparty person link.
+                prov = conn.execute(
+                    "SELECT source_segment_ids, conversation_id FROM kg_edges WHERE id=?",
+                    (a["id"],),
+                ).fetchone()
+                p = service._edge_provenance(conn, prov) if prov else {}
+                a["source_day"], a["source_seg"] = p.get("source_day"), p.get("source_seg")
+                a["counterparty_speaker_id"] = None
+                if a.get("counterparty") and a["counterparty"].get("node_id"):
+                    n = conn.execute(
+                        "SELECT speaker_id FROM kg_nodes WHERE id=?",
+                        (a["counterparty"]["node_id"],),
+                    ).fetchone()
+                    if n and n["speaker_id"]:
+                        a["counterparty_speaker_id"] = n["speaker_id"]
         # Commitments surface with direction: what you owe vs what you're owed.
         actions_owed_by = [a for a in actions if a["owed_direction"] == "owed_by_me"]
         actions_owed_to = [a for a in actions if a["owed_direction"] == "owed_to_me"]

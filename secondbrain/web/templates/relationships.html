@@ -31,6 +31,14 @@
                   color: var(--warn); letter-spacing: .02em; }
     td.often { font-size: .88rem; }
     .foot { margin-top: .55rem; }
+    /* Seven columns need room; inside .table-wrap this scrolls instead of
+       squishing at phone widths (same guard as the Projects table). */
+    #rel-table { min-width: 42rem; }
+    .ask-stale { font-size: .8rem; white-space: nowrap; }
+    @media (max-width: 480px) {
+      .controls input[type="search"] { max-width: none; flex-basis: 100%; }
+      #rel-count { margin-left: 0; }
+    }
 {% endblock %}
 {% block content %}
   <h1>Relationships</h1>
@@ -71,6 +79,9 @@
         <th scope="col" class="h-num"><button type="button" class="sortbtn"
             data-key="minutes" data-type="num" title="Sort by talk time">
             <abbr title="Minutes they spoke, all time">Talk min</abbr></button></th>
+        <th scope="col" class="h-num"><button type="button" class="sortbtn"
+            data-key="commitments" data-type="num" title="Sort by open commitments">
+            <abbr title="Open action items involving them (heard in conversation, not yet done)">Open commitments</abbr></button></th>
         <th scope="col"><button type="button" class="sortbtn" data-key="seen"
             data-type="date" title="Sort by last seen">Last seen</button></th>
         <th scope="col">Often with</th>
@@ -90,6 +101,12 @@
         <td class="num" data-v="{{ r.conversations }}">{{ r.conversations }}</td>
         <td class="num" data-v="{{ r.conversations_30d }}">{{ r.conversations_30d }}</td>
         <td class="num" data-v="{{ r.talk_minutes }}">{{ r.talk_minutes }}</td>
+        <td class="num" data-v="{{ r.open_commitments or 0 }}">
+          {%- if r.open_commitments -%}
+            <a href="/person/{{ r.speaker_id }}#commitments"
+               title="Open {{ r.label }}’s commitments">{{ r.open_commitments }}</a>
+          {%- else %}<span class="meta">0</span>{% endif -%}
+        </td>
         {% set stale = r.days_since_seen is not none and r.days_since_seen > 30 %}
         <td class="num" data-v="{{ r.last_seen or '' }}">
           {%- if r.last_seen -%}
@@ -98,7 +115,9 @@
             <span class="meta">—</span>
           {%- endif -%}
           {%- if stale %} <span class="stale-pill"
-              title="No interaction in over 30 days">stale</span>{% endif %}
+              title="No interaction in over 30 days">stale</span>
+            <a class="ask-stale" href="/chat?q={{ ('What did ' ~ r.label ~ ' and I last discuss?') | urlencode }}"
+               title="Ask, grounded in your conversations">ask what we last discussed</a>{% endif %}
         </td>
         <td class="often">
           {%- if r.often_with -%}
@@ -169,7 +188,21 @@
         if (wrap) wrap.hidden = shown === 0;
       }
 
-      if (filter) filter.addEventListener('input', apply);
+      function syncFilterURL() {
+        try {
+          var u = new URL(location.href);
+          var q = (filter && filter.value || '').trim();
+          if (q) u.searchParams.set('f', q); else u.searchParams.delete('f');
+          history.replaceState(null, '', u);
+        } catch (e) { /* keep the current URL */ }
+      }
+      if (filter) {
+        filter.addEventListener('input', function () { apply(); syncFilterURL(); });
+        try {
+          var f0 = new URLSearchParams(location.search).get('f');
+          if (f0) filter.value = f0;
+        } catch (e) { /* defaults */ }
+      }
       if (hideUn) {
         try { hideUn.checked = localStorage.getItem(HIDE_KEY) === '1'; } catch (e) { /* private mode */ }
         hideUn.addEventListener('change', function () {
@@ -190,39 +223,9 @@
       }
       apply(); // applies the remembered "hide unnamed" preference
 
-      // --- column sorting (server order = recency-weighted rank) ------------
-      var current = { key: null, dir: 0 };
-
-      function cellValue(tr, idx, type) {
-        var td = tr.cells[idx];
-        var v = td ? td.getAttribute('data-v') : null;
-        if (v === null) v = td ? td.textContent : '';
-        if (type === 'num') { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
-        return v.trim().toLowerCase();
-      }
-
-      table.tHead.addEventListener('click', function (e) {
-        var btn = e.target.closest && e.target.closest('.sortbtn');
-        if (!btn) return;
-        var th = btn.closest('th');
-        var idx = th.cellIndex;
-        var type = btn.getAttribute('data-type');
-        var key = btn.getAttribute('data-key');
-        // Names sort A→Z first; counts and dates sort biggest/newest first.
-        var dir = (current.key === key) ? -current.dir : (type === 'text' ? 1 : -1);
-        current = { key: key, dir: dir };
-        rows.sort(function (a, b) {
-          var av = cellValue(a, idx, type), bv = cellValue(b, idx, type);
-          if (av < bv) return -dir;
-          if (av > bv) return dir;
-          return 0;
-        });
-        rows.forEach(function (tr) { tbody.appendChild(tr); });
-        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (h) {
-          h.removeAttribute('aria-sort');
-        });
-        th.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
-      });
+      // Column sorting (shared helper; the current sort survives reloads via
+      // the ?sort= URL param). Server order = recency-weighted rank.
+      SB.sortableTable(table, { urlKey: 'sort' });
     })();
   </script>
   {% endif %}

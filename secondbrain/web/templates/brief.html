@@ -61,6 +61,17 @@
                 flex-wrap: wrap; }
     #more-row { margin: .6rem 0 .2rem; }
     #handled-row { margin: 1.1rem 0 .4rem; }
+    .sug-section { margin: 1rem 0 .15rem; font-size: .82rem; text-transform: uppercase;
+                   letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+    .person-chip { font-size: .78rem; padding: .1rem .55rem; }
+    @media (max-width: 480px) {
+      .title-row { align-items: stretch; }
+      .title-row button { flex: 1 0 auto; }
+      .controls { gap: .5rem; }
+      .date-nav { margin-left: 0; }
+      .acts button { min-height: 44px; }
+      .acts .snooze-group button { min-height: 2.2rem; }
+    }
 {% endblock %}
 {% block content %}
   {% set kind_labels = {'commitment_owed': 'You promised', 'commitment_overdue': 'Overdue',
@@ -453,11 +464,18 @@
           'aria-label="Snooze every ‘' + kl + '’ item for 7 days" ' +
           'title="Hide ALL ‘' + kl + '’ items for 7 days">snooze all ' + kl + '</button>';
       }
+      function personChip(s) {
+        if (!s.person || !s.person.speaker_id) return '';
+        return '<a class="pill person-chip" href="/person/' + s.person.speaker_id +
+          '" title="Open ' + SB.esc(s.person.label) + '’s page">' +
+          SB.esc(s.person.label) + '</a>';
+      }
       function itemHtml(s) {
         const kl = kindLabel(s.kind);
         const cites = parseCites(s.citations).map(citeChip).filter(Boolean).join(' ');
         return '<div class="sug-head"><span class="k">' + SB.esc(kl) + '</span>' +
-          priorityDots(s.importance) + '<strong>' + SB.esc(s.title) + '</strong></div>' +
+          priorityDots(s.importance) + '<strong>' + SB.esc(s.title) + '</strong>' +
+          personChip(s) + '</div>' +
           ((s.detail || cites) ? '<div class="meta sug-detail">' + SB.esc(s.detail || '') +
             (cites ? ' ' + cites : '') + '</div>' : '') +
           '<div class="acts">' +
@@ -502,6 +520,20 @@
           : 'Show ' + hiddenCount + ' more item' + (hiddenCount === 1 ? '' : 's');
         els.moreToggle.setAttribute('aria-expanded', String(moreOpen));
       }
+      // Fixed section order, most actionable first; items keep their
+      // importance rank within each section.
+      const SECTION_ORDER = ['Commitments you owe', 'Owed to you', 'Tasks & plan',
+                            'Goals', 'Insights', 'Coaching'];
+      function sectionOf(s) {
+        const k = String(s.kind || '');
+        if (k.indexOf('commitment') === 0) {
+          return s.owed_direction === 'owed_to_me' ? 'Owed to you' : 'Commitments you owe';
+        }
+        if (k === 'tasks_due' || k === 'plan_carryover') return 'Tasks & plan';
+        if (k === 'goal_at_risk' || k === 'goal_alignment' || k === 'stale_goal') return 'Goals';
+        if (k === 'coaching') return 'Coaching';
+        return 'Insights';
+      }
       function renderItems() {
         updateCount();
         els.items.textContent = '';
@@ -520,16 +552,29 @@
           renderMoreRow(0);
           return;
         }
-        const ul = document.createElement('ul');
-        ul.className = 'sug-list';
+        const bySection = {};
         visible.forEach(s => {
-          const li = document.createElement('li');
-          li.className = 'sug';
-          li.id = 'sug-' + s.id;
-          li.innerHTML = itemHtml(s);
-          ul.appendChild(li);
+          const sec = sectionOf(s);
+          (bySection[sec] = bySection[sec] || []).push(s);
         });
-        els.items.appendChild(ul);
+        SECTION_ORDER.forEach(sec => {
+          const rows = bySection[sec];
+          if (!rows || !rows.length) return;
+          const h = document.createElement('h3');
+          h.className = 'sug-section';
+          h.textContent = sec;
+          els.items.appendChild(h);
+          const ul = document.createElement('ul');
+          ul.className = 'sug-list';
+          rows.forEach(s => {
+            const li = document.createElement('li');
+            li.className = 'sug';
+            li.id = 'sug-' + s.id;
+            li.innerHTML = itemHtml(s);
+            ul.appendChild(li);
+          });
+          els.items.appendChild(ul);
+        });
         renderMoreRow(hiddenCount);
       }
       els.moreToggle.addEventListener('click', () => {
@@ -916,6 +961,35 @@
         poll();
       }
       els.regenBtn.addEventListener('click', regen);
+
+      // ---- keyboard triage (j/k move, d/x/s/u act) + ←/→ date nav ---------------
+      function clickAct(li, act) {
+        const btn = li.querySelector('button[data-act="' + act + '"]');
+        if (btn && !btn.disabled) btn.click();
+      }
+      SB.listNav({
+        items: () => document.querySelectorAll('#items li.sug'),
+        keys: {
+          d: li => clickAct(li, 'done'),
+          x: li => clickAct(li, 'dismiss'),
+          s: li => {           // open the snooze duration picker
+            const b = li.querySelector('.snooze-group button[data-act="snooze"]');
+            if (b) b.focus();
+          },
+          u: li => {           // undo the just-taken action on this row
+            const b = li.querySelector('[data-undo]');
+            if (b) b.click();
+          },
+        },
+      });
+      document.addEventListener('keydown', e => {
+        if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                  t.tagName === 'SELECT' || t.isContentEditable)) return;
+        if (e.key === 'ArrowLeft' && !els.prevBtn.disabled) els.prevBtn.click();
+        else if (e.key === 'ArrowRight' && !els.nextBtn.disabled) els.nextBtn.click();
+      });
 
       // ---- first paint ----------------------------------------------------------
       renderHeader();

@@ -26,13 +26,26 @@
                                      padding: .3rem .4rem; margin-left: -.4rem; border-radius: 6px; }
     details.ignored-wrap > summary:hover { color: var(--fg); background: var(--soft); }
     details.ignored-wrap[open] > summary { color: var(--fg); }
+    @media (max-width: 480px) {
+      .name-form button, .rowactions button { min-height: 44px; }
+      .name-form .btn-primary { flex: 1 0 auto; }
+      .stats { gap: .6rem 1.2rem; }
+    }
 {% endblock %}
 {% block content %}
-  <h1>People</h1>
+  <h1>Voices</h1>
   <p class="meta">Label the voices SecondBrain hears so conversations are pinned to the right people.
     {% if speakers %}{{ speakers|length }} voice profile{{ '' if speakers|length == 1 else 's' }}
       · {{ unknowns|length }} awaiting a name{% if ignored %}
-      · {{ ignored|length }} ignored{% endif %}{% endif %}</p>
+      · {{ ignored|length }} ignored{% endif %}{% endif %}
+    · <a href="/day?review=1">Review uncertain lines →</a></p>
+
+  <div class="row" style="margin:.4rem 0 .6rem">
+    <label class="visually-hidden" for="voice-filter">Filter voices by name</label>
+    <input type="search" id="voice-filter" class="name-input" placeholder="Filter voices…"
+           autocomplete="off" />
+    <span class="meta" id="voice-filter-count" aria-live="polite"></span>
+  </div>
 
   {% if undo_merge %}
     {% set un = undo_merge.relabeled %}
@@ -644,6 +657,27 @@
         var form = e.target && e.target.closest && e.target.closest('.rename-form');
         if (form && !form.hidden) toggleRename(form.closest('.card'), false);
       });
+
+      // --- filter voices by name --------------------------------------------
+      var vf = document.getElementById('voice-filter');
+      var vfCount = document.getElementById('voice-filter-count');
+      if (vf) {
+        var voiceCards = Array.prototype.slice.call(
+          document.querySelectorAll('.card[data-label]'));
+        vf.addEventListener('input', function () {
+          var q = vf.value.trim().toLowerCase();
+          var shown = 0;
+          voiceCards.forEach(function (c) {
+            var ok = !q || (c.getAttribute('data-label') || '').toLowerCase().indexOf(q) !== -1;
+            c.hidden = !ok;
+            if (ok) shown++;
+          });
+          if (vfCount) {
+            vfCount.textContent = q ? shown + ' of ' + voiceCards.length + ' voices' : '';
+          }
+        });
+        SB.registerSearch(vf);
+      }
     })();
   </script>
 {% endblock %}

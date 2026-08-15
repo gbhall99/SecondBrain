@@ -1,9 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} · SecondBrain{% endblock %}
+{% block style %}
+    .err-search { display: flex; gap: .5rem; margin: 1rem 0 .4rem; max-width: 28rem; }
+    .err-search input { flex: 1; min-width: 0; }
+{% endblock %}
 {% block content %}
   <h1>{{ title }}</h1>
   <p class="meta">HTTP {{ status_code }}{% if detail %} — {{ detail }}{% endif %}</p>
   {% if hint %}<p>{{ hint }}</p>{% endif %}
+  <form class="err-search" action="/" method="get" role="search">
+    <label class="visually-hidden" for="err-q">Search transcripts</label>
+    <input type="search" id="err-q" name="q" placeholder="Search what was said…"
+           autocomplete="off" />
+    <button type="submit" class="btn-primary">Search</button>
+  </form>
   {% if links %}
     <p>{% for l in links %}<a class="pill" href="{{ l.href }}">{{ l.label }}</a> {% endfor %}</p>
   {% endif %}

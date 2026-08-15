@@ -49,6 +49,22 @@
     .sem-note { margin: .8rem 0 0; }
     .dec-old { color: var(--warn); border: 1px solid var(--line); border-radius: 999px;
                padding: .05rem .5rem; font-size: .78rem; white-space: nowrap; }
+    .hit-conv { white-space: nowrap; }
+
+    /* "Between meetings" block: what to act on in a five-minute gap. */
+    .bm { border: 1px solid var(--line); border-radius: 12px; padding: .8rem 1rem 1rem;
+          margin: 1.1rem 0; }
+    .bm h2 { margin: 0 0 .2rem; font-size: 1.02rem; }
+    .bm h3 { margin: .8rem 0 .25rem; font-size: .85rem; text-transform: uppercase;
+             letter-spacing: .04em; color: var(--muted); }
+    .bm ul { list-style: none; margin: 0; padding: 0; }
+    .bm li { padding: .3rem 0; border-bottom: 1px solid var(--line);
+             overflow-wrap: anywhere; }
+    .bm li:last-child { border-bottom: 0; }
+    .bm .due-overdue { color: var(--danger); font-weight: 600; }
+    .bm .due-today { color: var(--warn); font-weight: 600; }
+    .bm .bm-brief { margin: .35rem 0 0; }
+    .stat-due-overdue { color: var(--danger); font-weight: 600; }
 {% endblock %}
 {% block content %}
   <h1>SecondBrain</h1>
@@ -106,6 +122,46 @@
        title="System checks and pipeline job history">System health</a>
   </section>
 
+  {# "Between meetings": the five-minute-gap view — what you owe, what today's
+     meetings were, and the brief's lead. Fully server-rendered. #}
+  {% if owed_top or meetings_today or brief_lead %}
+  <section class="bm" aria-labelledby="bm-h">
+    <h2 id="bm-h">Between meetings</h2>
+    {% if owed_top %}
+      <h3>Top commitments you owe</h3>
+      <ul>
+        {% for a in owed_top %}
+          <li>{{ a.object_text or '(unspecified)' }}
+            {%- if a.due_label %} · <span class="{{ 'due-overdue' if a.overdue else ('due-today' if a.due_today) }}">{{ a.due_label }}</span>{% endif %}
+            {%- if a.counterparty and a.counterparty.name %} · <span class="meta">to
+              {% if a.counterparty_speaker_id %}<a href="/person/{{ a.counterparty_speaker_id }}">{{ a.counterparty.name }}</a>{% else %}{{ a.counterparty.name }}{% endif %}</span>{% endif %}
+            <span class="meta">
+              {%- if a.source_day %}<a href="/day?date={{ a.source_day }}{% if a.source_seg %}#seg-{{ a.source_seg }}{% endif %}"
+                 title="Open the conversation this was heard in">source</a> · {% endif -%}
+              <a href="/tasks#actions-h">track</a></span></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if meetings_today %}
+      <h3>Today's meetings so far</h3>
+      <ul>
+        {% for m in meetings_today %}
+          <li><a href="/day?date={{ today }}{% if m.segments %}#seg-{{ m.segments[0].id }}{% endif %}"
+                 title="Open this conversation in the day view"><span class="num">{{ m.start_time or '—' }}</span></a>
+            · {{ m.duration_label }} · <span class="meta">{{ m.participants | join(', ') }}</span>
+            {%- if m.topic %} · <span class="meta">“{{ m.topic }}”</span>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if brief_lead %}
+      <h3>Today's brief</h3>
+      <p class="bm-brief">{{ brief_lead }} <a href="/brief">Read brief →</a></p>
+    {% elif has_digest_today %}
+      <p class="bm-brief meta"><a href="/brief">Read today's brief →</a></p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {# Both branches are always in the DOM (hidden toggled) so the 30s poll can
      keep the corpus counts truthful in a long-open tab — including the very
      first empty → captured transition. #}
@@ -113,10 +169,13 @@
   <div class="stats" id="stats-row" {% if not has_stats %}hidden{% endif %}>
     <a class="pill" id="stat-conversations" href="/timeline">{{ stats.conversations }} conversation{{ '' if stats.conversations == 1 else 's' }}</a>
     <a class="pill" id="stat-speakers" href="/speakers">{{ stats.speakers }} {{ 'person' if stats.speakers == 1 else 'people' }}</a>
-    <a class="pill" id="stat-graph" href="/graph">{{ stats.kg_nodes }} entities · {{ stats.kg_edges }} facts</a>
     <a class="pill" id="stat-projects" href="/projects">{{ stats.projects }} project{{ '' if stats.projects == 1 else 's' }}</a>
     <a class="pill" id="stat-goals" href="/goals">{{ stats.goals_active }} active goal{{ '' if stats.goals_active == 1 else 's' }}</a>
     <a class="pill" id="stat-tasks" href="/tasks">{{ stats.tasks_open }} open task{{ '' if stats.tasks_open == 1 else 's' }}</a>
+    <a class="pill" id="stat-due" href="/tasks"
+       title="Open tasks with a due date that has arrived"
+       {% if not (tasks_overdue or tasks_due_today) %}hidden{% endif %}
+      ><span class="stat-due-overdue">{{ tasks_overdue }} overdue</span> · {{ tasks_due_today }} due today</a>
     <a class="pill" id="pill-brief" href="/brief" {% if not status.digest_count_today %}hidden{% endif %}
       >{{ status.digest_count_today }} brief item{{ '' if status.digest_count_today == 1 else 's' }}</a>
   </div>
@@ -133,7 +192,7 @@
   <form class="search" role="search" aria-labelledby="search-h" onsubmit="doSearch(event)">
     <div class="bar">
       <label class="visually-hidden" for="q">Search transcripts</label>
-      <input type="search" id="q" placeholder="Search what was said…" autofocus
+      <input type="search" id="q" placeholder="Search what was said…"
              autocomplete="off" />
       <button type="submit" class="btn-primary">Search</button>
     </div>
@@ -278,7 +337,6 @@
       $('stats-empty').hidden = has;
       $('stat-conversations').textContent = plural(s.conversations, 'conversation');
       $('stat-speakers').textContent = s.speakers + (s.speakers === 1 ? ' person' : ' people');
-      $('stat-graph').textContent = s.kg_nodes + ' entities · ' + s.kg_edges + ' facts';
       $('stat-projects').textContent = plural(s.projects, 'project');
       $('stat-goals').textContent = s.goals_active + ' active goal' + (s.goals_active === 1 ? '' : 's');
       $('stat-tasks').textContent = s.tasks_open + ' open task' + (s.tasks_open === 1 ? '' : 's');
@@ -409,7 +467,9 @@
              '<p class="meta hit-line"><a href="/day?date=' + encodeURIComponent(day) +
              '#seg-' + h.segment_id + '" title="Open this moment in the day view"' +
              ' aria-label="Open in day view' + (full ? ' — ' + SB.esc(full) : '') + '">' +
-             when + '</a>' + rel + '</p></li>';
+             when + '</a> · <a class="hit-conv" href="/timeline/' + encodeURIComponent(day) +
+             '" title="Open this day’s conversations in the timeline">→ conversation</a>' +
+             rel + '</p></li>';
     }
 
     // The Decisions & commitments scope renders extracted knowledge, not
@@ -659,15 +719,9 @@
       });
     });
 
-    document.addEventListener('keydown', function (e) {
-      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
-      var t = e.target;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
-                t.tagName === 'SELECT' || t.isContentEditable)) return;
-      e.preventDefault();
-      $('q').focus();
-      $('q').select();
-    });
+    // '/' is handled by the shared keyboard layer (app.js) — this page's
+    // search box is the registered primary target.
+    SB.registerSearch('#q');
 
     // Restore a bookmarked / shared search from the URL
     // (?q=…&mode=…&speaker=…&since=…&until=…).
@@ -697,7 +751,15 @@
       if (filtersActive(p)) $('filters').open = true;
       syncFiltersSummary();
       var q = (u.get('q') || '').trim();
-      if (q) { $('q').value = q; runSearch(); }
+      if (q) {
+        $('q').value = q;
+        runSearch();
+        // Focus the box only for an explicit search deep-link, and never on
+        // touch devices (the keyboard popping up would cover the results).
+        try {
+          if (window.matchMedia('(hover: hover)').matches) $('q').focus();
+        } catch (e) { /* no autofocus */ }
+      }
     })();
   </script>
 {% endblock %}
