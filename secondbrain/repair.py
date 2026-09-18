@@ -17,6 +17,7 @@ from pathlib import Path
 from secondbrain.config import REPO_ROOT, Settings, get_settings
 from secondbrain.pipeline import queue as q
 from secondbrain.storage import schema
+from secondbrain.storage.db import DB_ERRORS
 
 
 @dataclass
@@ -58,7 +59,7 @@ def _schema(conn: sqlite3.Connection) -> RepairAction:
     try:
         row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
         ver = row["version_num"] if row else None
-    except sqlite3.Error:
+    except DB_ERRORS:
         ver = None
     if ver == schema.SCHEMA_VERSION:
         return RepairAction("schema", False, f"at head ({ver})")
@@ -150,14 +151,14 @@ def _wal(conn: sqlite3.Connection) -> RepairAction:
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return RepairAction("wal", False, "checkpointed")
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return RepairAction("wal", False, str(exc))
 
 
 def _integrity(conn: sqlite3.Connection, settings: Settings | None = None) -> RepairAction:
     try:
         res = conn.execute("PRAGMA quick_check").fetchone()[0]
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return RepairAction("integrity", False, str(exc), ok=False)
     if res == "ok":
         return RepairAction("integrity", False, "ok")

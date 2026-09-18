@@ -13,7 +13,7 @@ import struct
 import threading
 
 from secondbrain.config import Settings, get_settings
-from secondbrain.storage.db import try_load_sqlite_vec
+from secondbrain.storage.db import OPERATIONAL_ERRORS, try_load_sqlite_vec
 from secondbrain.storage.models import SearchHit
 
 log = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ def index_status(conn: sqlite3.Connection, settings: Settings | None = None) -> 
             indexed = conn.execute(
                 "SELECT COUNT(*) AS n FROM segment_vectors"
             ).fetchone()["n"]
-        except sqlite3.OperationalError:
+        except OPERATIONAL_ERRORS:
             indexed = 0  # vec table not created yet
     stored = state.get_state(conn, INDEX_MODEL_KEY)
     configured = settings.search.embedding_model

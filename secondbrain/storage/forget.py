@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from secondbrain.config import Settings, get_settings
-from secondbrain.storage.db import transaction
+from secondbrain.storage.db import OPERATIONAL_ERRORS, transaction
 
 
 def _local_day_utc_bounds(day: str) -> tuple[str, str]:
@@ -42,7 +42,7 @@ def _delete_segment_vectors(conn: sqlite3.Connection, seg_ids: list[int]) -> Non
     if not seg_ids:
         return
     placeholders = ",".join("?" * len(seg_ids))
-    with contextlib.suppress(sqlite3.OperationalError):
+    with contextlib.suppress(*OPERATIONAL_ERRORS):
         conn.execute(
             f"DELETE FROM segment_vectors WHERE segment_id IN ({placeholders})", seg_ids
         )

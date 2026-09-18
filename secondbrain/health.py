@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from secondbrain.config import Settings, get_settings
 from secondbrain.storage import retention, state
+from secondbrain.storage.db import DB_ERRORS
 from secondbrain.storage.schema import SCHEMA_VERSION
 
 # Heartbeat staleness tiers (daemon loops write one heartbeat per iteration).
@@ -53,7 +54,7 @@ def _migration(conn: sqlite3.Connection) -> Check:
         ver = row["version_num"] if row else None
         return Check("migrations", ver == SCHEMA_VERSION, f"{ver} (head {SCHEMA_VERSION})",
                      hint=hint)
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("migrations", False, str(exc), hint=hint)
 
 
@@ -71,7 +72,7 @@ def _counts(conn: sqlite3.Connection) -> Check:
         n = conn.execute("SELECT COUNT(*) AS n FROM transcript_segments").fetchone()["n"]
         spk = conn.execute("SELECT COUNT(*) AS n FROM speakers").fetchone()["n"]
         return Check("database", True, f"{n} segments, {spk} speakers")
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("database", False, str(exc))
 
 
@@ -141,7 +142,7 @@ def _backups(conn: sqlite3.Connection, settings: Settings) -> Check:
             has_old_content = conn.execute(
                 "SELECT 1 FROM transcripts WHERE created_at <= ? LIMIT 1", (cutoff,)
             ).fetchone() is not None
-        except sqlite3.Error:
+        except DB_ERRORS:
             has_old_content = False
         if has_old_content:
             return Check(
@@ -220,7 +221,7 @@ def _input_device_alarm(conn: sqlite3.Connection) -> Check:
     """Surface the recorder's refusing-to-record alarm (configured mic missing)."""
     try:
         alarm = state.get_state(conn, "alarm:input_device")
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("input_device", False, str(exc))
     if alarm:
         return Check("input_device", False, alarm,
@@ -307,7 +308,7 @@ def _mic_signal(conn: sqlite3.Connection) -> Check:
             "ORDER BY id DESC LIMIT ?",
             (DEAD_MIC_CHUNKS,),
         ).fetchall()
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("mic_signal", False, str(exc), severity="warn")
     if len(rows) < DEAD_MIC_CHUNKS:
         return Check("mic_signal", True, "not enough chunks yet")
@@ -327,7 +328,7 @@ def _failed_jobs(conn: sqlite3.Connection) -> Check:
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE state='failed'"
         ).fetchone()["n"]
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("failed_jobs", False, str(exc), severity="warn")
     if n:
         return Check("failed_jobs", False,
@@ -345,7 +346,7 @@ def _queue_backlog(conn: sqlite3.Connection) -> Check:
             "SELECT COUNT(*) AS n, MIN(scheduled_at) AS oldest FROM jobs "
             "WHERE state='pending'"
         ).fetchone()
-    except sqlite3.Error as exc:
+    except DB_ERRORS as exc:
         return Check("queue", False, str(exc), severity="warn")
     n = row["n"]
     oldest_s = 0
