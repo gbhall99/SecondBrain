@@ -33,6 +33,13 @@ jobs:
           sleep 5
           ollama pull llama3.2:1b || true
 
+      # The PR CI (Linux) only installs [dev], so the real optional drivers
+      # (SQLCipher via [secure], sqlite-vec via [ml]) are never exercised there:
+      # the tests that need them skip. Run the regular suite here with everything
+      # installed so those code paths get real coverage nightly.
+      - name: Regular suite with real optional drivers installed
+        run: pytest -m "not slow"
+
       - name: Slow real-backend tests
         env:
           SB_SLOW: "1"

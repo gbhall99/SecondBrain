@@ -17,7 +17,7 @@ import struct
 from dataclasses import dataclass
 
 from secondbrain.config import Settings, get_settings
-from secondbrain.storage.db import transaction
+from secondbrain.storage.db import OPERATIONAL_ERRORS, transaction
 
 REDACTED_TEXT = "[redacted: opted-out speaker]"
 
@@ -335,7 +335,7 @@ def redact_segment(conn: sqlite3.Connection, segment_id: int) -> None:
         "UPDATE transcript_segments SET text=? WHERE id=?", (REDACTED_TEXT, segment_id)
     )
     # Best-effort purge of any semantic vector (table may not exist).
-    with contextlib.suppress(sqlite3.OperationalError):
+    with contextlib.suppress(*OPERATIONAL_ERRORS):
         conn.execute("DELETE FROM segment_vectors WHERE segment_id=?", (segment_id,))
 
 

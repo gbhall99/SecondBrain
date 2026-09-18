@@ -54,7 +54,11 @@ mac = [
     "rumps>=0.4.0; platform_system == 'Darwin'",
 ]
 secure = [
-    "sqlcipher3-binary>=0.5",  # SQLCipher driver for at-rest DB encryption
+    # SQLCipher driver for at-rest DB encryption. `sqlcipher3` >=0.6.2 ships
+    # self-contained wheels (SQLCipher statically linked) for macOS arm64/x86_64,
+    # Linux and Windows. Its sibling `sqlcipher3-binary` is Linux-x86_64-only and
+    # made `pip install ".[secure]"` fail on Apple Silicon.
+    "sqlcipher3>=0.6.2",
 ]
 dev = [
     "pytest>=8.0",

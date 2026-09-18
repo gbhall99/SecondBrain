@@ -13,26 +13,12 @@ from secondbrain.storage.schema import apply_base_schema
 DbPath = Path | str | None
 
 
-def sqlcipher_available() -> bool:
-    """True if a SQLCipher Python driver is importable (the `secure` extra)."""
-    try:
-        import sqlcipher3  # type: ignore  # noqa: F401
+def _sqlcipher_dbapi():
+    """Return the SQLCipher DB-API module if a driver is installed, else None.
 
-        return True
-    except ImportError:
-        try:
-            import pysqlcipher3.dbapi2  # type: ignore  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
-
-
-def _sqlite_module(settings: Settings):
-    """Return the DBAPI module to use: SQLCipher when encryption is enabled,
-    else the stdlib sqlite3 (the CI/default path)."""
-    if not settings.security.encrypt_db:
-        return sqlite3
+    Prefers ``sqlcipher3`` (the ``[secure]`` extra); falls back to the older
+    ``pysqlcipher3`` for environments that already have it.
+    """
     try:
         import sqlcipher3.dbapi2 as mod  # type: ignore
 
@@ -42,11 +28,51 @@ def _sqlite_module(settings: Settings):
             import pysqlcipher3.dbapi2 as mod  # type: ignore
 
             return mod
-        except ImportError as exc:
-            raise RuntimeError(
-                "security.encrypt_db is true but no SQLCipher driver is installed. "
-                "Install with: pip install -e '.[secure]'"
-            ) from exc
+        except ImportError:
+            return None
+
+
+def sqlcipher_available() -> bool:
+    """True if a SQLCipher Python driver is importable (the `secure` extra)."""
+    return _sqlcipher_dbapi() is not None
+
+
+def _sqlite_module(settings: Settings):
+    """Return the DBAPI module to use: SQLCipher when encryption is enabled,
+    else the stdlib sqlite3 (the CI/default path)."""
+    if not settings.security.encrypt_db:
+        return sqlite3
+    mod = _sqlcipher_dbapi()
+    if mod is None:
+        raise RuntimeError(
+            "security.encrypt_db is true but no SQLCipher driver is installed. "
+            "Install with: pip install -e '.[secure]'"
+        )
+    return mod
+
+
+def _driver_errors(name: str) -> tuple[type[Exception], ...]:
+    """Exception classes named ``name`` across every driver we may open a
+    connection with. The SQLCipher drivers define their own DB-API exception
+    hierarchy that does NOT subclass the stdlib ``sqlite3`` one, so code that
+    catches database errors must catch both or it silently stops working the
+    moment ``security.encrypt_db`` is turned on."""
+    classes: list[type[Exception]] = [getattr(sqlite3, name)]
+    mod = _sqlcipher_dbapi()
+    if mod is not None:
+        classes.append(getattr(mod, name))
+    return tuple(classes)
+
+
+#: ``except DB_ERRORS:`` — any database error, from whichever driver opened the connection.
+DB_ERRORS = _driver_errors("Error")
+#: ``except OPERATIONAL_ERRORS:`` — e.g. a missing table/extension, from whichever driver.
+OPERATIONAL_ERRORS = _driver_errors("OperationalError")
+
+
+def _sql_string_literal(value: str) -> str:
+    """Escape ``value`` for embedding inside a single-quoted SQL string literal."""
+    return value.replace("'", "''")
 
 
 def connect(db_path: DbPath = None, *, settings: Settings | None = None) -> sqlite3.Connection:
@@ -61,15 +87,22 @@ def connect(db_path: DbPath = None, *, settings: Settings | None = None) -> sqli
         path.parent.mkdir(parents=True, exist_ok=True)
     module = _sqlite_module(settings)
     conn = module.connect(str(path), isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    # The driver's own Row class: stdlib sqlite3.Row rejects a SQLCipher cursor.
+    conn.row_factory = module.Row
     if settings.security.encrypt_db:
         passphrase = settings.security.db_passphrase
         if not passphrase:
             raise RuntimeError("security.encrypt_db is true but security.db_passphrase is empty")
         try:
-            conn.execute("PRAGMA key = ?", (passphrase,))
-        except Exception:  # noqa: BLE001 - never surface the passphrase in a traceback
-            raise RuntimeError("SQLCipher key setup failed (check db_passphrase)") from None
+            # SQLite PRAGMAs cannot take bound parameters (``PRAGMA key = ?`` is a
+            # syntax error), so the passphrase must be inlined as a SQL string
+            # literal. Doubling single quotes is the complete escaping rule for
+            # SQL string literals, so any passphrase is safe here.
+            conn.execute(f"PRAGMA key = '{_sql_string_literal(passphrase)}'")
+        except Exception as exc:  # noqa: BLE001 - never surface the passphrase in a traceback
+            raise RuntimeError(
+                f"SQLCipher key setup failed ({type(exc).__name__}; check db_passphrase)"
+            ) from None
         # At-rest hygiene: v4 page format (encrypts the WAL too) + scrub freed pages.
         conn.execute("PRAGMA cipher_compatibility = 4")
         conn.execute("PRAGMA secure_delete = ON")
@@ -136,6 +169,6 @@ def try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         return True
-    except (AttributeError, sqlite3.OperationalError):
+    except (AttributeError, *OPERATIONAL_ERRORS):
         # enable_load_extension may be compiled out of the bundled sqlite3.
         return False
